@@ -44,6 +44,19 @@ frontend/.env
 frontend/.env.local
 frontend/.env.*.local
 
+# ==========================================================================
+# 桌面客户端（Electron）
+# ==========================================================================
+desktop/node_modules/
+desktop/out/
+desktop/release/
+desktop/dist/
+desktop/.vite/
+
+# 打包产物与本地调试用的用户数据，均不应提交
+desktop/*.dmg
+desktop/*.AppImage
+
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*

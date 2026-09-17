@@ -1,0 +1,59 @@
+# electron-builder 打包配置。
+# 只打包构建产物 out/，源码与开发依赖都不会进入安装包。
+
+appId: com.contentworkbench.desktop
+productName: 内容创作工作台客户端
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# 只包含构建产物，node_modules 中真正需要的依赖由 electron-builder 自动裁决
+files:
+  - out/**/*
+  - package.json
+
+# 关闭 asar 会让源码以明文散落在安装包里，保持开启
+asar: true
+
+# 应用不需要请求任何系统权限，这里显式声明以避免被系统反复弹窗询问
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  # 未配置签名证书时跳过签名，本地打包仍然可用；
+  # 正式分发前需要配置开发者证书与公证，否则用户首次打开会被 Gatekeeper 拦截
+  identity: null
+  hardenedRuntime: true
+  gatekeeperAssess: false
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: 内容创作工作台客户端
+
+linux:
+  target:
+    - AppImage
+  category: Office

@@ -6,12 +6,13 @@
 - ContentListData：分页列表数据。
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.content import Content, ContentStatus
+from app.schemas.common import TimestampMixin
 
 # 单个标签的最大长度
 MAX_TAG_LENGTH = 30
@@ -117,7 +118,7 @@ class ContentUpdate(BaseModel):
         return _normalize_tags(value) if value is not None else value
 
 
-class ContentResponse(BaseModel):
+class ContentResponse(TimestampMixin):
     """内容详情响应。"""
 
     id: int = Field(description="主键")
@@ -129,15 +130,6 @@ class ContentResponse(BaseModel):
     author: str = Field(description="作者")
     created_at: datetime = Field(description="创建时间")
     updated_at: datetime = Field(description="更新时间")
-
-    @field_serializer("created_at", "updated_at")
-    def _serialize_datetime(self, value: datetime) -> str:
-        """输出带 Z 后缀的 ISO8601 UTC 时间。
-
-        数据库存的是 naive UTC，直接输出会让浏览器按本地时区解析导致时间偏移，
-        这里显式补上 UTC 标识，前端 new Date() 即可得到正确结果。
-        """
-        return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
     @classmethod
     def from_model(cls, model: Content) -> "ContentResponse":

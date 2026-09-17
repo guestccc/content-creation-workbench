@@ -9,13 +9,14 @@
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import DatabaseError, NotFoundError
+from app.core.exceptions import ConflictError, DatabaseError, NotFoundError
 from app.core.logging import get_logger
 from app.db.session import transaction
 from app.models.content import Content, ContentStatus
+from app.models.publish_task import PublishTask, PublishTaskStatus
 from app.schemas.content import ContentCreate, ContentUpdate
 
 logger = get_logger(__name__)
@@ -190,8 +191,12 @@ class ContentService:
     def delete_content(self, content_id: int) -> None:
         """删除内容。
 
+        存在未完成的发布任务时拒绝删除：这类任务正排队等待客户端执行，
+        一旦内容被删，任务执行时会拿不到正文，只能失败。
+
         Raises:
             NotFoundError: 内容不存在。
+            ConflictError: 内容仍被未完成的发布任务引用。
             DatabaseError: 写库失败（事务已回滚）。
         """
         try:
@@ -199,11 +204,33 @@ class ContentService:
                 content = self.db.get(Content, content_id)
                 if content is None:
                     raise NotFoundError(f"内容不存在：id={content_id}")
+
+                unfinished = self.db.execute(
+                    select(func.count())
+                    .select_from(PublishTask)
+                    .where(
+                        PublishTask.content_id == content_id,
+                        PublishTask.status.in_(
+                            (PublishTaskStatus.PENDING, PublishTaskStatus.RUNNING)
+                        ),
+                    )
+                ).scalar_one()
+
+                if unfinished:
+                    raise ConflictError(
+                        f"该内容还有 {unfinished} 个未完成的发布任务，请先取消或等待完成后再删除"
+                    )
+
                 self.db.delete(content)
 
             logger.info("内容删除成功 | id=%s", content_id)
-        except NotFoundError:
+        except (NotFoundError, ConflictError):
+            # 业务异常直接向上传递，无需包装
             raise
+        except IntegrityError as exc:
+            # 存在历史任务引用时外键约束会拦截
+            logger.warning("内容删除被外键约束拒绝 | id=%s", content_id)
+            raise ConflictError("该内容存在关联的发布任务记录，无法删除") from exc
         except SQLAlchemyError as exc:
             logger.exception("内容删除失败 | id=%s", content_id)
             raise DatabaseError("内容删除失败") from exc

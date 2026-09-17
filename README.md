@@ -2,6 +2,14 @@
 
 面向内容创作者的选题、创作与发布管理工作台。采用前后端分离的单仓库（monorepo）结构。
 
+包含三个子项目：
+
+| 子项目 | 定位 |
+| --- | --- |
+| `backend/` | 业务后端：内容管理、账号登记、发布任务排队 |
+| `frontend/` | Web 工作台：内容创作与任务管理界面 |
+| `desktop/` | 桌面客户端：**代理发布**，在本地持有凭证并执行发布动作 |
+
 ## 技术栈
 
 | 模块 | 技术选型 | 说明 |
@@ -9,8 +17,9 @@
 | 后端 | FastAPI + SQLAlchemy 2.0 + Pydantic v2 | 自带 OpenAPI 交互式文档 |
 | 数据库 | SQLite（默认） | 通过 `DATABASE_URL` 可切换 PostgreSQL 等 |
 | 前端 | React 18 + TypeScript + Vite 5 | 单页应用，开发环境自动代理接口 |
+| 桌面客户端 | Electron + electron-vite + React 18 | 主进程持有凭证并执行发布，渲染进程无 Node 权限 |
 | 后端包管理 | [uv](https://docs.astral.sh/uv/) | 依赖锁定与虚拟环境管理 |
-| 前端包管理 | npm | |
+| 前端 / 客户端包管理 | npm | |
 
 ## 目录结构
 
@@ -31,7 +40,7 @@
 │   ├── pyproject.toml        # 依赖与工具配置
 │   └── README.md
 │
-├── frontend/                 # 前端应用（React / TypeScript）
+├── frontend/                 # Web 工作台（React / TypeScript）
 │   ├── src/
 │   │   ├── api/              # 接口封装（统一错误处理）
 │   │   ├── components/       # 通用组件
@@ -42,8 +51,41 @@
 │   ├── vite.config.ts        # 构建与开发代理配置
 │   └── README.md
 │
+├── desktop/                  # 桌面客户端（Electron / React）
+│   ├── src/
+│   │   ├── main/             # 主进程：窗口、IPC、调度器、凭证存储
+│   │   │   ├── ipc/          # IPC 处理器
+│   │   │   ├── publishers/   # 平台发布器适配器
+│   │   │   └── services/     # 配置、接口客户端、凭证、调度器
+│   │   ├── preload/          # contextBridge 桥接
+│   │   ├── renderer/         # 渲染进程（React 界面）
+│   │   └── shared/           # 三端共用的类型与常量
+│   ├── electron.vite.config.ts
+│   └── README.md
+│
 └── README.md                 # 本文件
 ```
+
+## 代理发布是怎么工作的
+
+发布动作不在服务端执行，而是由桌面客户端在本机完成：
+
+```
+Web 工作台创建内容
+        │
+        ▼
+后端：把内容 × 账号 拆成发布任务，状态置为「排队中」
+        │
+        ▼  客户端定时认领
+客户端：任务转为「发布中」，解密本机凭证 → 调用平台适配器发布
+        │
+        ▼  回报结果
+后端：成功则归档并记录链接；失败且未超重试上限则退回队列
+```
+
+这样设计的原因：平台登录凭证必须留在用户自己的机器上。
+后端只保存账号元信息（平台、昵称、状态），**从不接触任何凭证**；
+凭证由客户端用系统加密（macOS 钥匙串）保存，界面只展示脱敏预览。
 
 ## 快速开始
 
@@ -95,6 +137,22 @@ npm run dev
 开发环境下，前端的 `/api` 请求会由 Vite 自动代理到 `http://127.0.0.1:8000`，
 因此**无需额外配置跨域**，两边各自启动即可联调。
 
+### 3. 启动桌面客户端（可选）
+
+只有需要执行代理发布时才需要启动，后端与 Web 工作台可以先独立使用。
+
+```bash
+cd desktop
+
+# 安装依赖
+npm install
+
+# 启动客户端
+npm run dev
+```
+
+首次启动后到「设置」页点一次「保存并测试连接」，确认能连上后端。
+
 ## 运行测试
 
 ```bash
@@ -103,6 +161,13 @@ uv run pytest
 ```
 
 测试使用独立的内存数据库，不会触碰开发环境的数据文件。
+
+客户端的自检（验证预加载桥、凭证加解密、配置读写）：
+
+```bash
+cd desktop
+npm run build && SMOKE_TEST=1 npx electron . --user-data-dir=/tmp/cw-smoke
+```
 
 ## 接口一览
 
@@ -128,7 +193,35 @@ uv run pytest
 | GET | `/api/v1/contents/statistics` | 内容统计（总量与各状态分布） |
 | GET | `/api/v1/contents/{id}` | 获取内容详情 |
 | PUT | `/api/v1/contents/{id}` | 更新内容（仅更新传入的字段） |
-| DELETE | `/api/v1/contents/{id}` | 删除内容 |
+| DELETE | `/api/v1/contents/{id}` | 删除内容（被未完成任务引用时拒绝） |
+| GET | `/api/v1/accounts` | 查询账号列表，支持平台、状态、关键字过滤 |
+| POST | `/api/v1/accounts` | 创建账号（**不含凭证字段**） |
+| GET | `/api/v1/accounts/{id}` | 获取账号详情 |
+| PUT | `/api/v1/accounts/{id}` | 更新账号 |
+| DELETE | `/api/v1/accounts/{id}` | 删除账号（存在任务记录时拒绝） |
+| GET | `/api/v1/publish-tasks` | 分页查询发布任务 |
+| POST | `/api/v1/publish-tasks` | 创建单个发布任务 |
+| POST | `/api/v1/publish-tasks/batch` | 批量创建（一条内容分发到多个账号） |
+| GET | `/api/v1/publish-tasks/statistics` | 发布任务统计 |
+| GET | `/api/v1/publish-tasks/{id}` | 获取任务详情 |
+| DELETE | `/api/v1/publish-tasks/{id}` | 删除任务（仅限已结束的任务） |
+| POST | `/api/v1/publish-tasks/claim` | **客户端**认领待执行任务 |
+| POST | `/api/v1/publish-tasks/{id}/report` | **客户端**上报发布结果 |
+| POST | `/api/v1/publish-tasks/{id}/cancel` | 取消任务 |
+| POST | `/api/v1/publish-tasks/{id}/retry` | 失败 / 已取消的任务重新入队 |
+
+### 发布任务状态流转
+
+```
+pending ──认领──> running ──成功──> success
+   │                 │
+   │                 └──失败──> 未超重试上限 → 退回 pending
+   │                           超过上限     → failed
+   │
+   └──取消──> cancelled        failed / cancelled ──重试──> pending
+```
+
+终态任务不再自动流转，只能通过 `retry` 显式重置回队列。
 
 ### 错误码约定
 
@@ -152,4 +245,5 @@ uv run pytest
 - 接入 Alembic 管理数据库迁移（当前开发阶段用 `create_all` 建表）
 - 增加用户体系与权限控制
 - 接入大模型能力，实现 AI 辅助选题与文案生成
-- 增加内容发布状态流转与定时发布
+- 在 `desktop/src/main/publishers/` 中接入真实平台适配器（抖音、小红书等），替换当前的模拟发布器
+- 为桌面客户端配置代码签名与公证，分发安装包

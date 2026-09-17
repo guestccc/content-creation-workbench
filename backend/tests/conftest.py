@@ -6,7 +6,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -25,6 +25,18 @@ test_engine = create_engine(
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
+
+@event.listens_for(test_engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+    """SQLite 默认不校验外键，这里手动打开。
+
+    必须与 app/db/session.py 保持一致，否则「外键约束保护删除」这类
+    依赖数据库约束的用例在测试里会静默失效。
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
 
 TestingSessionLocal = sessionmaker(
     bind=test_engine,
@@ -84,3 +96,49 @@ def created_content(client, sample_content_payload) -> dict:
     response = client.post("/api/v1/contents", json=sample_content_payload)
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+@pytest.fixture()
+def sample_account_payload() -> dict:
+    """一份标准的账号创建请求体，供各用例复用。"""
+    return {
+        "platform": "抖音",
+        "nickname": "小明的好物分享",
+        "account_uid": "dy_10086",
+        "status": "active",
+        "remark": "主账号",
+    }
+
+
+@pytest.fixture()
+def created_account(client, sample_account_payload) -> dict:
+    """预先创建一个账号，返回接口响应中的 data 部分。"""
+    response = client.post("/api/v1/accounts", json=sample_account_payload)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+@pytest.fixture()
+def create_account(client):
+    """返回一个「创建账号」的工厂函数，便于一次用例中建多个账号。"""
+
+    def _create(platform: str = "抖音", nickname: str = "测试账号", **extra) -> dict:
+        payload = {"platform": platform, "nickname": nickname, **extra}
+        response = client.post("/api/v1/accounts", json=payload)
+        assert response.status_code == 201, response.text
+        return response.json()["data"]
+
+    return _create
+
+
+@pytest.fixture()
+def create_task(client):
+    """返回一个「创建发布任务」的工厂函数。"""
+
+    def _create(content_id: int, account_id: int, **extra) -> dict:
+        payload = {"content_id": content_id, "account_id": account_id, **extra}
+        response = client.post("/api/v1/publish-tasks", json=payload)
+        assert response.status_code == 201, response.text
+        return response.json()["data"]
+
+    return _create
