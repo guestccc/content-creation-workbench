@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# vct — 视频内容制作工具箱的命令行入口
+#
+# 用法：
+#     ./vct                      打开交互式菜单
+#     ./vct extract-desub 视频.mp4
+#     ./vct doctor
+#
+# 这个脚本只做一件事：找到合适的 Python 解释器，把控制权交给 vctl 包。
+# vct 本身只用标准库，所以随便哪个 Python 3.10+ 都能跑；
+# 真正干活的 VideoCaptioner 和 video-subtitle-remover 各自用自己独立的虚拟环境，
+# 互不干扰（见 vctl/env.py）。
+
+set -euo pipefail
+
+# 脚本所在目录 = 工具箱根目录
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------------------------------------------------------------------------
+# 找到 Python 3.10+
+# ---------------------------------------------------------------------------
+
+find_python() {
+    # 1) 用户显式指定优先
+    if [[ -n "${VCT_PYTHON:-}" ]]; then
+        if [[ -x "${VCT_PYTHON}" ]]; then
+            echo "${VCT_PYTHON}"
+            return 0
+        fi
+        echo "错误：VCT_PYTHON 指向的解释器不存在或没有执行权限：${VCT_PYTHON}" >&2
+        return 1
+    fi
+
+    # 2) 依次尝试 PATH 和常见 Homebrew 位置
+    local candidates=(
+        "$(command -v python3 2>/dev/null || true)"
+        /opt/homebrew/bin/python3
+        /usr/local/bin/python3
+        /usr/bin/python3
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        [[ -n "${candidate}" && -x "${candidate}" ]] || continue
+        # 检查版本是否 >= 3.10，别把太老的 Python 当成能用的
+        if "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 10) else 1)' 2>/dev/null; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+PYTHON="$(find_python)" || {
+    cat >&2 <<'EOF'
+
+找不到 Python 3.10 或更高版本。
+
+vct 本身需要 Python 3.10+ 才能运行。macOS 上可以这样安装：
+
+    brew install python@3.12
+
+装好后重新运行本命令。也可以用 VCT_PYTHON 环境变量指定已有解释器：
+
+    export VCT_PYTHON=/你的/python3
+
+EOF
+    exit 4
+}
+
+# ---------------------------------------------------------------------------
+# 交给 vctl
+# ---------------------------------------------------------------------------
+
+# 把工具箱根目录放进 PYTHONPATH，这样在任何目录下都能 import vctl
+export PYTHONPATH="${HERE}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# 关掉 Python 写 .pyc，免得工具箱目录里散落一堆 __pycache__
+export PYTHONDONTWRITEBYTECODE=1
+
+# 强制行缓冲。默认只有输出接在终端上时才逐行刷；一旦重定向到文件或管道，
+# Python 会攒够 8KB 才写一次 —— 切割几十个片段要跑好几分钟，这段时间里
+# 日志文件是空的，看着跟卡死一样。子进程那边 runner.py 已经这么做了，这里补上自己。
+export PYTHONUNBUFFERED=1
+
+exec "${PYTHON}" -m vctl "$@"

@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.services.account_service import AccountService
 from app.services.content_service import ContentService
 from app.services.publish_task_service import PublishTaskService
+from app.services.scene_job_service import SceneJobService
 
 # 数据库会话依赖
 DbSession = Annotated[Session, Depends(get_db)]
@@ -54,7 +55,20 @@ def get_publish_task_service(db: DbSession) -> PublishTaskService:
     return PublishTaskService(db)
 
 
+def get_scene_job_service(db: DbSession) -> SceneJobService:
+    """构造镜头分割任务服务实例。
+
+    Args:
+        db: 由 FastAPI 注入的数据库会话。
+
+    Returns:
+        绑定当前请求会话的 SceneJobService。
+    """
+    return SceneJobService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 PublishTaskServiceDep = Annotated[PublishTaskService, Depends(get_publish_task_service)]
+SceneJobServiceDep = Annotated[SceneJobService, Depends(get_scene_job_service)]

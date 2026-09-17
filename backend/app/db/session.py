@@ -43,10 +43,21 @@ SessionLocal = sessionmaker(
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
-    """SQLite 默认不校验外键，这里显式打开以保证数据一致性。"""
+    """SQLite 连接级设置。
+
+    - foreign_keys=ON：SQLite 默认不校验外键，显式打开保证一致性；
+    - journal_mode=WAL：镜头分割的工作线程写进度、请求线程同时读写任务，
+      默认 rollback-journal 模式下会偶发 database is locked；WAL 允许读写并发；
+    - busy_timeout=5000：真撞上写锁时最多等 5 秒而不是立刻报错。
+
+    内存库下 journal_mode=WAL 会返回 memory 而不报错；测试用的是 conftest
+    自己的 engine 与 listener，不影响这里。
+    """
     if settings.DATABASE_URL.startswith("sqlite"):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
 

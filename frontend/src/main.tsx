@@ -1,6 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
+import { ConfigProvider } from 'antd'
+import zhCN from 'antd/locale/zh_CN'
 
 import App from './App'
 import './index.css'
@@ -14,8 +16,36 @@ if (!rootElement) {
 
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    {/*
+      ConfigProvider 只作用于使用 antd 组件的页面（智能镜头分割）。
+      刻意不引入 antd 的全局 reset 样式，避免重置掉既有页面的原生
+      table / input 样式 —— antd 5 的组件样式是运行时注入的哈希类名，
+      与手写 CSS 互不干扰，老页面零回归。
+      theme.token 与 index.css 里的 CSS 变量对齐，保证视觉是一套。
+    */}
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        token: {
+          colorPrimary: '#2563eb',
+          colorSuccess: '#16a34a',
+          colorWarning: '#d97706',
+          colorError: '#dc2626',
+          colorText: '#1f2328',
+          colorTextSecondary: '#6b7280',
+          colorBorder: '#e5e7eb',
+          borderRadius: 10,
+          borderRadiusSM: 6,
+          borderRadiusLG: 14,
+          fontFamily:
+            "-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif",
+          fontSize: 14,
+        },
+      }}
+    >
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ConfigProvider>
   </React.StrictMode>,
 )

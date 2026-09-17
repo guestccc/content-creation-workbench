@@ -6,6 +6,13 @@
 from app.models.account import Account, AccountStatus
 from app.models.content import Content, ContentStatus
 from app.models.publish_task import PublishTask, PublishTaskStatus
+from app.models.scene_job import (
+    SceneJob,
+    SceneJobItem,
+    SceneJobItemStatus,
+    SceneJobMode,
+    SceneJobStatus,
+)
 
 __all__ = [
     "Account",
@@ -14,4 +21,9 @@ __all__ = [
     "ContentStatus",
     "PublishTask",
     "PublishTaskStatus",
+    "SceneJob",
+    "SceneJobItem",
+    "SceneJobItemStatus",
+    "SceneJobMode",
+    "SceneJobStatus",
 ]

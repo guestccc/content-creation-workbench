@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import ContentList from './pages/ContentList'
 import Dashboard from './pages/Dashboard'
+import SceneSplit from './pages/SceneSplit'
 
 /**
  * 应用根组件。
@@ -16,6 +17,8 @@ export default function App() {
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
         <Route path="/contents" element={<ContentList />} />
+        {/* 必须在通配路由之前，否则会被重定向到首页 */}
+        <Route path="/scene" element={<SceneSplit />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

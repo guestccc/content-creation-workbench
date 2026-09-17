@@ -4,6 +4,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 const NAV_ITEMS = [
   { to: '/', label: '工作台概览', icon: '📊', end: true },
   { to: '/contents', label: '内容管理', icon: '📝', end: false },
+  { to: '/scene', label: '智能镜头分割', icon: '✂️', end: false },
 ]
 
 /**
