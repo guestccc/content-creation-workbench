@@ -1,0 +1,29 @@
+[project]
+name = "content-workbench-backend"
+version = "0.1.0"
+description = "内容创作工作台 - 后端服务（FastAPI）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.36",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    # starlette 内部测试客户端对 httpx 的弃用提示，与业务代码无关，屏蔽以保持输出干净
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

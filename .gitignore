@@ -1,0 +1,49 @@
+# ==========================================================================
+# 通用
+# ==========================================================================
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# ==========================================================================
+# 后端（Python）
+# ==========================================================================
+backend/.venv/
+backend/venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 开发数据库文件，不应提交
+backend/*.db
+backend/*.sqlite3
+
+# 环境变量：只提交 .env.example
+backend/.env
+backend/.env.local
+backend/.env.*.local
+
+# ==========================================================================
+# 前端（Node）
+# ==========================================================================
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+frontend/coverage/
+
+# 环境变量：只提交 .env.example
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
