@@ -350,6 +350,9 @@ def _split_scenes(
         else:
             failed += 1
             ui.error(f"[{index}/{total}] {target.name} 失败（退出码 {result.returncode}）")
+        # 每切完一段就报一次进度：工作台在另一头实时展示「这条切到哪儿了」，
+        # 几十段切下来要好几分钟，只在开头结尾报数是看不见过程的。
+        ui.progress(ui.PHASE_SPLIT, index, total)
     return succeeded, failed
 
 
@@ -480,6 +483,10 @@ def run(args) -> int:
     # ======================================================================
     ui.step("[1/2] 检测镜头切换")
     ui.hint("视视频长度而定，一两分钟的素材通常十来秒。")
+    # 先报「开始检测」。检测这一步给不出百分比 —— 要跑多少帧要跑多久，
+    # 得整条过完一遍才知道，编一个数字出来就是假装精确。工作台据此显示
+    # 「检测中」，而不是一根骗人的进度条。
+    ui.progress(ui.PHASE_DETECT, 0, 1)
     scenes = _detect(
         source, args.detector, args.threshold, args.min_len, args.dry_run
     )
@@ -531,6 +538,9 @@ def run(args) -> int:
 
     if do_split:
         ui.step(f"[2/2] 切割 {len(scenes)} 个片段")
+        # 检测结束，分母终于确定了 —— 这是整条流程里第一次能给出真实百分比，
+        # 工作台从这一刻起把进度条从「不知何时结束」换成「n/N」。
+        ui.progress(ui.PHASE_SPLIT, 0, len(scenes))
         succeeded, failed = _split_scenes(
             source, scenes, out_dir, args.copy, args.dry_run
         )

@@ -516,7 +516,8 @@ class TestSplitScenes(unittest.TestCase):
         with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(scene.runner_mod, "run",
                                   return_value=self._ok_result()) as run, \
-                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"):
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"), \
+                mock.patch.object(ui, "progress"):
             succeeded, failed = scene._split_scenes(
                 self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
 
@@ -531,7 +532,8 @@ class TestSplitScenes(unittest.TestCase):
         with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(scene.runner_mod, "run",
                                   return_value=self._ok_result()) as run, \
-                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"):
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"), \
+                mock.patch.object(ui, "progress"):
             scene._split_scenes(self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
 
         targets = [Path(call.args[0][-1]).name for call in run.call_args_list]
@@ -547,7 +549,8 @@ class TestSplitScenes(unittest.TestCase):
         ]
         with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(scene.runner_mod, "run", side_effect=results), \
-                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error") as error:
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error") as error, \
+                mock.patch.object(ui, "progress"):
             succeeded, failed = scene._split_scenes(
                 self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
 
@@ -558,7 +561,8 @@ class TestSplitScenes(unittest.TestCase):
         scenes = [scene.Scene(1, 0.0, 1.0), scene.Scene(2, 1.0, 2.0)]
         with mock.patch.object(scene.media, "find_tool", return_value=None), \
                 mock.patch.object(scene.runner_mod, "run") as run, \
-                mock.patch.object(ui, "error"), mock.patch.object(ui, "hint"):
+                mock.patch.object(ui, "error"), mock.patch.object(ui, "hint"), \
+                mock.patch.object(ui, "progress"):
             succeeded, failed = scene._split_scenes(
                 self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
 
@@ -571,11 +575,143 @@ class TestSplitScenes(unittest.TestCase):
         with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(scene.runner_mod, "run",
                                   return_value=self._ok_result()) as run, \
-                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"):
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"), \
+                mock.patch.object(ui, "progress"):
             scene._split_scenes(self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
 
         for call in run.call_args_list:
             self.assertTrue(call.kwargs.get("quiet"))
+
+
+class TestProgressMarkers(unittest.TestCase):
+    """给工作台看的进度标记。
+
+    内容创作工作台在另一头实时解析这几行，把「第几条视频切到第几个片段」
+    展示给用户（backend/app/services/scene_runner.py）。格式是两边的契约，
+    所以在这里钉死：前缀、字段顺序、每段切完都要报一次。
+
+    检测阶段只报「开始了」，给不出百分比 —— 要跑多少帧得整条过完才知道。
+    测试盯着这一点：别哪天有人顺手编一个假的分母出来。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.video = self.tmp / "素材.mp4"
+        self.video.write_bytes(b"\x00" * 64)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _markers(output: str) -> list[tuple[str, int, int]]:
+        """从输出里挑出进度标记，返回 (阶段, 已完成, 总数) 列表。"""
+        found = []
+        for line in output.splitlines():
+            if not line.startswith(ui.PROGRESS_PREFIX):
+                continue
+            _, phase, done, total = line.split()
+            found.append((phase, int(done), int(total)))
+        return found
+
+    def test_marker_line_format(self):
+        """一行四段：前缀、阶段、已完成、总数，用空格分隔。"""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            ui.progress("split", 3, 38)
+        self.assertEqual(buffer.getvalue(), "#vct-progress split 3 38\n")
+
+    def test_phase_constants(self):
+        """阶段名是给机器看的，别改成中文。"""
+        self.assertEqual(ui.PHASE_DETECT, "detect")
+        self.assertEqual(ui.PHASE_SPLIT, "split")
+
+    def test_every_clip_reports_progress(self):
+        """切完一段报一次 —— 只在首尾报数的话，几十段切几分钟等于没进度。"""
+        scenes = [scene.Scene(i, float(i), float(i + 1)) for i in range(1, 4)]
+        buffer = io.StringIO()
+        with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
+                mock.patch.object(scene.runner_mod, "run",
+                                  return_value=mock.Mock(ok=True, returncode=0)), \
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"), \
+                contextlib.redirect_stdout(buffer):
+            scene._split_scenes(self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
+
+        self.assertEqual(
+            self._markers(buffer.getvalue()),
+            [("split", 1, 3), ("split", 2, 3), ("split", 3, 3)],
+        )
+
+    def test_failed_clip_still_advances(self):
+        """切失败的片段也要往前走 —— 用户关心的是「还剩多少」，不是「成了几个」。"""
+        scenes = [scene.Scene(1, 0.0, 1.0), scene.Scene(2, 1.0, 2.0)]
+        buffer = io.StringIO()
+        with mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
+                mock.patch.object(scene.runner_mod, "run",
+                                  side_effect=[mock.Mock(ok=False, returncode=1),
+                                               mock.Mock(ok=True, returncode=0)]), \
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "error"), \
+                contextlib.redirect_stdout(buffer):
+            scene._split_scenes(self.video, scenes, self.tmp, copy_mode=False, dry_run=False)
+
+        self.assertEqual(
+            self._markers(buffer.getvalue()),
+            [("split", 1, 2), ("split", 2, 2)],
+        )
+
+    def test_run_reports_detect_then_split_total(self):
+        """整条流程：先报检测开始，检测完报出分母，最后回到 100%。"""
+        scenes = [scene.Scene(1, 0.0, 2.0), scene.Scene(2, 2.0, 4.0)]
+        args = SimpleNamespace(
+            input=str(self.video), split=True, output_dir=str(self.tmp / "切好的"),
+            detector="adaptive", threshold=None, min_len=0.6,
+            copy=False, csv=False, dry_run=False,
+        )
+        probe = mock.Mock(ok=True, path=Path("/usr/local/bin/scenedetect"),
+                          detail="", fix="", name="PySceneDetect")
+        buffer = io.StringIO()
+        with mock.patch.object(scene.env, "probe_scenedetect", return_value=probe), \
+                mock.patch.object(scene, "ensure", return_value=True), \
+                mock.patch.object(scene, "_detect", return_value=scenes), \
+                mock.patch.object(scene.media, "find_tool", return_value="/usr/bin/ffmpeg"), \
+                mock.patch.object(scene.runner_mod, "run",
+                                  return_value=mock.Mock(ok=True, returncode=0)), \
+                mock.patch.object(ui, "header"), mock.patch.object(ui, "kv_table"), \
+                mock.patch.object(ui, "step"), mock.patch.object(ui, "hint"), \
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "blank"), \
+                mock.patch.object(ui, "section"), mock.patch.object(ui, "info"), \
+                contextlib.redirect_stdout(buffer):
+            self.assertEqual(scene.run(args), 0)
+
+        markers = self._markers(buffer.getvalue())
+        self.assertEqual(markers[0], ("detect", 0, 1))
+        self.assertEqual(markers[1], ("split", 0, 2))
+        self.assertEqual(markers[-1], ("split", 2, 2))
+
+    def test_single_scene_never_claims_a_split_phase(self):
+        """单镜头不切片段（切出来就是原片），也就不该报切割阶段。"""
+        scenes = [scene.Scene(1, 0.0, 115.0)]
+        args = SimpleNamespace(
+            input=str(self.video), split=True, output_dir=str(self.tmp / "切好的"),
+            detector="adaptive", threshold=None, min_len=0.6,
+            copy=False, csv=False, dry_run=False,
+        )
+        probe = mock.Mock(ok=True, path=Path("/usr/local/bin/scenedetect"),
+                          detail="", fix="", name="PySceneDetect")
+        buffer = io.StringIO()
+        with mock.patch.object(scene.env, "probe_scenedetect", return_value=probe), \
+                mock.patch.object(scene, "ensure", return_value=True), \
+                mock.patch.object(scene, "_detect", return_value=scenes), \
+                mock.patch.object(ui, "header"), mock.patch.object(ui, "kv_table"), \
+                mock.patch.object(ui, "step"), mock.patch.object(ui, "hint"), \
+                mock.patch.object(ui, "ok"), mock.patch.object(ui, "blank"), \
+                mock.patch.object(ui, "section"), mock.patch.object(ui, "info"), \
+                mock.patch.object(ui, "warn"), \
+                contextlib.redirect_stdout(buffer):
+            self.assertEqual(scene.run(args), 0)
+
+        phases = [phase for phase, _, _ in self._markers(buffer.getvalue())]
+        self.assertEqual(phases, ["detect"])
 
 
 class TestDetect(unittest.TestCase):

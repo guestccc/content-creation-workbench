@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import {
   Alert,
   Button,
@@ -22,12 +23,14 @@ import {
   Flex,
   Image,
   InputNumber,
+  Modal,
   Popconfirm,
   Progress,
   Radio,
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Switch,
   Table,
@@ -65,6 +68,7 @@ import type {
   SceneClip,
   SceneEnvironment,
   SceneJob,
+  SceneJobItem,
   SceneJobMode,
   SceneSummary,
   SceneTemplate,
@@ -74,6 +78,19 @@ const { Text, Title, Paragraph } = Typography
 
 /** 轮询间隔：进度字段每 3 秒落库一次，1.5 秒轮询足够及时又不刷爆后端 */
 const POLL_INTERVAL_MS = 1500
+
+/** 片段封面上的播放角标：常驻的半透明三角，提示这一片是可以点的 */
+const PLAY_BADGE: CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 22,
+  color: 'rgba(255, 255, 255, 0.85)',
+  textShadow: '0 1px 6px rgba(0, 0, 0, 0.8)',
+  pointerEvents: 'none',
+}
 
 /** 自定义模板的默认参数 */
 const DEFAULT_CUSTOM = {
@@ -113,6 +130,8 @@ export default function SceneSplit() {
   const [history, setHistory] = useState<SceneJob[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  /** 正在播放的片段；null 表示播放框关着 */
+  const [playingClip, setPlayingClip] = useState<SceneClip | null>(null)
 
   /** 拉取历史任务列表 */
   const loadHistory = useCallback(async () => {
@@ -152,6 +171,16 @@ export default function SceneSplit() {
         ])
         setEnv(envData)
         setTemplates(templateData)
+        // 输入/输出默认停在素材目录的两个分段：materials/source → materials/clips。
+        // 把视频拷进 source/ 打开页面就能勾选，切出的片段落在 clips/，
+        // 不会跟原片混在一层。函数式更新 + 空值判断，避免覆盖用户在这两个
+        // 请求返回前已经手动选好的目录。
+        if (envData.default_input_dir) {
+          setInputPath((current) => current || envData.default_input_dir)
+        }
+        if (envData.default_output_dir) {
+          setOutputDir((current) => current || envData.default_output_dir)
+        }
       } catch (error) {
         messageApi.error(error instanceof ApiError ? error.message : '初始化失败')
       }
@@ -159,25 +188,44 @@ export default function SceneSplit() {
     })()
   }, [messageApi, loadHistory])
 
+  /**
+   * 列出输入目录下的视频文件。
+   *
+   * keepSelection 区分两种调用：切换目录时重新从零开始（清空勾选），
+   * 手动「重新扫描」时保留勾选 —— 用户往往是拷完新素材顺手点一下，
+   * 已经挑好的那几条不该被清掉（只保留确实还在目录里的）。
+   */
+  const loadInputDir = useCallback(
+    async (path: string, keepSelection = false) => {
+      try {
+        const data = await fetchDirectory(path)
+        setInputData({ path: data.path, entries: data.entries })
+        if (keepSelection) {
+          const available = new Set(
+            data.entries.filter((entry) => entry.is_video).map((entry) => entry.name),
+          )
+          setSelectedFiles((current) => current.filter((name) => available.has(name)))
+        } else {
+          setSelectedFiles([])
+        }
+        // 输出目录不再跟随输入目录：它有自己的固定去处 materials/clips/
+        // （初始值由环境自检带回），产物和原片分开，一眼能看出哪是哪
+      } catch (error) {
+        setInputData(null)
+        messageApi.error(error instanceof ApiError ? error.message : '读取目录失败')
+      }
+    },
+    [messageApi],
+  )
+
   // 输入目录变化时：列出该目录下的视频文件
   useEffect(() => {
     if (!inputPath) {
       setInputData(null)
       return
     }
-    void (async () => {
-      try {
-        const data = await fetchDirectory(inputPath)
-        setInputData({ path: data.path, entries: data.entries })
-        setSelectedFiles([])
-        // 输出目录默认跟随输入目录，避免切出来的文件不知道去哪了
-        setOutputDir((current) => current || data.path)
-      } catch (error) {
-        setInputData(null)
-        messageApi.error(error instanceof ApiError ? error.message : '读取目录失败')
-      }
-    })()
-  }, [inputPath, messageApi])
+    void loadInputDir(inputPath)
+  }, [inputPath, loadInputDir])
 
   // 轮询进度：任务结束（终态）后自动停止
   useEffect(() => {
@@ -206,6 +254,10 @@ export default function SceneSplit() {
     () => (inputData?.entries ?? []).filter((entry) => entry.is_video),
     [inputData],
   )
+
+  /** 当前看的是不是素材目录的 source 分段 —— 空列表时的提示文案要分情况 */
+  const isEmptySourceDir =
+    Boolean(env?.default_input_dir) && inputData?.path === env?.default_input_dir
 
   const selectedTemplate = templates.find((item) => item.key === templateKey)
 
@@ -370,6 +422,13 @@ export default function SceneSplit() {
                       {selectedFiles.length > 0 && ` · 已勾选 ${selectedFiles.length} 条`}
                     </Text>
                     <Space size={4}>
+                      <Button
+                        size="small"
+                        onClick={() => void loadInputDir(inputPath, true)}
+                        disabled={!inputPath}
+                      >
+                        重新扫描
+                      </Button>
                       <Checkbox
                         checked={selectedFiles.length === 0}
                         onChange={(event) =>
@@ -392,7 +451,14 @@ export default function SceneSplit() {
                     }}
                   >
                     {videoEntries.length === 0 ? (
-                      <Text type="warning">该目录下没有可处理的视频文件</Text>
+                      isEmptySourceDir ? (
+                        // source/ 第一次用的时候必然是空的，这里直接说清「往哪儿放」
+                        <Text type="warning">
+                          还没有素材 —— 把视频拷进 {inputData.path}，再点「重新扫描」
+                        </Text>
+                      ) : (
+                        <Text type="warning">该目录下没有可处理的视频文件</Text>
+                      )
                     ) : (
                       <Checkbox.Group
                         value={selectedFiles}
@@ -664,7 +730,7 @@ export default function SceneSplit() {
                 <span>
                   正在处理第 {job.current_index}/{job.total_videos} 条：
                   <Text strong>{job.current_video}</Text>
-                  {job.current_clips > 0 && ` · 这条已切出 ${job.current_clips} 个片段`}
+                  {currentStepText(job) && ` · ${currentStepText(job)}`}
                 </span>
               }
             />
@@ -713,6 +779,15 @@ export default function SceneSplit() {
                       )}
                     </Space>
                   ),
+                },
+                {
+                  // 实时进度：勾了多条视频时，一行一条，用户能看出正在切的是
+                  // 哪一条、切到第几个了。数据来自后端轮询（vct 逐段上报）。
+                  title: '进度',
+                  key: 'progress',
+                  width: 148,
+                  render: (_: unknown, record: SceneJobItem) =>
+                    renderItemProgress(record, job),
                 },
                 {
                   title: '镜头/片段',
@@ -831,53 +906,60 @@ export default function SceneSplit() {
           size="small"
           style={{ marginBottom: 16 }}
         >
-          <Image.PreviewGroup>
-            <Row gutter={[12, 12]}>
-              {clips.map((clip) => (
-                <Col key={clip.index} xs={12} sm={8} md={6} lg={4}>
-                  <Card
-                    size="small"
-                    hoverable
-                    styles={{ body: { padding: 8 } }}
-                    cover={
+          <Row gutter={[12, 12]}>
+            {clips.map((clip) => (
+              <Col key={clip.index} xs={12} sm={8} md={6} lg={4}>
+                <Card
+                  size="small"
+                  hoverable
+                  styles={{ body: { padding: 8 } }}
+                  cover={
+                    // 封面点击即播放：把 Image 的放大预览关掉（preview={false}），
+                    // 缩略图对视频来说没什么可看的，用户要的是看它怎么切出来的。
+                    <Tooltip title="点击播放这一片">
                       <div
+                        onClick={() => setPlayingClip(clip)}
                         style={{
+                          position: 'relative',
                           background: '#000',
                           height: 96,
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
                           overflow: 'hidden',
+                          cursor: 'pointer',
                         }}
                       >
                         <Image
                           src={clip.thumb_url}
                           alt={clip.name}
+                          preview={false}
                           height={96}
                           style={{ objectFit: 'cover' }}
                           fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTYiPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9IiMxYTFhMWEiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOe8qeeVpTwvdGV4dD48L3N2Zz4="
                         />
+                        <span style={PLAY_BADGE}>▶</span>
                       </div>
-                    }
-                  >
-                    <Flex justify="space-between" align="center">
-                      <Text style={{ fontSize: 12 }} ellipsis>
-                        #{clip.index}
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {formatBytes(clip.size_bytes)}
-                      </Text>
-                    </Flex>
-                    <Tooltip title={`${clip.source_name} → ${clip.name}`}>
-                      <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                        {clip.name}
-                      </Text>
                     </Tooltip>
-                  </Card>
-                </Col>
-              ))}
-            </Row>
-          </Image.PreviewGroup>
+                  }
+                >
+                  <Flex justify="space-between" align="center">
+                    <Text style={{ fontSize: 12 }} ellipsis>
+                      #{clip.index}
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {formatBytes(clip.size_bytes)}
+                    </Text>
+                  </Flex>
+                  <Tooltip title={`${clip.source_name} → ${clip.name}`}>
+                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+                      {clip.name}
+                    </Text>
+                  </Tooltip>
+                </Card>
+              </Col>
+            ))}
+          </Row>
         </Card>
       )}
 
@@ -906,6 +988,37 @@ export default function SceneSplit() {
         />
       </Card>
 
+      {/* ---------- 片段播放器 ---------- */}
+      <Modal
+        open={playingClip !== null}
+        title={
+          playingClip && (
+            <Space size={8}>
+              <span>▶ 片段 #{playingClip.index}</span>
+              <Text type="secondary" style={{ fontWeight: 'normal', fontSize: 12 }}>
+                {playingClip.name}
+              </Text>
+            </Space>
+          )
+        }
+        footer={null}
+        width={720}
+        onCancel={() => setPlayingClip(null)}
+        // 关掉就卸载 <video>：否则弹窗关了后台还在下载、还在出声
+        destroyOnHidden
+      >
+        {playingClip && (
+          <video
+            // 换片段时换 key，让浏览器丢掉上一条的缓冲重新加载
+            key={playingClip.index}
+            src={playingClip.video_url}
+            controls
+            autoPlay
+            style={{ width: '100%', maxHeight: '70vh', background: '#000', borderRadius: 6 }}
+          />
+        )}
+      </Modal>
+
       {/* ---------- 目录选择器 ---------- */}
       <DirectoryPicker
         open={picker !== null}
@@ -921,6 +1034,75 @@ export default function SceneSplit() {
         }}
       />
     </div>
+  )
+}
+
+/**
+ * 当前那条视频走到哪一步了（顶部提示条里的一句话）。
+ *
+ * 检测阶段刻意不给百分比：要跑多少帧得整条过完才知道，编一个分母出来就是
+ * 假装精确 —— 后端也是同样的口径（见 scene_runner._refresh_job_progress）。
+ */
+function currentStepText(job: SceneJob): string {
+  if (job.current_phase === 'detect') {
+    return '正在检测镜头切换'
+  }
+  if (job.current_phase === 'split' && job.current_total_clips > 0) {
+    return `正在切割第 ${job.current_clips}/${job.current_total_clips} 个片段`
+  }
+  return ''
+}
+
+/**
+ * 单条视频的进度单元格。
+ *
+ * 只有正在跑的那一条有实时数据 —— 后端把「当前视频」的进度挂在任务上
+ * （执行器串行，同一时刻只有一条在跑），这里按序号映射回它所在的那一行。
+ * 没轮到的和已经跑完的都交给「镜头/片段」列去说，这里留一个破折号。
+ */
+function renderItemProgress(record: SceneJobItem, job: SceneJob): ReactNode {
+  if (record.status !== 'running' || record.index !== job.current_index) {
+    return <Text type="secondary">—</Text>
+  }
+
+  // 检测中：分母还不存在。只表示「在动」，不画一根骗人的进度条。
+  if (job.current_phase === 'detect') {
+    return (
+      <Tooltip title="检测要整条素材过完才知道有几个镜头，这里给不出百分比">
+        <Space size={6}>
+          <Spin size="small" />
+          <Text style={{ fontSize: 12 }}>检测中</Text>
+        </Space>
+      </Tooltip>
+    )
+  }
+
+  // 切割中：检测跑完分母才确定，这是全程唯一有真实百分比的阶段。
+  if (job.current_phase === 'split' && job.current_total_clips > 0) {
+    const percent = Math.min(
+      100,
+      Math.round((job.current_clips / job.current_total_clips) * 100),
+    )
+    return (
+      <Flex vertical>
+        <Text style={{ fontSize: 12 }}>
+          切割中 {job.current_clips}/{job.current_total_clips}
+        </Text>
+        <Progress
+          percent={percent}
+          size="small"
+          showInfo={false}
+          style={{ marginBottom: 0 }}
+        />
+      </Flex>
+    )
+  }
+
+  // 子进程刚起，vct 还没吐出第一行标记
+  return (
+    <Text type="secondary" style={{ fontSize: 12 }}>
+      启动中
+    </Text>
   )
 }
 

@@ -90,6 +90,16 @@ class SceneEnvironmentResponse(BaseModel):
     ready: bool = Field(description="全部依赖是否就绪")
     vct_path: str = Field(description="后端实际调用的 vct 路径")
     vct_exists: bool = Field(description="该路径是否存在且可执行")
+    materials_dir: str = Field(
+        default="",
+        description="素材目录根（默认仓库根目录的 materials/），下有 source/clips/subtitle/output 四个分段",
+    )
+    default_input_dir: str = Field(
+        default="", description="默认输入目录（materials/source），页面用它作为输入目录的初始值"
+    )
+    default_output_dir: str = Field(
+        default="", description="默认输出目录（materials/clips），页面用它作为输出目录的初始值"
+    )
     dependencies: List[DependencyStatus] = Field(description="各依赖的探测明细")
 
 
@@ -279,8 +289,18 @@ class SceneJobResponse(TimestampMixin):
     scene_count: int = Field(description="已检测出的镜头总数")
     current_index: int = Field(description="当前处理的视频序号")
     current_video: str = Field(description="当前处理的视频文件名")
-    current_clips: int = Field(description="当前视频已切出的片段数")
+    current_clips: int = Field(
+        description="当前视频已处理到的片段序号（vct 逐段上报；没有标记时退化为已切出的文件数）"
+    )
     current_clip_names: List[str] = Field(description="当前视频已切出的片段名（供实时预览）")
+    current_phase: str = Field(
+        default="",
+        description="当前视频所处阶段：detect 检测中 / split 切割中，空表示还没收到上报",
+    )
+    current_total_clips: int = Field(
+        default=0,
+        description="当前视频预计切出的片段数。检测跑完才知道分母，之前恒为 0（那时只能显示「检测中」）",
+    )
     progress_percent: int = Field(description="总进度百分比（按视频条数计算，服务端算好）")
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
@@ -324,6 +344,8 @@ class SceneJobResponse(TimestampMixin):
             current_video=model.current_video,
             current_clips=model.current_clips,
             current_clip_names=list(model.current_clip_names or []),
+            current_phase=model.current_phase,
+            current_total_clips=model.current_total_clips,
             progress_percent=_progress_percent(model),
             started_at=model.started_at,
             finished_at=model.finished_at,
@@ -370,6 +392,7 @@ class SceneClipResponse(BaseModel):
     source_name: str = Field(description="来源视频文件名")
     size_bytes: int = Field(description="文件大小（字节）")
     thumb_url: str = Field(description="缩略图地址（首次访问时后端才抽帧生成）")
+    video_url: str = Field(description="视频流地址（支持 Range，可拖动进度条播放）")
 
 
 # --------------------------------------------------------------------------

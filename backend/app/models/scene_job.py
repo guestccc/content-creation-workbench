@@ -125,10 +125,22 @@ class SceneJob(Base):
         String(500), nullable=False, default="", comment="当前处理的视频文件名"
     )
     current_clips: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, comment="当前视频已切出的片段数"
+        Integer, nullable=False, default=0, comment="当前视频已处理到的片段序号（vct 逐段上报）"
     )
     current_clip_names: Mapped[list] = mapped_column(
         JSON, nullable=False, default=list, comment="当前视频已切出的片段文件名（供实时预览）"
+    )
+    current_phase: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="",
+        comment="当前视频所处阶段：detect 检测中 / split 切割中，空表示还没收到 vct 的上报",
+    )
+    current_total_clips: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="当前视频预计切出的片段数。检测跑完才知道分母，之前恒为 0（那时只能显示「检测中」）",
     )
 
     # ---------- 子进程句柄：取消、超时、孤儿回收共用的唯一依据 ----------

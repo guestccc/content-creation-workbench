@@ -12,14 +12,15 @@
 - GET  /jobs/{id}/scenes    预览切点汇总
 - GET  /jobs/{id}/clips     切分产出的片段列表
 - GET  /jobs/{id}/clips/{n}/thumb  片段缩略图（首次访问时抽帧生成）
+- GET  /jobs/{id}/clips/{n}/video  片段视频流（支持 Range，可拖动进度条）
 - POST /jobs/{id}/cancel    取消任务
 - DELETE /jobs/{id}         删除任务记录
 """
 
 from pathlib import Path
 
-from fastapi import APIRouter, Path as PathParam, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Path as PathParam, Query, Request
+from fastapi.responses import FileResponse, Response
 
 from app.api.deps import SceneJobServiceDep
 from app.core.exceptions import NotFoundError
@@ -30,6 +31,7 @@ from app.core.scene_templates import (
     DETECTORS,
     TEMPLATES,
 )
+from app.services.file_range import ranged_file_response
 from app.services.scene_runner import generate_thumbnail, probe_environment
 from app.models.scene_job import SceneJobMode, SceneJobStatus
 from app.schemas.common import ApiResponse
@@ -211,6 +213,7 @@ def list_clips(
                 source_name=clip["source_name"],
                 size_bytes=clip["size_bytes"],
                 thumb_url=f"/api/v1/scene/jobs/{job_id}/clips/{clip['index']}/thumb",
+                video_url=f"/api/v1/scene/jobs/{job_id}/clips/{clip['index']}/video",
             ).model_dump()
             for clip in clips
         ]
@@ -241,6 +244,30 @@ def get_clip_thumb(
             raise NotFoundError(f"缩略图生成失败（ffmpeg 不可用或片段损坏）：{clip_name}")
 
     return FileResponse(thumb_path, media_type="image/jpeg")
+
+
+@router.get(
+    "/jobs/{job_id}/clips/{clip_index}/video",
+    summary="片段视频流（支持 Range）",
+)
+def get_clip_video(
+    request: Request,
+    service: SceneJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    clip_index: int = PathParam(..., ge=1, description="片段序号（全局，从 1 开始）"),
+) -> Response:
+    """在线播放片段：整文件（200）或字节段（206 Partial Content）。
+
+    浏览器拖进度条靠的就是 Range 请求 —— 没有这个接口的话 <video> 只能
+    从头发。安全模型与缩略图一致：只收「任务 ID + 片段序号」，路径完全
+    由任务记录推导，不接受任何外部传入的路径。
+    """
+    clip_path, _clip_name = service.get_clip_path(job_id, clip_index)
+    return ranged_file_response(
+        clip_path,
+        request.headers.get("range"),
+        media_type="video/mp4",
+    )
 
 
 @router.post(

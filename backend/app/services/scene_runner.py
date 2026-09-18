@@ -16,6 +16,7 @@
 
 import csv
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -27,6 +28,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.core.materials import CLIPS, SOURCE, materials_root, subdir
 from app.core.logging import get_logger
 from app.db.session import SessionLocal, transaction
 from app.models.content import utcnow
@@ -45,6 +47,20 @@ VCT_LOG_NAME = "vct.log"
 
 # 片段文件名模式（与 vct CLI 的产物约定一致：<视频名>_clip_NNN.mp4）
 CLIP_GLOB = "*_clip_*.mp4"
+
+# vct 的机器可读进度标记，形如 `#vct-progress split 3 38`。
+# 契约定义在 vctl/ui.py 的 PROGRESS_PREFIX / progress() —— 那边改格式，
+# 这里必须一起改，测试两头都钉着。
+#
+# 为什么不解析人类可读的输出（`[2/2] 切割 38 个片段`）：那是给人看的文案，
+# 措辞一变解析就悄悄失效；单镜头视频压根不打印那行，猜都无从猜起。
+PROGRESS_MARKER = re.compile(
+    r"^#vct-progress[ \t]+(\S+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", re.MULTILINE
+)
+
+#: 阶段名，与 vctl/ui.py 的 PHASE_DETECT / PHASE_SPLIT 一一对应。
+PROGRESS_PHASE_DETECT = "detect"
+PROGRESS_PHASE_SPLIT = "split"
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +236,27 @@ def read_log_tail(log_path: Path, limit: int = 2000) -> str:
     return text[-limit:].strip()
 
 
+def parse_progress(text: str) -> Optional[Dict[str, object]]:
+    """从 vct 的输出里解析出最新一条进度标记。
+
+    取**最后一条**而不是第一条：标记是单调前进的，日志尾部那行才是当前
+    进度。调用方喂进来的通常已经是日志尾部（read_log_tail），日志中途
+    没被截断时也不会退化 —— 取最后一条永远是对的。
+
+    Args:
+        text: vct 的输出文本（可含无关内容）。
+
+    Returns:
+        {"phase": "detect" | "split", "done": int, "total": int}；
+        没有标记行时返回 None（老版本 vct 就是这种情况，调用方据此降级）。
+    """
+    matches = PROGRESS_MARKER.findall(text)
+    if not matches:
+        return None
+    phase, done, total = matches[-1]
+    return {"phase": phase, "done": int(done), "total": int(total)}
+
+
 # 纯装饰行（分隔线、空框线）判定用到的字符集
 _DECORATION_CHARS = set("═─━—-=*_· \t")
 
@@ -289,6 +326,12 @@ def probe_environment() -> dict:
         "ready": vct_exists and scenedetect is not None and ffmpeg is not None,
         "vct_path": vct_path,
         "vct_exists": vct_exists,
+        # 素材目录不是「依赖」，但它得跟自检结果一起回给前端：
+        # 页面打开时输入/输出目录要默认停在 source/ 与 clips/，
+        # 顺路带回省两次请求。目录规划见 app/core/materials.py。
+        "materials_dir": str(materials_root()),
+        "default_input_dir": str(subdir(SOURCE)),
+        "default_output_dir": str(subdir(CLIPS)),
         "dependencies": dependencies,
     }
 
@@ -570,8 +613,13 @@ class SceneRunner:
         item.duration_seconds = probe_duration(Path(item.source_path))
         job.current_index = item.index
         job.current_video = item.source_name
+        # 进度字段一律清零：这几列说的是「当前这条」的进度，换了视频就得
+        # 从头算。不清的话新视频会顶着上一条的「38/38」开场，看起来像已经
+        # 切完了，直到第一次轮询（默认 2 秒后）才被纠正。
         job.current_clips = 0
         job.current_clip_names = []
+        job.current_phase = ""
+        job.current_total_clips = 0
         db.commit()
 
         argv = build_argv(
@@ -626,7 +674,7 @@ class SceneRunner:
                 else f"任务已取消，取消前已切出 {partial_clips} 个片段（已保留在输出目录）"
             )
             self._skip_item(db, item, reason=reason, started_monotonic=started_monotonic)
-            self._refresh_job_progress(db, job, force=True)
+            self._refresh_job_progress(db, job)
             return
         if aborted == "stopped":
             self._finish_item(
@@ -757,15 +805,67 @@ class SceneRunner:
     # 落库小工具
     # ------------------------------------------------------------------
 
-    def _refresh_job_progress(self, db: Session, job: SceneJob, *, force: bool = False) -> None:
-        """把当前视频的片段计数写进任务进度字段（供轮询接口直接读）。"""
+    def _refresh_job_progress(self, db: Session, job: SceneJob) -> None:
+        """把当前视频的进度写进任务字段（供轮询接口直接读）。
+
+        调用一次就写一次 —— 限流在调用方（`_wait_for_exit` 按
+        SCENE_JOB_PROGRESS_SECONDS 决定多久刷一次），这里不做二次判断。
+
+        两个数据来源，各管一段：
+
+        1. **vct 的进度标记**（读 vct.log 尾部）—— 权威来源。它同时给出
+           「现在是检测还是切割」「切到第几个 / 共几个」，检测阶段没有分母
+           时如实只报阶段，前端据此显示「检测中」而不是一根假进度条。
+        2. **输出目录里的片段文件数** —— 兜底。老版本 vct 不发标记，这时
+           至少还能靠产物数让用户看到「这条在往前走」。
+        """
         out_dir = Path(job.items[job.current_index - 1].output_dir) if job.current_index else None
-        if out_dir is not None and out_dir.is_dir():
-            names = sorted(p.name for p in out_dir.glob(CLIP_GLOB))
+        if out_dir is None or not out_dir.is_dir():
+            db.commit()
+            return
+
+        # 产物视角的片段数。整列表重新赋值，触发 SQLAlchemy 的变更检测。
+        names = sorted(p.name for p in out_dir.glob(CLIP_GLOB))
+        job.current_clip_names = names
+
+        marker = parse_progress(read_log_tail(out_dir / VCT_LOG_NAME))
+        if marker is not None:
+            job.current_phase = str(marker["phase"])
+            if marker["phase"] == PROGRESS_PHASE_SPLIT:
+                job.current_total_clips = int(marker["total"])
+                # 分子取 vct 上报的 done 而不是文件数：切失败、被跳过的片段
+                # 也照样往前走，用户关心的是「还剩多少」。文件数是产物视角，
+                # 有片段失败时会卡在最后一个数字上不动，看起来像卡死了。
+                # （这一条的成色由 item.clip_count / failed_clip_count 另行如实呈现）
+                job.current_clips = int(marker["done"])
+            else:
+                # 检测阶段的分母是「检测这一步」，不是片段数。原样写进
+                # current_total_clips 会让前端把「0/1」渲染成片段进度条，
+                # 那是个编出来的分母 —— 留 0，让它按阶段显示「检测中」。
+                job.current_total_clips = 0
+                job.current_clips = len(names)
+        elif not job.current_phase:
+            # 一条标记都没读到：老版本 vct 不发这个，退化成数文件（至少还能
+            # 看出「这条在往前走」）。已经读过标记的就不回退了 —— 那说明只是
+            # 这一眼的日志尾部被截在标记行中间，保持上一次的值，别让数字跳。
             job.current_clips = len(names)
-            # 重新赋值整个列表以触发 SQLAlchemy 的变更检测
-            job.current_clip_names = names
+
         db.commit()
+
+    @staticmethod
+    def _clear_current_progress(job: SceneJob) -> None:
+        """任务结束时抹掉「当前视频」那一组字段。
+
+        不抹的话，页面上会留着一条永远停在「检测中」或「38/38」的实时进度，
+        而任务其实早就结束了 —— 前端只在 running 时渲染这组字段，但接口
+        数据本身也该是自洽的：任务不在跑了，就没有「当前视频」。
+        （成色数据在 item.clip_count / elapsed_seconds 里，不受影响）
+        """
+        job.current_video = ""
+        job.current_clips = 0
+        job.current_clip_names = []
+        job.current_phase = ""
+        job.current_total_clips = 0
 
     def _set_child_pid(self, db: Session, job_id: int, pid: Optional[int]) -> None:
         """更新当前子进程句柄（取消、超时、孤儿回收共用的唯一依据）。"""
@@ -816,6 +916,7 @@ class SceneRunner:
                 1 for item in job.items if item.status == SceneJobItemStatus.SKIPPED
             )
             job.child_pid = None
+            self._clear_current_progress(job)
             db.commit()
             logger.info("镜头分割任务已取消 | id=%s", job_id)
             return
@@ -840,8 +941,8 @@ class SceneRunner:
                 if item.status == SceneJobItemStatus.FAILED
             ][:3]
             job.error_message = "；".join(reasons)
-        job.current_video = ""
         job.child_pid = None
+        self._clear_current_progress(job)
         job.finished_at = utcnow()
         db.commit()
 
