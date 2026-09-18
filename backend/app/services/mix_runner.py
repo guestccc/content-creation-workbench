@@ -39,6 +39,7 @@ from app.db.session import SessionLocal, transaction
 from app.models.content import utcnow
 from app.models.mix_job import MixJob, MixJobItem, MixJobStatus, MixOutputStatus, MixPhase
 from app.services.media_tools import (
+    CHILD_CREATION_FLAGS,
     child_env,
     command_line,
     find_tool,
@@ -763,6 +764,7 @@ class MixRunner:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                creationflags=CHILD_CREATION_FLAGS,
                 env=child_env(),
             )
             self._set_child_pid(db, job.id, process.pid)

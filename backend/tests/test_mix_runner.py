@@ -56,7 +56,7 @@ class FakeFfmpeg:
         cls.instances = []
 
     def __init__(self, argv, stdout=None, stderr=None, stdin=None,
-                 start_new_session=False, cwd=None, env=None, script=None):
+                 start_new_session=False, creationflags=0, cwd=None, env=None, script=None):
         self.argv = list(argv)
         self.script = dict(script or {})
         self.stdout = stdout
