@@ -27,6 +27,7 @@ import {
   ArrowUpOutlined,
   CheckOutlined,
   CloseOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -297,7 +298,10 @@ const PLAY_BADGE: React.CSSProperties = {
   borderRadius: 4,
   padding: '0 6px',
   fontSize: 12,
-  lineHeight: '18px',
+  height: 18,
+  // 里面是图标不是文字，用 flex 居中，别再靠 line-height
+  display: 'inline-flex',
+  alignItems: 'center',
 }
 
 export default function MixCut() {
@@ -786,7 +790,6 @@ export default function MixCut() {
                     return (
                       <Card
                         key={clip.id}
-                        size="small"
                         hoverable
                         onClick={() => togglePick(clip.id)}
                         styles={{ body: { padding: 6 } }}
@@ -828,7 +831,7 @@ export default function MixCut() {
                                 setPreviewClip(clip)
                               }}
                             >
-                              ▶
+                              <PlayCircleOutlined />
                             </span>
                           </div>
                         }
@@ -875,7 +878,6 @@ export default function MixCut() {
 
     return (
       <Card
-        size="small"
         // 三张卡片同行等宽：flex 1 + minWidth 0 才能在长文件名面前乖乖收缩
         style={{ flex: 1, minWidth: 0 }}
         title={
@@ -893,7 +895,7 @@ export default function MixCut() {
         }
         extra={
           key === 'middle' && list.length > 0 ? (
-            <Button size="small" type="text" danger onClick={() => setMiddle([])}>
+            <Button type="text" danger onClick={() => setMiddle([])}>
               清空
             </Button>
           ) : null
@@ -935,7 +937,6 @@ export default function MixCut() {
                   {/* 三个控件挤在一起且不许压缩：卡片的横向空间优先给文件名 */}
                   <Flex gap={0} style={{ flex: 'none' }}>
                     <Button
-                      size="small"
                       type="text"
                       icon={<ArrowUpOutlined />}
                       aria-label="上移"
@@ -943,7 +944,6 @@ export default function MixCut() {
                       onClick={() => moveIn(key, index, -1)}
                     />
                     <Button
-                      size="small"
                       type="text"
                       icon={<ArrowDownOutlined />}
                       aria-label="下移"
@@ -951,7 +951,6 @@ export default function MixCut() {
                       onClick={() => moveIn(key, index, 1)}
                     />
                     <Button
-                      size="small"
                       type="text"
                       danger
                       icon={<CloseOutlined />}
@@ -980,7 +979,7 @@ export default function MixCut() {
                       {clip?.name ?? '已失效'}
                     </Text>
                   </Tooltip>
-                  <Button size="small" type="text" danger block onClick={() => removeFrom(key, index)}>
+                  <Button type="text" danger block onClick={() => removeFrom(key, index)}>
                     移除
                   </Button>
                 </Flex>
@@ -1019,7 +1018,7 @@ export default function MixCut() {
             )
           : 0
     return (
-      <Card size="small" title={`任务 #${job.id} 进行中`}>
+      <Card title={`任务 #${job.id} 进行中`}>
         <Flex vertical gap={8}>
           <Text>{phaseText}</Text>
           <Progress percent={Math.min(percent, 100)} status="active" />
@@ -1048,7 +1047,6 @@ export default function MixCut() {
           {target.outputs.map((output) => (
             <Card
               key={output.id}
-              size="small"
               styles={{ body: { padding: 8 } }}
               cover={
                 output.status === 'success' ? (
@@ -1073,7 +1071,9 @@ export default function MixCut() {
                       style={{ objectFit: 'cover' }}
                       fallback={THUMB_FALLBACK}
                     />
-                    <span style={PLAY_BADGE}>▶</span>
+                    <span style={PLAY_BADGE}>
+                      <PlayCircleOutlined />
+                    </span>
                   </div>
                 ) : undefined
               }
@@ -1278,12 +1278,12 @@ export default function MixCut() {
       width: 190,
       render: (_: unknown, record: MixJob) => (
         <Space size={4}>
-          <Button size="small" type="link" onClick={() => void openHistoryDetail(record.id)}>
+          <Button type="link" onClick={() => void openHistoryDetail(record.id)}>
             详情
           </Button>
           {!isTerminalStatus(record.status) && (
             <Popconfirm title="确定取消该任务？" onConfirm={() => void cancelJob(record.id)}>
-              <Button size="small" type="link" danger>
+              <Button type="link" danger>
                 取消
               </Button>
             </Popconfirm>
@@ -1293,7 +1293,7 @@ export default function MixCut() {
               title="删除任务记录？成片文件会保留在磁盘上。"
               onConfirm={() => void removeJob(record.id)}
             >
-              <Button size="small" type="link" danger>
+              <Button type="link" danger>
                 删除
               </Button>
             </Popconfirm>
@@ -1343,7 +1343,7 @@ export default function MixCut() {
       </Flex>
 
       {/* ---------- 合成设置 ---------- */}
-      <Card size="small" title="合成设置">
+      <Card title="合成设置">
         <Flex gap={24} wrap="wrap" align="center">
           <Space>
             <Text>混剪条数</Text>
@@ -1364,7 +1364,7 @@ export default function MixCut() {
             <Text code style={{ fontSize: 12 }}>
               {outputDir || '未选择'}
             </Text>
-            <Button size="small" onClick={() => setPickerOpen(true)}>
+            <Button onClick={() => setPickerOpen(true)}>
               选择目录
             </Button>
           </Space>
@@ -1388,7 +1388,6 @@ export default function MixCut() {
       {renderProgress()}
       {job && (
         <Card
-          size="small"
           title={
             <Space size={8}>
               <span>任务 #{job.id}</span>
@@ -1400,7 +1399,7 @@ export default function MixCut() {
           extra={
             !isTerminalStatus(job.status) ? (
               <Popconfirm title="确定取消该任务？" onConfirm={() => void cancelJob(job.id)}>
-                <Button size="small" danger>
+                <Button danger>
                   取消
                 </Button>
               </Popconfirm>
@@ -1420,10 +1419,9 @@ export default function MixCut() {
       )}
 
       {/* ---------- 历史任务 ---------- */}
-      <Card size="small" title="历史任务">
+      <Card title="历史任务">
         <Table<MixJob>
           rowKey="id"
-          size="small"
           columns={historyColumns}
           dataSource={history?.items ?? []}
           loading={historyLoading}

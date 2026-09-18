@@ -177,10 +177,10 @@ export default function ContentList() {
       width: 130,
       render: (_, item) => (
         <Space size={0}>
-          <Button type="link" size="small" onClick={() => setModal({ editing: item })}>
+          <Button type="link"  onClick={() => setModal({ editing: item })}>
             编辑
           </Button>
-          <Button type="link" size="small" danger onClick={() => void handleDelete(item)}>
+          <Button type="link"  danger onClick={() => void handleDelete(item)}>
             删除
           </Button>
         </Space>

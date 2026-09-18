@@ -180,13 +180,12 @@ export default function Dashboard() {
         title="最近更新"
         extra={
           <Link to="/contents">
-            <Button size="small">查看全部</Button>
+            <Button >查看全部</Button>
           </Link>
         }
       >
         <Table<Content>
           rowKey="id"
-          size="small"
           columns={recentColumns}
           dataSource={recent}
           loading={loading}

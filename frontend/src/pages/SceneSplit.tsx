@@ -11,8 +11,11 @@
 
 import {
   AppstoreOutlined,
+  BlockOutlined,
   EyeOutlined,
+  FolderOpenOutlined,
   HistoryOutlined,
+  PlayCircleOutlined,
   ScissorOutlined,
 } from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -94,7 +97,8 @@ const PLAY_BADGE: CSSProperties = {
   justifyContent: 'center',
   fontSize: 22,
   color: 'rgba(255, 255, 255, 0.85)',
-  textShadow: '0 1px 6px rgba(0, 0, 0, 0.8)',
+  // 图标是 svg，textShadow 对它不生效，改用 filter 描一层暗边把底下的画面压住
+  filter: 'drop-shadow(0 1px 6px rgba(0, 0, 0, 0.8))',
   pointerEvents: 'none',
 }
 
@@ -510,7 +514,15 @@ export default function SceneSplit() {
       {/* ---------- 输入与模板 ---------- */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col xs={24} lg={14}>
-          <Card title="① 选择素材与输出位置" size="small" style={{ height: '100%' }}>
+          <Card
+            title={
+              <Space size={8}>
+                <FolderOpenOutlined style={{ color: 'var(--color-primary)' }} />
+                选择素材与输出位置
+              </Space>
+            }
+            style={{ height: '100%' }}
+          >
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <div>
                 <Text type="secondary">素材目录</Text>
@@ -542,7 +554,6 @@ export default function SceneSplit() {
                     </Text>
                     <Space size={4}>
                       <Button
-                        size="small"
                         onClick={() => void loadInputDir(inputPath, true)}
                         disabled={!inputPath}
                       >
@@ -557,7 +568,7 @@ export default function SceneSplit() {
                         未勾选=全部
                       </Checkbox>
                       <Tag color="blue">递归子目录</Tag>
-                      <Switch size="small" checked={recursive} onChange={setRecursive} />
+                      <Switch checked={recursive} onChange={setRecursive} />
                     </Space>
                   </Flex>
                   <div
@@ -626,7 +637,15 @@ export default function SceneSplit() {
         </Col>
 
         <Col xs={24} lg={10}>
-          <Card title="② 选择切割模板" size="small" style={{ height: '100%' }}>
+          <Card
+            title={
+              <Space size={8}>
+                <BlockOutlined style={{ color: 'var(--color-primary)' }} />
+                选择切割模板
+              </Space>
+            }
+            style={{ height: '100%' }}
+          >
             <Radio.Group
               value={templateKey}
               onChange={(event) => setTemplateKey(event.target.value as string)}
@@ -636,7 +655,6 @@ export default function SceneSplit() {
                 {templates.map((template) => (
                   <Card
                     key={template.key}
-                    size="small"
                     hoverable
                     onClick={() => setTemplateKey(template.key)}
                     style={{
@@ -692,7 +710,6 @@ export default function SceneSplit() {
                       onChange={(value) => setCustom((c) => ({ ...c, detector: value }))}
                       options={DETECTOR_OPTIONS}
                       style={{ width: '100%' }}
-                      size="small"
                     />
                   </div>
                   <Flex align="center" gap={8}>
@@ -700,7 +717,6 @@ export default function SceneSplit() {
                       使用检测器默认阈值
                     </Text>
                     <Switch
-                      size="small"
                       checked={useDefaultThreshold}
                       onChange={setUseDefaultThreshold}
                     />
@@ -711,7 +727,6 @@ export default function SceneSplit() {
                         阈值
                       </Text>
                       <InputNumber
-                        size="small"
                         min={0.1}
                         max={100}
                         step={0.5}
@@ -731,7 +746,6 @@ export default function SceneSplit() {
                       最短镜头
                     </Text>
                     <InputNumber
-                      size="small"
                       min={0.1}
                       max={30}
                       step={0.1}
@@ -746,7 +760,6 @@ export default function SceneSplit() {
                       快速复制（不重编码）
                     </Text>
                     <Switch
-                      size="small"
                       checked={custom.copy}
                       onChange={(checked) => setCustom((c) => ({ ...c, copy: checked }))}
                     />
@@ -762,7 +775,7 @@ export default function SceneSplit() {
       </Row>
 
       {/* ---------- 动作区 ---------- */}
-      <Card size="small" style={{ marginBottom: 16 }}>
+      <Card style={{ marginBottom: 16 }}>
         <Flex align="center" justify="space-between" wrap gap={12}>
           <Space>
             <Button
@@ -803,7 +816,6 @@ export default function SceneSplit() {
       {/* ---------- 进度 ---------- */}
       {job && (
         <Card
-          size="small"
           title={
             <Space>
               <span>任务 #{job.id}</span>
@@ -827,7 +839,7 @@ export default function SceneSplit() {
                     : 'success'
             }
           />
-          <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }} style={{ marginTop: 8 }}>
+          <Descriptions column={{ xs: 1, sm: 2, lg: 4 }} style={{ marginTop: 8 }}>
             <Descriptions.Item label="视频进度">
               {job.completed_videos} / {job.total_videos} 条
             </Descriptions.Item>
@@ -876,7 +888,6 @@ export default function SceneSplit() {
           {/* 每个视频的处理明细 */}
           {job.items.length > 0 && (
             <Table
-              size="small"
               style={{ marginTop: 12 }}
               rowKey="id"
               pagination={false}
@@ -896,7 +907,6 @@ export default function SceneSplit() {
               切点预览
             </Space>
           }
-          size="small"
           style={{ marginBottom: 16 }}
         >
           <Row gutter={16} style={{ marginBottom: 12 }}>
@@ -930,7 +940,6 @@ export default function SceneSplit() {
           </Row>
 
           <Collapse
-            size="small"
             items={summary.items
               .filter((item) => (item.scenes?.length ?? 0) > 0)
               .map((item) => ({
@@ -944,7 +953,6 @@ export default function SceneSplit() {
                 ),
                 children: (
                   <Table
-                    size="small"
                     rowKey="number"
                     pagination={{ pageSize: 12, size: 'small', hideOnSinglePage: true }}
                     dataSource={item.scenes ?? []}
@@ -976,7 +984,6 @@ export default function SceneSplit() {
               <Tag color="blue">{clips.length} 个片段</Tag>
             </Space>
           }
-          size="small"
           style={{ marginBottom: 16 }}
         >
           <ClipGrid clips={clips} onPlay={playClip} />
@@ -991,15 +998,13 @@ export default function SceneSplit() {
             历史任务
           </Space>
         }
-        size="small"
         extra={
-          <Button size="small" onClick={() => loadHistory()} loading={historyLoading}>
+          <Button onClick={() => loadHistory()} loading={historyLoading}>
             刷新
           </Button>
         }
       >
         <Table
-          size="small"
           rowKey="id"
           loading={historyLoading}
           dataSource={history}
@@ -1040,7 +1045,7 @@ export default function SceneSplit() {
         ) : (
           detailJob && (
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
+              <Descriptions column={{ xs: 1, sm: 2 }}>
                 <Descriptions.Item label="输入">{detailJob.input_path}</Descriptions.Item>
                 {detailJob.output_dir && (
                   <Descriptions.Item label="输出">{detailJob.output_dir}</Descriptions.Item>
@@ -1065,7 +1070,6 @@ export default function SceneSplit() {
 
               {/* 还在跑的时候这个弹窗自己会轮询，进度列是活的 */}
               <Table
-                size="small"
                 rowKey="id"
                 pagination={false}
                 dataSource={detailJob.items}
@@ -1106,7 +1110,6 @@ export default function SceneSplit() {
             ) : (detailItem.scenes?.length ?? 0) > 0 ? (
               // 预览任务只有切点，没有文件可播
               <Table
-                size="small"
                 rowKey="number"
                 pagination={{ pageSize: 12, size: 'small', hideOnSinglePage: true }}
                 dataSource={detailItem.scenes ?? []}
@@ -1133,7 +1136,8 @@ export default function SceneSplit() {
         title={
           playingClip && (
             <Space size={8}>
-              <span>▶ 片段 #{playingClip.index}</span>
+              <PlayCircleOutlined />
+              <span>片段 #{playingClip.index}</span>
               <Text type="secondary" style={{ fontWeight: 'normal', fontSize: 12 }}>
                 {playingClip.name}
               </Text>
@@ -1227,7 +1231,7 @@ function renderItemProgress(record: SceneJobItem, job: SceneJob): ReactNode {
     return (
       <Tooltip title="检测要整条素材过完才知道有几个镜头，这里给不出百分比">
         <Space size={6}>
-          <Spin size="small" />
+          <Spin />
           <Text style={{ fontSize: 12 }}>检测中</Text>
         </Space>
       </Tooltip>
@@ -1247,7 +1251,6 @@ function renderItemProgress(record: SceneJobItem, job: SceneJob): ReactNode {
         </Text>
         <Progress
           percent={percent}
-          size="small"
           showInfo={false}
           style={{ marginBottom: 0 }}
         />
@@ -1337,7 +1340,7 @@ function itemColumns(
       render: (_: unknown, record: SceneJobItem) =>
         // 没东西可看的（还没轮到、单镜头、失败）别给一个点了没反应的链接
         record.clip_count > 0 || (record.scenes?.length ?? 0) > 0 ? (
-          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => onView(record)}>
+          <Button type="link"  style={{ padding: 0 }} onClick={() => onView(record)}>
             查看
           </Button>
         ) : (
@@ -1370,7 +1373,6 @@ function ClipGrid({
         // 时会在右边空出一大片。maxWidth 兜住最后一行只剩一个时被拉成巨幅。
         <Col key={clip.index} flex="1 1 200px" style={{ maxWidth: 320 }}>
           <Card
-            size="small"
             hoverable
             styles={{ body: { padding: 8 } }}
             cover={
@@ -1398,7 +1400,9 @@ function ClipGrid({
                     style={{ objectFit: 'cover' }}
                     fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTYiPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9IiMxYTFhMWEiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOe8qeeVpTwvdGV4dD48L3N2Zz4="
                   />
-                  <span style={PLAY_BADGE}>▶</span>
+                  <span style={PLAY_BADGE}>
+                    <PlayCircleOutlined />
+                  </span>
                 </div>
               </Tooltip>
             }
@@ -1500,7 +1504,6 @@ function historyColumns(handlers: {
         <Space size={4}>
           <Button
             type="link"
-            size="small"
             style={{ padding: 0 }}
             onClick={() => handlers.onView(record.id)}
           >
@@ -1509,7 +1512,6 @@ function historyColumns(handlers: {
           {!isTerminalStatus(record.status) ? (
             <Button
               type="link"
-              size="small"
               style={{ padding: 0 }}
               onClick={() => handlers.onCancel(record.id)}
             >
@@ -1523,7 +1525,7 @@ function historyColumns(handlers: {
               cancelText="取消"
               onConfirm={() => handlers.onDelete(record.id)}
             >
-              <Button type="link" size="small" danger style={{ padding: 0 }}>
+              <Button type="link"  danger style={{ padding: 0 }}>
                 删除
               </Button>
             </Popconfirm>
