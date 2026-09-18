@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { key: '/', label: '工作台概览', icon: '📊' },
   { key: '/contents', label: '内容管理', icon: '📝' },
   { key: '/scene', label: '智能镜头分割', icon: '✂️' },
+  { key: '/mix', label: '智能混剪', icon: '🎬' },
 ]
 
 /**

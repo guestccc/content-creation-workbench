@@ -17,8 +17,6 @@
 import csv
 import os
 import re
-import shutil
-import signal
 import subprocess
 import time
 from pathlib import Path
@@ -32,6 +30,18 @@ from app.core.materials import CLIPS, SOURCE, materials_root, subdir
 from app.core.logging import get_logger
 from app.db.session import SessionLocal, transaction
 from app.models.content import utcnow
+
+# 子进程工具函数与混剪共用，实现移到了 media_tools；这里原样再导出，
+# 是为了让本模块的既有调用方（含 tests/test_scene_runner.py）不必改 import。
+from app.services.media_tools import (  # noqa: F401  (重导出)
+    child_env,
+    command_line,
+    find_tool,
+    generate_thumbnail,
+    probe_duration,
+    read_log_tail,
+    terminate_process_group,
+)
 from app.models.scene_job import (
     SceneJob,
     SceneJobItem,
@@ -104,88 +114,15 @@ def build_argv(vct_bin: str, video: Path, out_dir: Path, params: dict, *, split:
     return argv
 
 
-def child_env() -> Dict[str, str]:
-    """构造子进程环境变量：把 ~/.local/bin 与工具箱的 ffmpeg-bin 前插到 PATH。
-
-    背景：vct 自己会去 ~/.local/bin 找 scenedetect，但 ffmpeg 只查 PATH
-    和 ffmpeg-bin/；uvicorn 若从图形界面或 launchd 启动，PATH 会非常贫瘠，
-    不补 PATH 切割会全量失败。
-    """
-    env = dict(os.environ)
-    extra = [
-        str(Path.home() / ".local" / "bin"),
-        str(Path(settings.SCENE_VCT_PATH).resolve().parent / "ffmpeg-bin"),
-    ]
-    current = env.get("PATH", "")
-    env["PATH"] = os.pathsep.join(extra + ([current] if current else []))
-    return env
-
-
-def find_tool(name: str) -> Optional[str]:
-    """在 child_env() 的 PATH 里找可执行文件，找不到返回 None。"""
-    return shutil.which(name, path=child_env().get("PATH"))
-
-
-def terminate_process_group(pid: int, grace: float) -> None:
-    """终止一个子进程组：先 SIGTERM，最多等 grace 秒，再 SIGKILL。
-
-    所有平台差异都收在这一个函数里，不散落。任何异常都吞掉 —— 清理动作
-    不能因为「进程已经自己退了」这种好事而炸掉主流程。
-
-    Args:
-        pid: 子进程 PID（start_new_session=True 后它同时也是进程组 ID，
-            所以直接 killpg(pid)，不需要先 getpgid 多一次竞态窗口）。
-        grace: 等进程组自行退出的宽限秒数。
-    """
-    if pid <= 0:
-        return
-    try:
-        if os.name == "nt":
-            # Windows 没有进程组信号，用 taskkill 整棵树杀掉
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=grace + 5,
-                check=False,
-            )
-            return
-
-        os.killpg(pid, signal.SIGTERM)
-        deadline = time.monotonic() + grace
-        while time.monotonic() < deadline:
-            try:
-                # kill 0 只探活不发信号；ProcessLookupError 说明已经退干净
-                os.killpg(pid, 0)
-            except (ProcessLookupError, PermissionError):
-                return
-            time.sleep(0.1)
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError) as exc:
-        logger.debug("终止进程组时进程已退出或不可达 | pid=%s | %s", pid, exc)
-    except Exception:  # noqa: BLE001 - 清理路径兜底，绝不向上抛
-        logger.exception("终止进程组出现异常 | pid=%s", pid)
-
-
 def is_our_child(pid: int, vct_bin: str) -> bool:
     """校验一个 PID 现在确实还是我们起的 vct 进程。
 
     机器重启后 PID 会被复用，孤儿回收时盲杀可能干掉无辜进程
     （比如用户刚打开的编辑器），所以回收前必须用命令行核对身份。
     """
-    if pid <= 0 or os.name == "nt":
+    if pid <= 0:
         return False
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    command = result.stdout.strip()
+    command = command_line(pid)
     # vct 入口是 bash 脚本，命令行里必然包含 vct 的路径或 vctl 模块名
     return vct_bin in command or "vctl" in command
 
@@ -224,16 +161,6 @@ def parse_scenes_csv(csv_path: Path) -> List[dict]:
         except ValueError:
             continue
     return scenes
-
-
-def read_log_tail(log_path: Path, limit: int = 2000) -> str:
-    """读子进程日志尾部，作为失败原因展示给用户（vct 的真实报错）。"""
-    try:
-        data = log_path.read_bytes()
-    except OSError:
-        return ""
-    text = data.decode("utf-8", errors="replace")
-    return text[-limit:].strip()
 
 
 def parse_progress(text: str) -> Optional[Dict[str, object]]:
@@ -334,54 +261,6 @@ def probe_environment() -> dict:
         "default_output_dir": str(subdir(CLIPS)),
         "dependencies": dependencies,
     }
-
-
-def probe_duration(video: Path) -> Optional[float]:
-    """用 ffprobe 探测视频时长（秒），失败返回 None（不阻断主流程）。"""
-    ffprobe = find_tool("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        result = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(video),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env=child_env(),
-        )
-        return round(float(result.stdout.strip()), 3)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
-
-
-def generate_thumbnail(video_path: Path, thumb_path: Path) -> bool:
-    """给片段抽首帧生成缩略图（首次请求缩略图接口时调用，落盘缓存）。"""
-    ffmpeg = find_tool("ffmpeg")
-    if not ffmpeg:
-        return False
-    try:
-        thumb_path.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [
-                ffmpeg, "-y", "-ss", "0.1", "-i", str(video_path),
-                "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4",
-                str(thumb_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=False,
-            env=child_env(),
-        )
-        return result.returncode == 0 and thumb_path.is_file()
-    except (OSError, subprocess.TimeoutExpired):
-        return False
 
 
 # --------------------------------------------------------------------------

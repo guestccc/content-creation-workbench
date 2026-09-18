@@ -19,6 +19,8 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
 from app.db.session import engine
+from app.services.mix_job_worker import mix_job_worker
+from app.services.mix_runner import recover_interrupted_jobs as recover_interrupted_mix_jobs
 from app.services.scene_job_worker import scene_job_worker
 from app.services.scene_runner import recover_interrupted_jobs
 
@@ -55,12 +57,21 @@ async def lifespan(app: FastAPI):
         atexit.register(_shutdown_scene_worker)
         scene_job_worker.start()
 
+    if settings.MIX_WORKER_ENABLED:
+        # 混剪：同一套 DB 即队列模式，回收与启停逻辑与镜头分割完全同构
+        recover_interrupted_mix_jobs()
+        atexit.register(_shutdown_mix_worker)
+        mix_job_worker.start()
+
     yield
 
     logger.info("正在关闭应用")
     if settings.SCENE_WORKER_ENABLED:
         atexit.unregister(_shutdown_scene_worker)
         _shutdown_scene_worker()
+    if settings.MIX_WORKER_ENABLED:
+        atexit.unregister(_shutdown_mix_worker)
+        _shutdown_mix_worker()
     logger.info("释放数据库连接池")
     engine.dispose()
 
@@ -71,6 +82,14 @@ def _shutdown_scene_worker() -> None:
         scene_job_worker.stop()
     except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
         logger.exception("停止镜头分割工作线程出现异常")
+
+
+def _shutdown_mix_worker() -> None:
+    """停止混剪工作线程（有界等待，绝不阻塞热重载）。"""
+    try:
+        mix_job_worker.stop()
+    except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
+        logger.exception("停止混剪工作线程出现异常")
 
 
 def create_app() -> FastAPI:

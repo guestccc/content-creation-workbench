@@ -83,6 +83,38 @@ class Settings(BaseSettings):
     # 列目录接口单次返回的最大条目数，超出截断并置 truncated 标记。
     SCENE_FS_LIST_LIMIT: int = 500
 
+    # ---------- 智能混剪 ----------
+    # 素材目录由用户在页面上自己添加（不限定在 materials/ 里），
+    # 但混剪的成片默认落在镜头分割那一套的 materials/output/，不重复定义目录配置。
+    # 最多能添加几个素材目录（注册表落在素材根的 .mix-sources.json）。
+    MIX_MAX_SOURCES: int = 20
+    # 每个素材目录向下扫描几层子目录。必须有上限：用户可能把主目录整个加进来。
+    MIX_SOURCE_SCAN_DEPTH: int = 4
+    # 单个素材目录最多收录多少条视频，防止误加一个几万条素材的盘把页面拖垮。
+    MIX_MAX_CLIPS_PER_SOURCE: int = 2000
+    # 是否启用混剪后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。
+    MIX_WORKER_ENABLED: bool = True
+    # 工作线程空闲时的轮询间隔（秒）。
+    MIX_JOB_POLL_SECONDS: float = 1.0
+    # 执行单个 ffmpeg 子进程时检查进度/取消信号的间隔（秒）。
+    MIX_JOB_TICK_SECONDS: float = 0.5
+    # 进度字段落库的最小间隔（秒），避免高频写库。
+    MIX_JOB_PROGRESS_SECONDS: float = 3.0
+    # 单个任务的整体硬超时（秒）。
+    MIX_JOB_TIMEOUT_SECONDS: int = 7200
+    # 单个片段归一化的硬超时（秒）。
+    MIX_JOB_ITEM_TIMEOUT_SECONDS: int = 600
+    # 停止工作线程 / 取消任务时，等待子进程组自行退出的宽限（秒），之后强杀。
+    MIX_JOB_STOP_GRACE_SECONDS: float = 3.0
+    # 单任务最多产出几条成片。
+    MIX_MAX_OUTPUTS: int = 20
+    # 每个列表（开头/中间/结尾）最多选多少条，防止误选把队列占满。
+    MIX_MAX_CLIPS_PER_LIST: int = 100
+    # 归一化编码质量：CRF 越小画质越好体积越大，18 是「视觉无损」的常用档。
+    MIX_ENCODE_CRF: int = 18
+    # 归一化编码速度档：veryfast 在画质几乎不变的前提下明显快于 medium。
+    MIX_ENCODE_PRESET: str = "veryfast"
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_cors_origins(cls, value):
