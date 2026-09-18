@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { FolderOutlined } from '@ant-design/icons'
 import { Alert, Button, Empty, Input, List, Modal, Space, Spin, Tag, Typography } from 'antd'
 
 import { fetchDirectory } from '../api/filesystem'
@@ -150,7 +151,7 @@ export default function DirectoryPicker({
                 ]}
               >
                 <Space>
-                  <span aria-hidden="true">📁</span>
+                  <FolderOutlined style={{ color: 'var(--color-warning)' }} />
                   <Text>{entry.name}</Text>
                 </Space>
               </List.Item>

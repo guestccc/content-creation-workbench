@@ -22,6 +22,12 @@
  * 每张卡片的「+ 添加素材」直接决定这批素材的归属，选完立刻在卡片里看到结果。
  */
 
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  CheckOutlined,
+  CloseOutlined,
+} from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
@@ -113,8 +119,11 @@ const PICKED_BADGE: React.CSSProperties = {
   color: '#fff',
   borderRadius: 9,
   fontSize: 11,
-  lineHeight: '18px',
-  textAlign: 'center',
+  // 徽标里既可能是一个序号、也可能是一个对勾图标，用 flex 居中，
+  // 不靠 line-height 对齐（图标的基线跟文字不一样）
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
 }
 
 /** 已选卡片的描边色（与 Tag/Button 的主色一致） */
@@ -807,7 +816,9 @@ export default function MixCut() {
                               fallback={THUMB_FALLBACK}
                             />
                             {picked && (
-                              <span style={PICKED_BADGE}>{ordered ? pickedAt + 1 : '✓'}</span>
+                              <span style={PICKED_BADGE}>
+                                {ordered ? pickedAt + 1 : <CheckOutlined />}
+                              </span>
                             )}
                             {/* 播放角标：点它只看不选，别把手势和勾选搅在一起 */}
                             <span
@@ -926,22 +937,27 @@ export default function MixCut() {
                     <Button
                       size="small"
                       type="text"
+                      icon={<ArrowUpOutlined />}
+                      aria-label="上移"
                       disabled={index === 0}
                       onClick={() => moveIn(key, index, -1)}
-                    >
-                      ↑
-                    </Button>
+                    />
                     <Button
                       size="small"
                       type="text"
+                      icon={<ArrowDownOutlined />}
+                      aria-label="下移"
                       disabled={index === list.length - 1}
                       onClick={() => moveIn(key, index, 1)}
-                    >
-                      ↓
-                    </Button>
-                    <Button size="small" type="text" danger onClick={() => removeFrom(key, index)}>
-                      ✕
-                    </Button>
+                    />
+                    <Button
+                      size="small"
+                      type="text"
+                      danger
+                      icon={<CloseOutlined />}
+                      aria-label="移除"
+                      onClick={() => removeFrom(key, index)}
+                    />
                   </Flex>
                 </Flex>
               )

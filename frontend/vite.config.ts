@@ -23,9 +23,9 @@ export default defineConfig({
       output: {
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
-          // antd 体量大（全站组件都来自它），单独切一块供应商包：
+          // antd 与它的图标包体量大（全站组件都来自它），单独切一块供应商包：
           // 它不随业务代码改动而失效，浏览器可以长期缓存
-          antd: ['antd'],
+          antd: ['antd', '@ant-design/icons'],
         },
       },
     },

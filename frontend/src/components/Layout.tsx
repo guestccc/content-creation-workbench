@@ -1,4 +1,11 @@
+import {
+  DashboardOutlined,
+  FileTextOutlined,
+  ScissorOutlined,
+  VideoCameraOutlined,
+} from '@ant-design/icons'
 import { Layout as AntLayout, Menu, Typography } from 'antd'
+import type { ReactNode } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 
 const { Text, Title } = Typography
@@ -9,11 +16,12 @@ const { Text, Title } = Typography
  * key 就是路由路径 —— 直接把菜单项和路由绑在一起，省掉一层映射，
  * 也不会出现「菜单写了这个路径、路由表里却没有」的错位。
  */
-const NAV_ITEMS = [
-  { key: '/', label: '工作台概览', icon: '📊' },
-  { key: '/contents', label: '内容管理', icon: '📝' },
-  { key: '/scene', label: '智能镜头分割', icon: '✂️' },
-  { key: '/mix', label: '智能混剪', icon: '🎬' },
+const NAV_ITEMS: { key: string; label: string; icon: ReactNode }[] = [
+  { key: '/', label: '工作台概览', icon: <DashboardOutlined /> },
+  { key: '/contents', label: '内容管理', icon: <FileTextOutlined /> },
+  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），两个别用重了
+  { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
+  { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
 ]
 
 /**
@@ -82,8 +90,7 @@ export default function Layout() {
             items={NAV_ITEMS.map((item) => ({
               key: item.key,
               label: item.label,
-              // emoji 当图标用：不额外引图标包，与其余页面的用法一致
-              icon: <span style={{ fontSize: 15 }}>{item.icon}</span>,
+              icon: item.icon,
             }))}
             onClick={({ key }) => navigate(key)}
             style={{ flex: 1, borderInlineEnd: 'none' }}

@@ -11,6 +11,7 @@
 | Vite | 5.4 | 构建工具与开发服务器 |
 | React Router | 6.x | 路由 |
 | antd | 6.x | **唯一的 UI 组件库**，全站界面组件均来自它 |
+| @ant-design/icons | 6.x | antd 配套图标库，界面上所有图标都来自它（不用 emoji 当图标） |
 
 > **关于 antd 6**：v6 的组件样式是运行时按 CSS 变量生成的，静态产物里 grep 不到
 > `.ant-` 类名，属正常现象；调试样式请以浏览器运行时 DOM 为准。v6 把弹窗内容区的
@@ -133,6 +134,22 @@ try {
 2. **页面底座** —— `html/body` 的高度、字体、背景色。
 
 调整整体视觉时改这两处，而不是逐个页面覆盖组件样式。
+
+### 图标
+
+界面上的图标一律用 `@ant-design/icons`，**不要用 emoji 充当图标**：emoji 的字形由
+操作系统决定，在 Windows / macOS / Linux 上粗细、配色、基线各不相同，也没法跟主色调
+统一，同一排里放几个会显得参差不齐。
+
+三种常见写法：
+
+```tsx
+<Button icon={<EyeOutlined />}>预览切点</Button>          {/* 按钮配图标，间距 antd 自己管 */}
+<Card title={<Space size={8}><EyeOutlined />切点预览</Space>} />   {/* 卡片标题 */}
+<ScissorOutlined style={{ marginRight: 8 }} />            {/* 标题里，自己留 8px */}
+```
+
+> 标题里那处 `marginRight` 不能省：JSX 会把跨行的缩进吃掉，图标和文字会贴在一起。
 
 ### 两个容易踩的点
 

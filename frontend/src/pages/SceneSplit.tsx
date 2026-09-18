@@ -9,6 +9,12 @@
  * 2. 预览与切分是两个独立任务（preview 不写用户目录，只把切点存库）。
  */
 
+import {
+  AppstoreOutlined,
+  EyeOutlined,
+  HistoryOutlined,
+  ScissorOutlined,
+} from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
@@ -467,7 +473,9 @@ export default function SceneSplit() {
 
       <div className="page__header">
         <Title level={3} style={{ marginBottom: 4 }}>
-          ✂️ 智能镜头分割
+          {/* 图标与文字之间靠 marginRight 留白：JSX 会把跨行的缩进吃掉，不显式留会贴在一起 */}
+          <ScissorOutlined style={{ marginRight: 8 }} />
+          智能镜头分割
         </Title>
         <Paragraph type="secondary" style={{ marginBottom: 0 }}>
           按画面跳变把多镜头素材切成单镜头片段。先「预览切点」看效果，确认后再「开始切分」。
@@ -758,19 +766,21 @@ export default function SceneSplit() {
         <Flex align="center" justify="space-between" wrap gap={12}>
           <Space>
             <Button
+              icon={<EyeOutlined />}
               onClick={() => start('preview')}
               loading={submitting}
               disabled={!env?.ready}
             >
-              🔍 预览切点
+              预览切点
             </Button>
             <Button
               type="primary"
+              icon={<ScissorOutlined />}
               onClick={() => start('split')}
               loading={submitting}
               disabled={!env?.ready || running}
             >
-              ✂️ 开始切分
+              开始切分
             </Button>
             {running && (
               <Popconfirm
@@ -879,7 +889,16 @@ export default function SceneSplit() {
 
       {/* ---------- 预览结果：切点清单 ---------- */}
       {summary && summary.total_scenes > 0 && (
-        <Card title="🔍 切点预览" size="small" style={{ marginBottom: 16 }}>
+        <Card
+          title={
+            <Space size={8}>
+              <EyeOutlined style={{ color: 'var(--color-primary)' }} />
+              切点预览
+            </Space>
+          }
+          size="small"
+          style={{ marginBottom: 16 }}
+        >
           <Row gutter={16} style={{ marginBottom: 12 }}>
             <Col xs={12} sm={6}>
               <Statistic title="镜头总数" value={summary.total_scenes} suffix="个" />
@@ -951,8 +970,9 @@ export default function SceneSplit() {
       {clips.length > 0 && (
         <Card
           title={
-            <Space>
-              <span>🎬 切分结果</span>
+            <Space size={8}>
+              <AppstoreOutlined style={{ color: 'var(--color-primary)' }} />
+              <span>切分结果</span>
               <Tag color="blue">{clips.length} 个片段</Tag>
             </Space>
           }
@@ -965,7 +985,12 @@ export default function SceneSplit() {
 
       {/* ---------- 历史任务 ---------- */}
       <Card
-        title="📋 历史任务"
+        title={
+          <Space size={8}>
+            <HistoryOutlined style={{ color: 'var(--color-primary)' }} />
+            历史任务
+          </Space>
+        }
         size="small"
         extra={
           <Button size="small" onClick={() => loadHistory()} loading={historyLoading}>
