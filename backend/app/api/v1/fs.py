@@ -13,10 +13,12 @@
 """
 
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Query
 
 from app.core.config import settings
+from app.core.materials import ensure_materials_layout
 from app.core.exceptions import BadRequestError
 from app.core.logging import get_logger
 from app.schemas.common import ApiResponse
@@ -27,18 +29,37 @@ router = APIRouter(prefix="/fs", tags=["文件系统"])
 logger = get_logger(__name__)
 
 
+def _resolve_target(path: Optional[str]) -> Path:
+    """解析要列出的目录。
+
+    显式传入的路径原样用（支持 ~ 开头）；不传则落到**素材目录**。
+
+    不传 path 时列的是素材目录**根**（列出来就是 source / clips / subtitle /
+    output 四个分段，一眼能看出素材该怎么放）。整个 materials/ 不在 git 里，
+    新克隆的仓库上压根不存在，所以这里顺手把骨架建出来 —— 对着一个
+    「路径不存在」的 400 只会让第一次用的人摸不着头脑。
+    显式传进来的路径不做任何创建，保持「路径必须真实存在」的严格语义。
+    """
+    cleaned = (path or "").strip()
+    if cleaned:
+        return Path(cleaned).expanduser()
+    return ensure_materials_layout()
+
+
 @router.get("/list", response_model=ApiResponse[FsListData], summary="列目录")
 def list_directory(
-    path: str = Query(default="~", description="要列出的目录，支持 ~ 开头，默认用户主目录"),
+    path: Optional[str] = Query(
+        default=None,
+        description="要列出的目录，支持 ~ 开头；不传则列出素材目录（默认仓库根目录的 materials/）",
+    ),
 ) -> ApiResponse[FsListData]:
     """列出一个目录的内容：目录在前、同类按名称排序，视频文件单独标记。"""
-    cleaned = path.strip() or "~"
-    target = Path(cleaned).expanduser()
+    target = _resolve_target(path)
 
     if not target.exists():
-        raise BadRequestError(f"路径不存在：{cleaned}")
+        raise BadRequestError(f"路径不存在：{target}")
     if not target.is_dir():
-        raise BadRequestError(f"路径不是目录：{cleaned}")
+        raise BadRequestError(f"路径不是目录：{target}")
 
     entries: list[FsEntry] = []
     truncated = False
@@ -73,7 +94,7 @@ def list_directory(
                 )
             )
     except PermissionError as exc:
-        raise BadRequestError(f"没有权限读取目录：{cleaned}") from exc
+        raise BadRequestError(f"没有权限读取目录：{target}") from exc
 
     parent = str(target.parent) if target.parent != target else None
 

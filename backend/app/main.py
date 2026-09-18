@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.materials import ensure_materials_layout
 from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
@@ -41,6 +42,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         # 数据库初始化失败不应阻止服务启动，健康检查接口会暴露该问题
         logger.exception("数据库初始化失败，相关接口将不可用")
+
+    # materials/ 整个被 .gitignore 挡在 git 外面，新克隆的仓库上它并不存在。
+    # 启动时按规划把骨架建出来（source / clips / subtitle / output），
+    # 镜头分割页一打开就是规划好的样子（建不出来会退回主目录并记日志）。
+    logger.info("素材目录：%s", ensure_materials_layout())
 
     if settings.SCENE_WORKER_ENABLED:
         # 回收上次异常退出留下的 running 任务（含残留子进程），pending 不动

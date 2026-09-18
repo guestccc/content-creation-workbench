@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # 内容创作工作台/vct 与 内容创作工作台/vctl/：
     # 本文件位于 backend/app/core/，parents[3] 就是 内容创作工作台。
     SCENE_VCT_PATH: str = str(Path(__file__).resolve().parents[3] / "vct")
+    # 素材目录的**根**，默认是仓库根目录的 materials/。
+    # 整个目录被 .gitignore 挡在 git 外面（原片与产物都太大），
+    # 由后端启动时按 app/core/materials.py 里的规划建好 source / clips /
+    # subtitle / output 四个分段，新克隆的仓库因此也是规划好的样子。
+    SCENE_MATERIALS_DIR: str = str(Path(__file__).resolve().parents[3] / "materials")
     # 是否启用后台工作线程。测试环境置 False，避免 worker 与测试会话抢连接。
     SCENE_WORKER_ENABLED: bool = True
     # 工作线程空闲时的轮询间隔（秒）。
@@ -113,4 +118,5 @@ def get_settings() -> Settings:
     return Settings()
 
 
+# 素材目录的路径解析与目录规划在 app/core/materials.py，本模块只负责配置项本身。
 settings: Settings = get_settings()
