@@ -16,8 +16,7 @@
 
 import csv
 import os
-import shutil
-import signal
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -27,9 +26,22 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.core.materials import CLIPS, SOURCE, materials_root, subdir
 from app.core.logging import get_logger
 from app.db.session import SessionLocal, transaction
 from app.models.content import utcnow
+
+# 子进程工具函数与混剪共用，实现移到了 media_tools；这里原样再导出，
+# 是为了让本模块的既有调用方（含 tests/test_scene_runner.py）不必改 import。
+from app.services.media_tools import (  # noqa: F401  (重导出)
+    child_env,
+    command_line,
+    find_tool,
+    generate_thumbnail,
+    probe_duration,
+    read_log_tail,
+    terminate_process_group,
+)
 from app.models.scene_job import (
     SceneJob,
     SceneJobItem,
@@ -45,6 +57,20 @@ VCT_LOG_NAME = "vct.log"
 
 # 片段文件名模式（与 vct CLI 的产物约定一致：<视频名>_clip_NNN.mp4）
 CLIP_GLOB = "*_clip_*.mp4"
+
+# vct 的机器可读进度标记，形如 `#vct-progress split 3 38`。
+# 契约定义在 vctl/ui.py 的 PROGRESS_PREFIX / progress() —— 那边改格式，
+# 这里必须一起改，测试两头都钉着。
+#
+# 为什么不解析人类可读的输出（`[2/2] 切割 38 个片段`）：那是给人看的文案，
+# 措辞一变解析就悄悄失效；单镜头视频压根不打印那行，猜都无从猜起。
+PROGRESS_MARKER = re.compile(
+    r"^#vct-progress[ \t]+(\S+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", re.MULTILINE
+)
+
+#: 阶段名，与 vctl/ui.py 的 PHASE_DETECT / PHASE_SPLIT 一一对应。
+PROGRESS_PHASE_DETECT = "detect"
+PROGRESS_PHASE_SPLIT = "split"
 
 
 # --------------------------------------------------------------------------
@@ -88,88 +114,15 @@ def build_argv(vct_bin: str, video: Path, out_dir: Path, params: dict, *, split:
     return argv
 
 
-def child_env() -> Dict[str, str]:
-    """构造子进程环境变量：把 ~/.local/bin 与工具箱的 ffmpeg-bin 前插到 PATH。
-
-    背景：vct 自己会去 ~/.local/bin 找 scenedetect，但 ffmpeg 只查 PATH
-    和 ffmpeg-bin/；uvicorn 若从图形界面或 launchd 启动，PATH 会非常贫瘠，
-    不补 PATH 切割会全量失败。
-    """
-    env = dict(os.environ)
-    extra = [
-        str(Path.home() / ".local" / "bin"),
-        str(Path(settings.SCENE_VCT_PATH).resolve().parent / "ffmpeg-bin"),
-    ]
-    current = env.get("PATH", "")
-    env["PATH"] = os.pathsep.join(extra + ([current] if current else []))
-    return env
-
-
-def find_tool(name: str) -> Optional[str]:
-    """在 child_env() 的 PATH 里找可执行文件，找不到返回 None。"""
-    return shutil.which(name, path=child_env().get("PATH"))
-
-
-def terminate_process_group(pid: int, grace: float) -> None:
-    """终止一个子进程组：先 SIGTERM，最多等 grace 秒，再 SIGKILL。
-
-    所有平台差异都收在这一个函数里，不散落。任何异常都吞掉 —— 清理动作
-    不能因为「进程已经自己退了」这种好事而炸掉主流程。
-
-    Args:
-        pid: 子进程 PID（start_new_session=True 后它同时也是进程组 ID，
-            所以直接 killpg(pid)，不需要先 getpgid 多一次竞态窗口）。
-        grace: 等进程组自行退出的宽限秒数。
-    """
-    if pid <= 0:
-        return
-    try:
-        if os.name == "nt":
-            # Windows 没有进程组信号，用 taskkill 整棵树杀掉
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=grace + 5,
-                check=False,
-            )
-            return
-
-        os.killpg(pid, signal.SIGTERM)
-        deadline = time.monotonic() + grace
-        while time.monotonic() < deadline:
-            try:
-                # kill 0 只探活不发信号；ProcessLookupError 说明已经退干净
-                os.killpg(pid, 0)
-            except (ProcessLookupError, PermissionError):
-                return
-            time.sleep(0.1)
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError) as exc:
-        logger.debug("终止进程组时进程已退出或不可达 | pid=%s | %s", pid, exc)
-    except Exception:  # noqa: BLE001 - 清理路径兜底，绝不向上抛
-        logger.exception("终止进程组出现异常 | pid=%s", pid)
-
-
 def is_our_child(pid: int, vct_bin: str) -> bool:
     """校验一个 PID 现在确实还是我们起的 vct 进程。
 
     机器重启后 PID 会被复用，孤儿回收时盲杀可能干掉无辜进程
     （比如用户刚打开的编辑器），所以回收前必须用命令行核对身份。
     """
-    if pid <= 0 or os.name == "nt":
+    if pid <= 0:
         return False
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    command = result.stdout.strip()
+    command = command_line(pid)
     # vct 入口是 bash 脚本，命令行里必然包含 vct 的路径或 vctl 模块名
     return vct_bin in command or "vctl" in command
 
@@ -210,14 +163,25 @@ def parse_scenes_csv(csv_path: Path) -> List[dict]:
     return scenes
 
 
-def read_log_tail(log_path: Path, limit: int = 2000) -> str:
-    """读子进程日志尾部，作为失败原因展示给用户（vct 的真实报错）。"""
-    try:
-        data = log_path.read_bytes()
-    except OSError:
-        return ""
-    text = data.decode("utf-8", errors="replace")
-    return text[-limit:].strip()
+def parse_progress(text: str) -> Optional[Dict[str, object]]:
+    """从 vct 的输出里解析出最新一条进度标记。
+
+    取**最后一条**而不是第一条：标记是单调前进的，日志尾部那行才是当前
+    进度。调用方喂进来的通常已经是日志尾部（read_log_tail），日志中途
+    没被截断时也不会退化 —— 取最后一条永远是对的。
+
+    Args:
+        text: vct 的输出文本（可含无关内容）。
+
+    Returns:
+        {"phase": "detect" | "split", "done": int, "total": int}；
+        没有标记行时返回 None（老版本 vct 就是这种情况，调用方据此降级）。
+    """
+    matches = PROGRESS_MARKER.findall(text)
+    if not matches:
+        return None
+    phase, done, total = matches[-1]
+    return {"phase": phase, "done": int(done), "total": int(total)}
 
 
 # 纯装饰行（分隔线、空框线）判定用到的字符集
@@ -289,56 +253,14 @@ def probe_environment() -> dict:
         "ready": vct_exists and scenedetect is not None and ffmpeg is not None,
         "vct_path": vct_path,
         "vct_exists": vct_exists,
+        # 素材目录不是「依赖」，但它得跟自检结果一起回给前端：
+        # 页面打开时输入/输出目录要默认停在 source/ 与 clips/，
+        # 顺路带回省两次请求。目录规划见 app/core/materials.py。
+        "materials_dir": str(materials_root()),
+        "default_input_dir": str(subdir(SOURCE)),
+        "default_output_dir": str(subdir(CLIPS)),
         "dependencies": dependencies,
     }
-
-
-def probe_duration(video: Path) -> Optional[float]:
-    """用 ffprobe 探测视频时长（秒），失败返回 None（不阻断主流程）。"""
-    ffprobe = find_tool("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        result = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(video),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env=child_env(),
-        )
-        return round(float(result.stdout.strip()), 3)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
-
-
-def generate_thumbnail(video_path: Path, thumb_path: Path) -> bool:
-    """给片段抽首帧生成缩略图（首次请求缩略图接口时调用，落盘缓存）。"""
-    ffmpeg = find_tool("ffmpeg")
-    if not ffmpeg:
-        return False
-    try:
-        thumb_path.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [
-                ffmpeg, "-y", "-ss", "0.1", "-i", str(video_path),
-                "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4",
-                str(thumb_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=False,
-            env=child_env(),
-        )
-        return result.returncode == 0 and thumb_path.is_file()
-    except (OSError, subprocess.TimeoutExpired):
-        return False
 
 
 # --------------------------------------------------------------------------
@@ -570,8 +492,13 @@ class SceneRunner:
         item.duration_seconds = probe_duration(Path(item.source_path))
         job.current_index = item.index
         job.current_video = item.source_name
+        # 进度字段一律清零：这几列说的是「当前这条」的进度，换了视频就得
+        # 从头算。不清的话新视频会顶着上一条的「38/38」开场，看起来像已经
+        # 切完了，直到第一次轮询（默认 2 秒后）才被纠正。
         job.current_clips = 0
         job.current_clip_names = []
+        job.current_phase = ""
+        job.current_total_clips = 0
         db.commit()
 
         argv = build_argv(
@@ -626,7 +553,7 @@ class SceneRunner:
                 else f"任务已取消，取消前已切出 {partial_clips} 个片段（已保留在输出目录）"
             )
             self._skip_item(db, item, reason=reason, started_monotonic=started_monotonic)
-            self._refresh_job_progress(db, job, force=True)
+            self._refresh_job_progress(db, job)
             return
         if aborted == "stopped":
             self._finish_item(
@@ -757,15 +684,67 @@ class SceneRunner:
     # 落库小工具
     # ------------------------------------------------------------------
 
-    def _refresh_job_progress(self, db: Session, job: SceneJob, *, force: bool = False) -> None:
-        """把当前视频的片段计数写进任务进度字段（供轮询接口直接读）。"""
+    def _refresh_job_progress(self, db: Session, job: SceneJob) -> None:
+        """把当前视频的进度写进任务字段（供轮询接口直接读）。
+
+        调用一次就写一次 —— 限流在调用方（`_wait_for_exit` 按
+        SCENE_JOB_PROGRESS_SECONDS 决定多久刷一次），这里不做二次判断。
+
+        两个数据来源，各管一段：
+
+        1. **vct 的进度标记**（读 vct.log 尾部）—— 权威来源。它同时给出
+           「现在是检测还是切割」「切到第几个 / 共几个」，检测阶段没有分母
+           时如实只报阶段，前端据此显示「检测中」而不是一根假进度条。
+        2. **输出目录里的片段文件数** —— 兜底。老版本 vct 不发标记，这时
+           至少还能靠产物数让用户看到「这条在往前走」。
+        """
         out_dir = Path(job.items[job.current_index - 1].output_dir) if job.current_index else None
-        if out_dir is not None and out_dir.is_dir():
-            names = sorted(p.name for p in out_dir.glob(CLIP_GLOB))
+        if out_dir is None or not out_dir.is_dir():
+            db.commit()
+            return
+
+        # 产物视角的片段数。整列表重新赋值，触发 SQLAlchemy 的变更检测。
+        names = sorted(p.name for p in out_dir.glob(CLIP_GLOB))
+        job.current_clip_names = names
+
+        marker = parse_progress(read_log_tail(out_dir / VCT_LOG_NAME))
+        if marker is not None:
+            job.current_phase = str(marker["phase"])
+            if marker["phase"] == PROGRESS_PHASE_SPLIT:
+                job.current_total_clips = int(marker["total"])
+                # 分子取 vct 上报的 done 而不是文件数：切失败、被跳过的片段
+                # 也照样往前走，用户关心的是「还剩多少」。文件数是产物视角，
+                # 有片段失败时会卡在最后一个数字上不动，看起来像卡死了。
+                # （这一条的成色由 item.clip_count / failed_clip_count 另行如实呈现）
+                job.current_clips = int(marker["done"])
+            else:
+                # 检测阶段的分母是「检测这一步」，不是片段数。原样写进
+                # current_total_clips 会让前端把「0/1」渲染成片段进度条，
+                # 那是个编出来的分母 —— 留 0，让它按阶段显示「检测中」。
+                job.current_total_clips = 0
+                job.current_clips = len(names)
+        elif not job.current_phase:
+            # 一条标记都没读到：老版本 vct 不发这个，退化成数文件（至少还能
+            # 看出「这条在往前走」）。已经读过标记的就不回退了 —— 那说明只是
+            # 这一眼的日志尾部被截在标记行中间，保持上一次的值，别让数字跳。
             job.current_clips = len(names)
-            # 重新赋值整个列表以触发 SQLAlchemy 的变更检测
-            job.current_clip_names = names
+
         db.commit()
+
+    @staticmethod
+    def _clear_current_progress(job: SceneJob) -> None:
+        """任务结束时抹掉「当前视频」那一组字段。
+
+        不抹的话，页面上会留着一条永远停在「检测中」或「38/38」的实时进度，
+        而任务其实早就结束了 —— 前端只在 running 时渲染这组字段，但接口
+        数据本身也该是自洽的：任务不在跑了，就没有「当前视频」。
+        （成色数据在 item.clip_count / elapsed_seconds 里，不受影响）
+        """
+        job.current_video = ""
+        job.current_clips = 0
+        job.current_clip_names = []
+        job.current_phase = ""
+        job.current_total_clips = 0
 
     def _set_child_pid(self, db: Session, job_id: int, pid: Optional[int]) -> None:
         """更新当前子进程句柄（取消、超时、孤儿回收共用的唯一依据）。"""
@@ -816,6 +795,7 @@ class SceneRunner:
                 1 for item in job.items if item.status == SceneJobItemStatus.SKIPPED
             )
             job.child_pid = None
+            self._clear_current_progress(job)
             db.commit()
             logger.info("镜头分割任务已取消 | id=%s", job_id)
             return
@@ -840,8 +820,8 @@ class SceneRunner:
                 if item.status == SceneJobItemStatus.FAILED
             ][:3]
             job.error_message = "；".join(reasons)
-        job.current_video = ""
         job.child_pid = None
+        self._clear_current_progress(job)
         job.finished_at = utcnow()
         db.commit()
 

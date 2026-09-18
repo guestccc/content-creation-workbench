@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { Alert, Button, Card, Flex, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
+import type { ColumnsType } from 'antd/es/table'
 
 import { ApiError } from '../api/client'
 import { deleteContent, fetchContents } from '../api/contents'
@@ -7,13 +9,17 @@ import type { Content, ContentStatus } from '../types/content'
 import { PLATFORM_OPTIONS, STATUS_META, STATUS_ORDER } from '../types/content'
 import { formatDateTime } from '../utils/format'
 
-/** 每页条数 */
+const { Title, Text } = Typography
+
+/** 每页条数（后端分页） */
 const PAGE_SIZE = 10
 
 /**
  * 内容管理页。
  *
  * 提供列表查询、筛选、创建、编辑、删除的完整闭环。
+ * 分页、表格、确认框都交给 antd：这几处的边界情况（翻页越界、空数据、
+ * 键盘操作）它已经处理过了，自己写只会漏。
  */
 export default function ContentList() {
   // ---------- 列表数据 ----------
@@ -30,10 +36,14 @@ export default function ContentList() {
   // ---------- 页面状态 ----------
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
 
   // 弹窗状态：null 表示未打开；{ editing: null } 表示新建；{ editing: Content } 表示编辑
   const [modal, setModal] = useState<{ editing: Content | null } | null>(null)
+
+  // antd 的 message / Modal.confirm 需要挂到当前 React 树上（useXxx 形式），
+  // 直接用 message.xxx 静态方法会拿不到 ConfigProvider 的主题与语言
+  const [messageApi, messageContext] = message.useMessage()
+  const [confirmApi, confirmContext] = Modal.useModal()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -60,18 +70,8 @@ export default function ContentList() {
     void load()
   }, [load])
 
-  // 操作成功提示 3 秒后自动消失
-  useEffect(() => {
-    if (!notice) {
-      return
-    }
-    const timer = window.setTimeout(() => setNotice(''), 3000)
-    return () => window.clearTimeout(timer)
-  }, [notice])
-
   /** 提交搜索：回到第一页重新查询 */
-  const handleSearch = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
+  const handleSearch = () => {
     setPage(1)
     setKeyword(keywordInput.trim())
   }
@@ -87,13 +87,20 @@ export default function ContentList() {
 
   /** 删除内容（带二次确认） */
   const handleDelete = async (item: Content) => {
-    if (!window.confirm(`确定要删除「${item.title}」吗？此操作不可恢复。`)) {
+    const confirmed = await confirmApi.confirm({
+      title: `确定要删除「${item.title}」吗？`,
+      content: '此操作不可恢复。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+    })
+    if (!confirmed) {
       return
     }
 
     try {
       await deleteContent(item.id)
-      setNotice(`已删除「${item.title}」`)
+      messageApi.success(`已删除「${item.title}」`)
 
       // 当前页只剩这一条且不是第一页时，回退一页避免停留在空页
       if (items.length === 1 && page > 1) {
@@ -110,186 +117,165 @@ export default function ContentList() {
   const handleSaved = () => {
     const wasEditing = modal?.editing !== null && modal?.editing !== undefined
     setModal(null)
-    setNotice(wasEditing ? '保存成功' : '创建成功')
+    // 提示交给 message，不再占用页面顶部的位置
+    messageApi.success(wasEditing ? '保存成功' : '创建成功')
     void load()
   }
 
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const columns: ColumnsType<Content> = [
+    {
+      title: '标题',
+      dataIndex: 'title',
+      key: 'title',
+      width: '30%',
+      render: (title: string) => <Text strong>{title}</Text>,
+    },
+    {
+      title: '平台',
+      dataIndex: 'platform',
+      key: 'platform',
+      render: (platform: string) => platform || <Text type="secondary">—</Text>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      render: (status: ContentStatus) => (
+        <Tag color={STATUS_META[status].color}>{STATUS_META[status].label}</Tag>
+      ),
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      key: 'tags',
+      render: (tags: string[]) =>
+        tags.length > 0 ? (
+          <>
+            {tags.map((tag) => (
+              <Tag key={tag}>{tag}</Tag>
+            ))}
+          </>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
+    },
+    {
+      title: '作者',
+      dataIndex: 'author',
+      key: 'author',
+      render: (author: string) => author || <Text type="secondary">—</Text>,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      key: 'updated_at',
+      render: (value: string) => <Text type="secondary">{formatDateTime(value)}</Text>,
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 130,
+      render: (_, item) => (
+        <Space size={0}>
+          <Button type="link" size="small" onClick={() => setModal({ editing: item })}>
+            编辑
+          </Button>
+          <Button type="link" size="small" danger onClick={() => void handleDelete(item)}>
+            删除
+          </Button>
+        </Space>
+      ),
+    },
+  ]
+
+  const filtered = Boolean(keyword || statusFilter || platformFilter)
 
   return (
-    <>
-      <header className="page-header">
+    <Flex vertical gap={22}>
+      {messageContext}
+      {confirmContext}
+
+      <Flex justify="space-between" align="flex-start" gap={16}>
         <div>
-          <h2 className="page-header__title">内容管理</h2>
-          <p className="page-header__desc">管理你的所有创作内容，共 {total} 条</p>
+          <Title level={3} style={{ margin: 0 }}>
+            内容管理
+          </Title>
+          <Text type="secondary">管理你的所有创作内容，共 {total} 条</Text>
         </div>
-        <button
-          type="button"
-          className="btn btn--primary"
-          onClick={() => setModal({ editing: null })}
-        >
+        <Button type="primary" onClick={() => setModal({ editing: null })}>
           + 新建内容
-        </button>
-      </header>
+        </Button>
+      </Flex>
 
-      {error && <div className="alert alert--error">⚠️ {error}</div>}
-      {notice && (
-        <div className="alert alert--warning" style={{ color: '#166534', background: '#f0fdf4', borderColor: '#bbf7d0' }}>
-          ✓ {notice}
-        </div>
-      )}
+      {error && <Alert type="error" showIcon message={error} />}
 
-      <section className="card">
+      <Card>
         {/* 筛选工具栏 */}
-        <form className="toolbar" onSubmit={handleSearch}>
-          <input
-            className="input"
+        <Flex wrap gap={10} style={{ marginBottom: 16 }}>
+          <Input
             value={keywordInput}
             placeholder="搜索标题或正文…"
+            allowClear
+            style={{ maxWidth: 260 }}
             onChange={(event) => setKeywordInput(event.target.value)}
+            onPressEnter={handleSearch}
           />
 
-          <select
-            className="select"
+          <Select
             value={statusFilter}
-            onChange={(event) => {
-              setStatusFilter(event.target.value as ContentStatus | '')
+            style={{ minWidth: 140 }}
+            onChange={(value: ContentStatus | '') => {
+              setStatusFilter(value)
               setPage(1)
             }}
-          >
-            <option value="">全部状态</option>
-            {STATUS_ORDER.map((status) => (
-              <option key={status} value={status}>
-                {STATUS_META[status].label}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: '', label: '全部状态' },
+              ...STATUS_ORDER.map((status) => ({
+                value: status,
+                label: STATUS_META[status].label,
+              })),
+            ]}
+          />
 
-          <select
-            className="select"
+          <Select
             value={platformFilter}
-            onChange={(event) => {
-              setPlatformFilter(event.target.value)
+            style={{ minWidth: 140 }}
+            onChange={(value: string) => {
+              setPlatformFilter(value)
               setPage(1)
             }}
-          >
-            <option value="">全部平台</option>
-            {PLATFORM_OPTIONS.map((platform) => (
-              <option key={platform} value={platform}>
-                {platform}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: '', label: '全部平台' },
+              ...PLATFORM_OPTIONS.map((platform) => ({ value: platform, label: platform })),
+            ]}
+          />
 
-          <button type="submit" className="btn">
-            搜索
-          </button>
-          <button type="button" className="btn" onClick={handleReset}>
-            重置
-          </button>
-        </form>
+          <Button onClick={handleSearch}>搜索</Button>
+          <Button onClick={handleReset}>重置</Button>
+        </Flex>
 
-        {/* 列表主体 */}
-        {loading ? (
-          <div className="placeholder">加载中…</div>
-        ) : items.length === 0 ? (
-          <div className="placeholder">
-            {keyword || statusFilter || platformFilter
+        {/* 列表主体：分页交给 Table 自己管，它会在翻页时回调 onChange */}
+        <Table<Content>
+          rowKey="id"
+          size="middle"
+          columns={columns}
+          dataSource={items}
+          loading={loading}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total,
+            showSizeChanger: false,
+            // 刻意不设 showTotal：总数已经写在页面副标题里，两处重复没有意义
+            onChange: setPage,
+          }}
+          locale={{
+            emptyText: filtered
               ? '没有匹配的内容，试试调整筛选条件'
-              : '还没有任何内容，点击右上角「新建内容」开始创作'}
-          </div>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th style={{ width: '30%' }}>标题</th>
-                <th>平台</th>
-                <th>状态</th>
-                <th>标签</th>
-                <th>作者</th>
-                <th>更新时间</th>
-                <th style={{ width: 120 }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={item.id}>
-                  <td className="table__title">{item.title}</td>
-                  <td>{item.platform || <span className="text-muted">—</span>}</td>
-                  <td>
-                    <span
-                      className="badge"
-                      style={{
-                        color: STATUS_META[item.status].color,
-                        background: `${STATUS_META[item.status].color}1a`,
-                      }}
-                    >
-                      {STATUS_META[item.status].label}
-                    </span>
-                  </td>
-                  <td>
-                    {item.tags.length > 0 ? (
-                      item.tags.map((tag) => (
-                        <span className="tag" key={tag}>
-                          {tag}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-muted">—</span>
-                    )}
-                  </td>
-                  <td>{item.author || <span className="text-muted">—</span>}</td>
-                  <td className="text-muted">{formatDateTime(item.updated_at)}</td>
-                  <td>
-                    <div className="table__actions">
-                      <button
-                        type="button"
-                        className="btn btn--link"
-                        onClick={() => setModal({ editing: item })}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--link"
-                        style={{ color: 'var(--color-danger)' }}
-                        onClick={() => void handleDelete(item)}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {/* 分页 */}
-        {!loading && total > 0 && (
-          <div className="pagination">
-            <span>
-              第 {page} / {totalPages} 页，共 {total} 条
-            </span>
-            <button
-              type="button"
-              className="btn btn--sm"
-              disabled={page <= 1}
-              onClick={() => setPage(page - 1)}
-            >
-              上一页
-            </button>
-            <button
-              type="button"
-              className="btn btn--sm"
-              disabled={page >= totalPages}
-              onClick={() => setPage(page + 1)}
-            >
-              下一页
-            </button>
-          </div>
-        )}
-      </section>
+              : '还没有任何内容，点击右上角「新建内容」开始创作',
+          }}
+        />
+      </Card>
 
       {modal && (
         <ContentFormModal
@@ -298,6 +284,6 @@ export default function ContentList() {
           onSaved={handleSaved}
         />
       )}
-    </>
+    </Flex>
   )
 }

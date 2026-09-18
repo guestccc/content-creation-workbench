@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { FolderOutlined } from '@ant-design/icons'
 import { Alert, Button, Empty, Input, List, Modal, Space, Spin, Tag, Typography } from 'antd'
 
 import { fetchDirectory } from '../api/filesystem'
@@ -133,10 +134,24 @@ export default function DirectoryPicker({
               <List.Item
                 style={{ cursor: 'pointer' }}
                 onClick={() => enter(entry)}
-                actions={[<a key="open">进入</a>]}
+                actions={[
+                  <Button
+                    key="open"
+                    type="link"
+                    size="small"
+                    style={{ padding: 0 }}
+                    onClick={(event) => {
+                      // 整行都能点，按钮只做视觉提示；不阻止冒泡会触发两次 enter
+                      event.stopPropagation()
+                      enter(entry)
+                    }}
+                  >
+                    进入
+                  </Button>,
+                ]}
               >
                 <Space>
-                  <span aria-hidden="true">📁</span>
+                  <FolderOutlined style={{ color: 'var(--color-warning)' }} />
                   <Text>{entry.name}</Text>
                 </Space>
               </List.Item>

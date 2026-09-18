@@ -17,10 +17,11 @@ if (!rootElement) {
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     {/*
-      ConfigProvider 只作用于使用 antd 组件的页面（智能镜头分割）。
-      刻意不引入 antd 的全局 reset 样式，避免重置掉既有页面的原生
-      table / input 样式 —— antd 5 的组件样式是运行时注入的哈希类名，
-      与手写 CSS 互不干扰，老页面零回归。
+      ConfigProvider 作用于全部页面：界面组件已统一为 antd，
+      主题只在这一处定义，页面里不再各写各的颜色。
+
+      刻意不引 antd 的全局 reset —— 组件样式是自带的（v6 起基于 CSS 变量），
+      index.css 只提供 body 的字体/背景与设计变量，两下互不干扰。
       theme.token 与 index.css 里的 CSS 变量对齐，保证视觉是一套。
     */}
     <ConfigProvider

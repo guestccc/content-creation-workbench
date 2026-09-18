@@ -323,6 +323,13 @@ class TestTemplatesAndEnvironment:
         data = response.json()["data"]
         assert "ready" in data
         assert "vct_path" in data
+        # 素材目录随自检一起回给前端：根目录用于提示，两个默认值决定页面
+        # 打开时输入/输出框停在哪儿（source/ → clips/），顺路带回省两次请求
+        assert data["materials_dir"]
+        assert data["default_input_dir"].endswith("/source")
+        assert data["default_output_dir"].endswith("/clips")
+        assert data["default_input_dir"].startswith(data["materials_dir"])
+        assert data["default_output_dir"].startswith(data["materials_dir"])
         names = {dep["name"] for dep in data["dependencies"]}
         assert names == {"vct", "scenedetect", "ffmpeg", "ffprobe"}
 
@@ -372,8 +379,138 @@ class TestScenesAndClips:
         clips = response.json()["data"]
         assert len(clips) == 2
         assert clips[0]["index"] == 1
+        assert clips[0]["item_index"] == 1
         assert clips[0]["thumb_url"].endswith("/clips/1/thumb")
 
         # 序号越界 → 404（不能借此读到任意文件）
         response = client.get(f"/api/v1/scene/jobs/{created['id']}/clips/99/thumb")
         assert response.status_code == 404, response.text
+
+    def test_clips_carry_owning_item_index(self, client, tmp_path, db_session):
+        """每个片段要知道自己是哪条视频切出来的 —— 前端按它归组。
+
+        这里故意造两条**同名**的视频（放在不同的子目录里，递归扫描）：
+        按文件名归组必然把它们的片段混在一起，`item_index` 才是可信的归属。
+        序号（index）仍是全任务连续的，缩略图/播放接口靠它定位。
+        """
+        source = tmp_path / "素材"
+        for sub in ("甲", "乙"):
+            (source / sub).mkdir(parents=True)
+            (source / sub / "同名.mp4").write_bytes(b"fake")
+        created = _create_split_job(client, source, tmp_path / "输出", recursive=True)
+
+        job = db_session.get(SceneJob, created["id"])
+        assert [item.source_name for item in job.items] == ["同名.mp4", "同名.mp4"]
+        for item in job.items:
+            item.clip_names = ["同名_clip_001.mp4", "同名_clip_002.mp4"]
+            item.clip_count = 2
+            item.status = SceneJobItemStatus.SUCCESS
+            out = tmp_path / "片段输出" / str(item.index)
+            out.mkdir(parents=True)
+            for name in item.clip_names:
+                (out / name).write_bytes(b"fake")
+            item.output_dir = str(out)
+        db_session.commit()
+
+        response = client.get(f"/api/v1/scene/jobs/{created['id']}/clips")
+        assert response.status_code == 200, response.text
+        clips = response.json()["data"]
+        assert [clip["index"] for clip in clips] == [1, 2, 3, 4]
+        assert [clip["item_index"] for clip in clips] == [1, 1, 2, 2]
+
+
+class TestClipVideo:
+    """片段在线播放：整文件 200 / 字节段 206 / 越界 416 / 找不到 404。
+
+    Range 解析本身的穷举在 test_file_range.py，这里钉的是「接口把这些
+    行为真的暴露出来了」，以及字节内容一字不差 —— 这才是浏览器拖进度条
+    依赖的东西。
+    """
+
+    #: 内容可预测的片段：第 i 个字节就是 i（取模），方便核对字节段
+    CLIP_BYTES = bytes(i % 256 for i in range(1000))
+
+    @pytest.fixture()
+    def clip_url(self, client, video_dir, tmp_path, db_session) -> str:
+        """造一个带一个真实片段文件的任务，返回它的 video 接口地址。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+
+        job = db_session.get(SceneJob, created["id"])
+        item = job.items[0]
+        item.clip_names = ["口播A_clip_001.mp4"]
+        item.clip_count = 1
+        item.status = SceneJobItemStatus.SUCCESS
+        out = tmp_path / "片段输出"
+        out.mkdir()
+        (out / "口播A_clip_001.mp4").write_bytes(self.CLIP_BYTES)
+        item.output_dir = str(out)
+        db_session.commit()
+
+        return f"/api/v1/scene/jobs/{created['id']}/clips/1/video"
+
+    def test_full_download(self, client, clip_url):
+        """不带 Range：200 + 整文件 + 声明支持分段。"""
+        response = client.get(clip_url)
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "video/mp4"
+        assert response.headers["accept-ranges"] == "bytes"
+        assert int(response.headers["content-length"]) == len(self.CLIP_BYTES)
+        assert response.content == self.CLIP_BYTES
+
+    def test_partial_content(self, client, clip_url):
+        """bytes=100-199 → 206，Content-Range 与字节内容都要对。"""
+        response = client.get(clip_url, headers={"Range": "bytes=100-199"})
+        assert response.status_code == 206, response.text
+        assert response.headers["content-range"] == "bytes 100-199/1000"
+        assert response.headers["content-length"] == "100"
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.content == self.CLIP_BYTES[100:200]
+
+    def test_open_ended_range(self, client, clip_url):
+        """bytes=0-：浏览器起手式。"""
+        response = client.get(clip_url, headers={"Range": "bytes=0-"})
+        assert response.status_code == 206
+        assert response.headers["content-range"] == "bytes 0-999/1000"
+        assert response.content == self.CLIP_BYTES
+
+    def test_suffix_range(self, client, clip_url):
+        response = client.get(clip_url, headers={"Range": "bytes=-10"})
+        assert response.status_code == 206
+        assert response.headers["content-range"] == "bytes 990-999/1000"
+        assert response.content == self.CLIP_BYTES[-10:]
+
+    def test_seek_to_end_then_middle(self, client, clip_url):
+        """模拟拖动：先取末尾（预载 moov），再取中段。"""
+        tail = client.get(clip_url, headers={"Range": "bytes=980-"})
+        assert tail.status_code == 206
+        assert tail.content == self.CLIP_BYTES[980:]
+
+        middle = client.get(clip_url, headers={"Range": "bytes=400-499"})
+        assert middle.status_code == 206
+        assert middle.content == self.CLIP_BYTES[400:500]
+
+    def test_unsatisfiable_range_is_416(self, client, clip_url):
+        response = client.get(clip_url, headers={"Range": "bytes=1000-"})
+        assert response.status_code == 416
+        assert response.headers["content-range"] == "bytes */1000"
+
+    def test_clip_not_found_is_404(self, client, video_dir, tmp_path):
+        """序号越界 → 404，不能借此读到任意文件。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        response = client.get(f"/api/v1/scene/jobs/{created['id']}/clips/99/video")
+        assert response.status_code == 404, response.text
+
+    def test_job_not_found_is_404(self, client):
+        response = client.get("/api/v1/scene/jobs/99999/clips/1/video")
+        assert response.status_code == 404, response.text
+
+    def test_clips_list_carries_video_url(self, client, clip_url, video_dir, tmp_path, db_session):
+        """片段列表要把 video_url 带回来，前端不该自己拼路径。"""
+        # clip_url 里有 job id，解析出来再调列表接口
+        job_id = clip_url.split("/jobs/")[1].split("/")[0]
+        response = client.get(f"/api/v1/scene/jobs/{job_id}/clips")
+        assert response.status_code == 200, response.text
+        clips = response.json()["data"]
+        assert clips[0]["video_url"].endswith("/clips/1/video")

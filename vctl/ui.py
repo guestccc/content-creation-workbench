@@ -142,6 +142,37 @@ def hint(message: str) -> None:
         print("      " + _dim(line))
 
 
+# --------------------------------------------------------------------------
+# 机器可读的进度标记
+# --------------------------------------------------------------------------
+
+#: 进度标记的前缀。工作台（内容创作工作台 backend/app/services/scene_runner.py）
+#: 在切割时盯着这一行，把「第几条视频切到第几个片段」展示给用户。两边是同一份
+#: 契约 —— 改格式要同时改那边的 PROGRESS_MARKER 正则。
+#:
+#: 为什么不直接让工作台去猜人类可读的输出：`[2/2] 切割 38 个片段` 这类文案是
+#: 给人看的，措辞一变解析就悄悄失效；单镜头视频压根不打印那行，猜都无从猜起。
+#: 标记行只此一处定义，解析方也只认它。
+PROGRESS_PREFIX = "#vct-progress"
+
+#: 阶段名：检测画面跳变 / 按切点切割。取值会原样落进工作台的数据库字段。
+PHASE_DETECT = "detect"
+PHASE_SPLIT = "split"
+
+
+def progress(phase: str, done: int, total: int) -> None:
+    """输出一行机器可读的进度标记。
+
+    形如 `#vct-progress split 3 38`：第 3 个片段切完，总共要切 38 个。
+    `total` 为 0 表示「这一步没有可切的东西」（比如单镜头视频），
+    这是合法取值，调用方据此显示成「跳过切割」而不是「0/0 卡住了」。
+
+    flush=True：工作台轮询的是被重定向到文件的 stdout，攒在缓冲区里就等于
+    没有进度 —— 宁可多一次写系统调用。
+    """
+    print(f"{PROGRESS_PREFIX} {phase} {done} {total}", flush=True)
+
+
 def bullet_list(items: list[str], marker: str = "•") -> None:
     """输出一个简单的项目符号列表。"""
     for item in items:

@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import ContentList from './pages/ContentList'
 import Dashboard from './pages/Dashboard'
+import MixCut from './pages/MixCut'
 import SceneSplit from './pages/SceneSplit'
 
 /**
@@ -19,6 +20,7 @@ export default function App() {
         <Route path="/contents" element={<ContentList />} />
         {/* 必须在通配路由之前，否则会被重定向到首页 */}
         <Route path="/scene" element={<SceneSplit />} />
+        <Route path="/mix" element={<MixCut />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

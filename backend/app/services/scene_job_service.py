@@ -418,6 +418,10 @@ class SceneJobService:
         返回的 index 是全任务范围内从 1 开始的连续序号 —— 缩略图接口
         就用这个序号定位文件，避免前端传路径造成任意文件读取。
 
+        每一条还带上 item_index（它属于哪一条视频）—— 前端要按视频分组的
+        时候只能靠这个：递归模式下两条同名视频是很正常的，拿文件名去归组
+        会把它们混在一起。
+
         Raises:
             NotFoundError: 任务不存在。
         """
@@ -435,6 +439,7 @@ class SceneJobService:
                 clips.append(
                     {
                         "index": len(clips) + 1,
+                        "item_index": item.index,
                         "name": name,
                         "source_name": item.source_name,
                         "size_bytes": size,

@@ -10,6 +10,12 @@
 | TypeScript | 5.6 | 类型系统（严格模式） |
 | Vite | 5.4 | 构建工具与开发服务器 |
 | React Router | 6.x | 路由 |
+| antd | 6.x | **唯一的 UI 组件库**，全站界面组件均来自它 |
+| @ant-design/icons | 6.x | antd 配套图标库，界面上所有图标都来自它（不用 emoji 当图标） |
+
+> **关于 antd 6**：v6 的组件样式是运行时按 CSS 变量生成的，静态产物里 grep 不到
+> `.ant-` 类名，属正常现象；调试样式请以浏览器运行时 DOM 为准。v6 把弹窗内容区的
+> 类名改成了 `ant-modal-container`（v5 是 `ant-modal-content`），写自动化脚本时会遇到。
 
 > **版本说明**：该组合在 Node 18 / 20 / 22 上均可运行。
 > 若已将 Node 升级到 20.19+ 或 22.12+，可平滑升级到 Vite 7。
@@ -41,18 +47,24 @@ npm run dev
 frontend/src/
 ├── api/
 │   ├── client.ts       # fetch 封装：超时、错误转换、响应拆包
-│   └── contents.ts     # 内容相关接口
+│   ├── contents.ts     # 内容相关接口
+│   ├── filesystem.ts   # 目录列举（配合目录选择弹窗）
+│   ├── mix.ts          # 智能混剪接口
+│   └── scene.ts        # 镜头分割接口
 ├── components/
-│   ├── Layout.tsx      # 全局布局（侧边导航）
-│   └── ContentFormModal.tsx  # 内容创建/编辑弹窗
+│   ├── Layout.tsx      # 全局布局（antd Layout + Menu 侧边导航）
+│   ├── ContentFormModal.tsx  # 内容创建/编辑弹窗（antd Modal + Form）
+│   └── DirectoryPicker.tsx   # 目录选择弹窗
 ├── pages/
 │   ├── Dashboard.tsx   # 工作台概览
-│   └── ContentList.tsx # 内容管理
-├── types/content.ts    # 类型定义与常量
+│   ├── ContentList.tsx # 内容管理
+│   ├── SceneSplit.tsx  # 智能镜头分割
+│   └── MixCut.tsx      # 智能混剪
+├── types/              # 类型定义与常量（content / scene / mix）
 ├── utils/format.ts     # 格式化工具
 ├── App.tsx             # 路由定义
-├── main.tsx            # 应用入口
-└── index.css           # 全局样式（CSS 变量主题）
+├── main.tsx            # 应用入口（ConfigProvider 主题在这里）
+└── index.css           # 页面底座与设计变量（不含组件样式）
 ```
 
 ## 接口调用方式
@@ -103,19 +115,48 @@ try {
 
 如需覆盖，复制 `.env.example` 为 `.env.local` 后修改（该文件已被 git 忽略）。
 
-## 样式约定
+## UI 与样式约定
 
-`src/index.css` 使用 CSS 变量集中管理主题色与圆角、阴影：
+**界面组件一律使用 antd，不手写原生表单 / 表格 / 弹窗 / 按钮。** antd 已经处理过
+这些组件的边界情况（翻页越界、空数据、表单校验、键盘操作、焦点管理），自己写只会漏；
+两套组件混用还会让人分不清「改哪儿才会生效」。
 
-```css
-:root {
-  --color-primary: #2563eb;
-  --color-text: #1f2328;
-  --radius-md: 10px;
-}
+主题只有**一个来源** —— `main.tsx` 里 `ConfigProvider` 的 `theme.token`：
+
+```tsx
+<ConfigProvider locale={zhCN} theme={{ token: { colorPrimary: '#2563eb', borderRadius: 10 } }}>
 ```
 
-调整整体视觉时优先修改变量，而非逐个覆盖组件样式。
+`src/index.css` 因此只剩两样东西，不再有 `.btn` / `.card` / `.table` 这类手写组件样式：
+
+1. **设计变量**（`:root` 里的 `--color-*` / `--radius-*`）—— 与 `ConfigProvider` 的
+   token 对齐，供少数需要跟主题一致的自定义元素（如状态色小色条）引用；
+2. **页面底座** —— `html/body` 的高度、字体、背景色。
+
+调整整体视觉时改这两处，而不是逐个页面覆盖组件样式。
+
+### 图标
+
+界面上的图标一律用 `@ant-design/icons`，**不要用 emoji 充当图标**：emoji 的字形由
+操作系统决定，在 Windows / macOS / Linux 上粗细、配色、基线各不相同，也没法跟主色调
+统一，同一排里放几个会显得参差不齐。
+
+三种常见写法：
+
+```tsx
+<Button icon={<EyeOutlined />}>预览切点</Button>          {/* 按钮配图标，间距 antd 自己管 */}
+<Card title={<Space size={8}><EyeOutlined />切点预览</Space>} />   {/* 卡片标题 */}
+<ScissorOutlined style={{ marginRight: 8 }} />            {/* 标题里，自己留 8px */}
+```
+
+> 标题里那处 `marginRight` 不能省：JSX 会把跨行的缩进吃掉，图标和文字会贴在一起。
+
+### 两个容易踩的点
+
+- **提示与确认框要用 hook 形式**：`message.useMessage()` / `Modal.useModal()`，
+  不要用 `message.success()` 静态方法 —— 后者拿不到 `ConfigProvider` 的主题与语言。
+- **antd 会在两个汉字之间插空格**：文案恰好是两个汉字时（如「刷新」「搜索」），
+  渲染出的 DOM 文本是 `刷 新`。写自动化脚本定位按钮时用正则 `/刷\s*新/`。
 
 ## 构建与部署
 

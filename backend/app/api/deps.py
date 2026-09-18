@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.account_service import AccountService
 from app.services.content_service import ContentService
+from app.services.mix_job_service import MixJobService
 from app.services.publish_task_service import PublishTaskService
 from app.services.scene_job_service import SceneJobService
 
@@ -67,8 +68,14 @@ def get_scene_job_service(db: DbSession) -> SceneJobService:
     return SceneJobService(db)
 
 
+def get_mix_job_service(db: DbSession) -> MixJobService:
+    """构造混剪任务服务实例。"""
+    return MixJobService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 PublishTaskServiceDep = Annotated[PublishTaskService, Depends(get_publish_task_service)]
 SceneJobServiceDep = Annotated[SceneJobService, Depends(get_scene_job_service)]
+MixJobServiceDep = Annotated[MixJobService, Depends(get_mix_job_service)]

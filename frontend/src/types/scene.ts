@@ -72,8 +72,13 @@ export interface SceneJob {
   scene_count: number
   current_index: number
   current_video: string
+  /** 当前视频已处理到的片段序号（vct 逐段上报，失败/跳过的也往前走） */
   current_clips: number
   current_clip_names: string[]
+  /** 当前视频所处阶段：detect 检测中 / split 切割中；空串表示还没收到上报 */
+  current_phase: '' | 'detect' | 'split'
+  /** 当前视频预计切出的片段数。检测跑完才知道分母，之前恒为 0（那时只能显示「检测中」） */
+  current_total_clips: number
   /** 总进度百分比：按视频条数计算（服务端算好） */
   progress_percent: number
   started_at: string | null
@@ -122,16 +127,27 @@ export interface SceneEnvironment {
   ready: boolean
   vct_path: string
   vct_exists: boolean
+  /** 素材目录根（仓库根目录的 materials/），下有 source/clips/subtitle/output 四个分段 */
+  materials_dir: string
+  /** 默认输入目录：materials/source，页面用它作为输入目录的初始值 */
+  default_input_dir: string
+  /** 默认输出目录：materials/clips，页面用它作为输出目录的初始值 */
+  default_output_dir: string
   dependencies: DependencyStatus[]
 }
 
 /** 切分产出的片段 */
 export interface SceneClip {
+  /** 片段序号（全任务范围内连续）；缩略图与播放接口用它定位 */
   index: number
+  /** 所属视频在任务内的序号；按它把片段归到各条视频下，不靠文件名猜 */
+  item_index: number
   name: string
   source_name: string
   size_bytes: number
   thumb_url: string
+  /** 视频流地址（后端支持 Range，可拖动进度条）；路径由后端给，前端不拼 */
+  video_url: string
 }
 
 /** 预览切点汇总 */

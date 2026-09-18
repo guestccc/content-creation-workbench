@@ -6,7 +6,9 @@ SceneRunner 通过 popen_factory 注入它，测试在主线程同步跑完整�
 行为契约（与真实 vct 对齐）：
 - 首次 poll() 时在 -o 指定的输出目录里「生产」产物（CSV + 片段文件），
   然后返回脚本设定的退出码；
-- 产物内容与退出码由每个用例通过 script 字典控制。
+- 产物内容与退出码由每个用例通过 script 字典控制；
+- 每 poll() 一次就往 stdout 句柄写一行 script["log_lines"]，模拟真实 vct
+  边跑边往 vct.log 里写进度标记 —— 被测代码正是靠读这个文件拿进度的。
 """
 
 from pathlib import Path
@@ -55,10 +57,15 @@ class FakePopen:
         Args:
             argv: 完整命令行（据此解析输出目录、输入视频、是否 --split）。
             script: 行为脚本，键：
-                exit_code  退出码，默认 0；
-                scenes     CSV 里的镜头数，默认 3；
-                clips      生成的片段数，默认等于 scenes（split 且非单镜头时）；
-                hang       True 时 poll 永远返回 None（模拟卡死的进程）。
+                exit_code          退出码，默认 0；
+                scenes             CSV 里的镜头数，默认 3；
+                clips              生成的片段数，默认等于 scenes（split 且非单镜头时）；
+                hang               True 时 poll 永远返回 None（模拟卡死的进程）；
+                polls_before_exit  退出前先空转多少次 poll，默认 0（首次 poll 即退出）。
+                                   设成正数才能观察到「跑到一半」的中间状态；
+                log_lines          每次 poll 往 stdout 写一行，模拟 vct 的进度标记；
+                on_poll            每次 poll 时调用的回调 fn(proc, 第几次)，
+                                   测试用它充当「前端轮询接口」读当时的进度。
         """
         self.argv = list(argv)
         self.cwd = cwd
@@ -66,6 +73,10 @@ class FakePopen:
         self.start_new_session = start_new_session
         self.script = dict(script or {})
         self.pid = 40000 + len(FakePopen.instances)
+        # 保存 stdout 句柄：真实 vct 的 stdout 被重定向到 vct.log，
+        # 被测代码正是读这个文件来解析进度的，替身得往同一个地方写。
+        self.stdout = stdout
+        self.poll_count = 0
         self._returncode: Optional[int] = None
         self._produced = False
         FakePopen.instances.append(self)
@@ -75,14 +86,45 @@ class FakePopen:
     # ------------------------------------------------------------------
 
     def poll(self) -> Optional[int]:
-        """首次调用生产产物并返回退出码；hang 模式下永远返回 None。"""
+        """首次调用生产产物并返回退出码；hang 模式下永远返回 None。
+
+        polls_before_exit 次空转是为了复现真实的时间轴：vct 跑几十秒到几分钟，
+        进度字段是在这期间被一次次刷新的，只有「退出前先 poll 几次」才测得到
+        中间状态，而不是只看到首尾两个点。
+        """
+        self.poll_count += 1
+        probe = self.script.get("on_poll")
+        if probe is not None:
+            probe(self, self.poll_count)
+
         if self.script.get("hang"):
+            self._emit_log_line()
             return None
+
+        remaining = int(self.script.get("polls_before_exit", 0))
+        if self.poll_count <= remaining:
+            self._emit_log_line()
+            return None
+
+        self._emit_log_line()
         if not self._produced:
             self._produce()
             self._produced = True
             self._returncode = int(self.script.get("exit_code", 0))
         return self._returncode
+
+    def _emit_log_line(self) -> None:
+        """把下一条预置日志写进 stdout 句柄（写完即 flush，与 vct 一致）。"""
+        lines: List[str] = list(self.script.get("log_lines") or [])
+        index = self.poll_count - 1
+        if index >= len(lines) or self.stdout is None:
+            return
+        try:
+            self.stdout.write((lines[index] + "\n").encode("utf-8"))
+            self.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            # 句柄已被被测代码关掉（进程退出后），这在真实场景里也不该崩
+            pass
 
     # ------------------------------------------------------------------
     # 产物模拟

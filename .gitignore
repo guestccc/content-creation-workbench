@@ -76,3 +76,28 @@ cli/.venv/
 # ==========================================================================
 # vct 的运行时数据：日志与本地配置，不应提交
 .vct/
+
+# ==========================================================================
+# materials/（素材目录：原始视频与切分产物）
+# ==========================================================================
+# 里面的东西一律不入库：原片动辄几百 MB 到几 GB，切分产物更是成倍增长，
+# 提交上去会让仓库没法用。切分产物落在 materials/clips/<视频名>_scenes/，
+# 同样被挡住。
+#
+# 但目录骨架与说明要留在仓库里：README.md 讲清楚每一段放什么，
+# 四个分段（source / clips / subtitle / output）各带一个 .gitkeep 占位 ——
+# git 不跟踪空目录，没有占位文件新克隆下来就只剩一个空文件夹。
+# 后端启动时也会按 app/core/materials.py 的规划补建，两边互为兜底。
+#
+# 写法：先挡住 materials/ 下的一切，再逐个放行目录、说明与占位文件。
+# gitignore 是后面的规则优先，顺序不能调换。
+materials/**
+!materials/README.md
+!materials/source/
+!materials/source/.gitkeep
+!materials/clips/
+!materials/clips/.gitkeep
+!materials/subtitle/
+!materials/subtitle/.gitkeep
+!materials/output/
+!materials/output/.gitkeep
