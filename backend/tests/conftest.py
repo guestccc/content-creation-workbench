@@ -80,6 +80,55 @@ def _fake_vc_installed(monkeypatch):
     monkeypatch.setattr("app.services.subtitle_job_service.detect", lambda *a, **k: fake)
 
 
+@pytest.fixture(autouse=True)
+def _fake_mc_installed(monkeypatch, tmp_path):
+    """素材抓取相关用例默认假定 MediaCrawler 已装好（探测结果为就绪）。
+
+    创建任务时服务层会先 probe_environment() 确认工具可用 —— 测试不该依赖
+    开发机上真的装着 MediaCrawler，更不该在测试里跑真探测（会起子进程）。
+    需要其他场景（未安装 / 缺补丁）的用例自己再 monkeypatch 一次覆盖本夹具。
+    同时把 CRAWL_WORKER_ENABLED 关掉：万一有用例以 with client: 触发
+    lifespan，也不许在测试里起工作线程 / 触碰真实库的回收逻辑。
+    """
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "CRAWL_WORKER_ENABLED", False)
+    monkeypatch.setattr(
+        "app.services.crawl_job_service.probe_environment",
+        lambda refresh=False: {
+            "installed": True,
+            "ready": True,
+            "launcher": ["/fake/python"],
+            "kind": "venv-python",
+            "mc_root": str(tmp_path / "MediaCrawler"),
+            "python_version": "3.11.16",
+            "detail": "",
+            "node_version": "v20.11.0",
+            "node_required_platforms": ["dy", "zhihu"],
+            "login_states": [],
+            "media_enabled": True,
+            "zhihu_creator_cli_supported": True,
+            "default_output_dir": str(tmp_path / "materials" / "crawl"),
+            "install_hints": [],
+            "warnings": [],
+        },
+    )
+
+
+@pytest.fixture()
+def _isolate_crawl_output(monkeypatch, tmp_path):
+    """把爬虫任务的输出目录指到 tmp（materials/crawl 在开发机上是真实目录）。
+
+    任务输出目录派生自 SCENE_MATERIALS_DIR，不隔离的话 FakeMcPopen 的
+    「产物」与各用例的断言文件会写进真实 materials/crawl/。只给爬虫测试
+    用（test_crawl_runner / test_crawl_jobs_api 以 usefixtures 声明），
+    不做成 autouse —— 素材目录的默认值本身有别的测试在钉。
+    """
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "SCENE_MATERIALS_DIR", str(tmp_path / "materials"))
+
+
 @pytest.fixture()
 def client(db_session):
     """提供覆盖了数据库依赖的测试客户端。
@@ -161,6 +210,41 @@ def create_account(client):
     def _create(platform: str = "抖音", nickname: str = "测试账号", **extra) -> dict:
         payload = {"platform": platform, "nickname": nickname, **extra}
         response = client.post("/api/v1/accounts", json=payload)
+        assert response.status_code == 201, response.text
+        return response.json()["data"]
+
+    return _create
+
+
+@pytest.fixture()
+def sample_creator_payload() -> dict:
+    """一份标准的创作者创建请求体，供各用例复用。"""
+    return {
+        "platform": "xhs",
+        "name": "保温杯研究员",
+        "homepage": "https://www.xiaohongshu.com/user/profile/12345",
+        "tags": ["母婴", "好物"],
+        "remark": "更新稳定，适合跟品",
+    }
+
+
+@pytest.fixture()
+def created_creator(client, sample_creator_payload) -> dict:
+    """预先创建一位创作者，返回接口响应中的 data 部分。"""
+    response = client.post("/api/v1/creators", json=sample_creator_payload)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+@pytest.fixture()
+def create_creator(client):
+    """返回一个「创建创作者」的工厂函数，便于一次用例中建多个创作者。"""
+
+    def _create(platform: str = "xhs", name: str = "测试博主", **extra) -> dict:
+        payload = {"platform": platform, "name": name, **extra}
+        if "homepage" not in payload:
+            payload["homepage"] = f"https://example.com/{platform}/{name}"
+        response = client.post("/api/v1/creators", json=payload)
         assert response.status_code == 201, response.text
         return response.json()["data"]
 

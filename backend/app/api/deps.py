@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.services.account_service import AccountService
+from app.services.creator_service import CreatorService
 from app.services.content_service import ContentService
+from app.services.crawl_job_service import CrawlJobService
 from app.services.mix_job_service import MixJobService
 from app.services.publish_task_service import PublishTaskService
 from app.services.scene_job_service import SceneJobService
@@ -79,6 +81,16 @@ def get_subtitle_job_service(db: DbSession) -> SubtitleJobService:
     return SubtitleJobService(db)
 
 
+def get_crawl_job_service(db: DbSession) -> CrawlJobService:
+    """构造素材抓取任务服务实例。"""
+    return CrawlJobService(db)
+
+
+def get_creator_service(db: DbSession) -> CreatorService:
+    """构造创作者主页服务实例。"""
+    return CreatorService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
@@ -86,3 +98,5 @@ PublishTaskServiceDep = Annotated[PublishTaskService, Depends(get_publish_task_s
 SceneJobServiceDep = Annotated[SceneJobService, Depends(get_scene_job_service)]
 MixJobServiceDep = Annotated[MixJobService, Depends(get_mix_job_service)]
 SubtitleJobServiceDep = Annotated[SubtitleJobService, Depends(get_subtitle_job_service)]
+CrawlJobServiceDep = Annotated[CrawlJobService, Depends(get_crawl_job_service)]
+CreatorServiceDep = Annotated[CreatorService, Depends(get_creator_service)]

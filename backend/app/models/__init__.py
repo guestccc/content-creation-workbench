@@ -5,6 +5,14 @@
 
 from app.models.account import Account, AccountStatus
 from app.models.content import Content, ContentStatus
+from app.models.crawl_job import (
+    CrawlJob,
+    CrawlJobStatus,
+    CrawlLoginType,
+    CrawlPlatform,
+    CrawlerType,
+)
+from app.models.creator import Creator
 from app.models.publish_task import PublishTask, PublishTaskStatus
 from app.models.mix_job import (
     MixJob,
@@ -32,6 +40,12 @@ __all__ = [
     "AccountStatus",
     "Content",
     "ContentStatus",
+    "CrawlJob",
+    "CrawlJobStatus",
+    "CrawlLoginType",
+    "CrawlPlatform",
+    "CrawlerType",
+    "Creator",
     "MixJob",
     "MixJobItem",
     "MixJobStatus",

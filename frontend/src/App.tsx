@@ -2,7 +2,9 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import Layout from './components/Layout'
 import ContentList from './pages/ContentList'
+import CreatorLibrary from './pages/CreatorLibrary'
 import Dashboard from './pages/Dashboard'
+import MaterialCrawl from './pages/MaterialCrawl'
 import MixCut from './pages/MixCut'
 import SceneSplit from './pages/SceneSplit'
 import SubtitleExtract from './pages/SubtitleExtract'
@@ -23,6 +25,8 @@ export default function App() {
         <Route path="/scene" element={<SceneSplit />} />
         <Route path="/mix" element={<MixCut />} />
         <Route path="/subtitle" element={<SubtitleExtract />} />
+        <Route path="/crawl" element={<MaterialCrawl />} />
+        <Route path="/creators" element={<CreatorLibrary />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

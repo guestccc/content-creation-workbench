@@ -12,7 +12,8 @@
     ├── source/     原始素材：待切的视频往这里拷（镜头分割页的默认输入目录）
     ├── clips/      镜头分割产物：每条原片一个 <视频名>_scenes/ 子目录（默认输出目录）
     ├── subtitle/   字幕提取产物：每条视频一个 <视频名>.srt（字幕提取页的默认输出目录）
-    └── output/     成片，待发布
+    ├── output/     成片，待发布
+    └── crawl/      素材抓取产物：每个任务一个 job_<id>/ 子目录（jsonl + 媒体文件）
 
 根目录本身不鼓励放东西：原片进 source/，产物进各自的分段目录，
 这样「哪些是素材、哪些是产物」一眼可辨，也不会几百个文件糊在一层。
@@ -34,6 +35,7 @@ SOURCE = "source"
 CLIPS = "clips"
 SUBTITLE = "subtitle"
 OUTPUT = "output"
+CRAWL = "crawl"
 
 #: 子目录 → 用途说明。顺序即建目录的顺序，也是日志与文档里的顺序。
 SUBDIRS: Dict[str, str] = {
@@ -41,6 +43,7 @@ SUBDIRS: Dict[str, str] = {
     CLIPS: "镜头分割产物：每条原片一个 <视频名>_scenes/ 子目录",
     SUBTITLE: "字幕提取产物：每条视频一个 <视频名>.srt",
     OUTPUT: "成片，待发布",
+    CRAWL: "素材抓取产物：每个任务一个 job_<id>/ 子目录（MC 的 --save_data_path）",
 }
 
 

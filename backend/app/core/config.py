@@ -6,25 +6,59 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _default_vc_root() -> str:
+def repo_root() -> Path:
+    """本仓库（内容创作工作台）的根目录。
+
+    本文件位于 <仓库>/backend/app/core/config.py，所以 parents[3] 是仓库根。
+    它是「仓库内的绝对路径」类默认值的唯一来源（vct、materials/ 等）。
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def toolbox_root() -> Optional[Path]:
+    """工具箱根目录（仓库的上一层），VideoCaptioner 等平级工具的存放处。
+
+    把仓库单独拷到别处时这一层可能不存在（下标越界），此时返回 None ——
+    配置的默认值不该让整个应用起不来，探测不到会在页面上如实报告。
+    """
+    try:
+        return Path(__file__).resolve().parents[4]
+    except IndexError:
+        return None
+
+
+def default_vc_root() -> str:
     """VideoCaptioner 的默认安装位置：工具箱根目录下的 VideoCaptioner/。
 
-    本文件位于 <工具箱>/内容创作工作台/backend/app/core/config.py，
-    所以 parents[3] 是仓库根、parents[4] 是工具箱根。把仓库单独拷到别处时
-    parents[4] 可能不存在（下标越界），这时退回仓库根 —— 配置的默认值
-    不该让整个应用起不来，探测不到会在页面上如实报告。
+    注意这只是**一个**默认候选，不是唯一答案：真实目录名常带下载解压留下的
+    后缀（VideoCaptioner-master 之类），所以 services/subtitle_env.py 还会
+    扫同级目录做模糊匹配，页面上也能手动指定。见该模块的 _discover_roots()。
+
+    公开而非私有，是因为 services/subtitle_settings.py 在「用户把 .env 里
+    那行整个删掉」时要拿它当回退值 —— 默认值必须只有这一个来源。
     """
-    resolved = Path(__file__).resolve()
-    try:
-        return str(resolved.parents[4] / "VideoCaptioner")
-    except IndexError:
-        return str(resolved.parents[3] / "VideoCaptioner")
+    base = toolbox_root()
+    if base is None:
+        return str(repo_root() / "VideoCaptioner")
+    return str(base / "VideoCaptioner")
+
+
+def default_mc_root() -> str:
+    """MediaCrawler 的默认位置：工具箱根目录下的 MediaCrawler/。
+
+    与 default_vc_root 同一套理由：仓库被单独拷走时 toolbox_root() 可能
+    推不出来，退回仓库内路径 —— 探测不到会在环境自检里如实报告并给指引。
+    """
+    base = toolbox_root()
+    if base is None:
+        return str(repo_root() / "MediaCrawler")
+    return str(base / "MediaCrawler")
 
 
 class Settings(BaseSettings):
@@ -69,14 +103,13 @@ class Settings(BaseSettings):
 
     # ---------- 智能镜头分割 ----------
     # vct 命令行工具的路径。vct + vctl 已作为仓库一部分维护在
-    # 内容创作工作台/vct 与 内容创作工作台/vctl/：
-    # 本文件位于 backend/app/core/，parents[3] 就是 内容创作工作台。
-    SCENE_VCT_PATH: str = str(Path(__file__).resolve().parents[3] / "vct")
+    # 内容创作工作台/vct 与 内容创作工作台/vctl/。
+    SCENE_VCT_PATH: str = str(repo_root() / "vct")
     # 素材目录的**根**，默认是仓库根目录的 materials/。
     # 整个目录被 .gitignore 挡在 git 外面（原片与产物都太大），
     # 由后端启动时按 app/core/materials.py 里的规划建好 source / clips /
     # subtitle / output 四个分段，新克隆的仓库因此也是规划好的样子。
-    SCENE_MATERIALS_DIR: str = str(Path(__file__).resolve().parents[3] / "materials")
+    SCENE_MATERIALS_DIR: str = str(repo_root() / "materials")
     # 是否启用后台工作线程。测试环境置 False，避免 worker 与测试会话抢连接。
     SCENE_WORKER_ENABLED: bool = True
     # 工作线程空闲时的轮询间隔（秒）。
@@ -136,7 +169,7 @@ class Settings(BaseSettings):
     # parents[3] = 内容创作工作台，parents[4] = 内容制作工具（工具箱根），
     # VideoCaptioner 就放在工具箱根下。注意别照抄 vctl/env.py 里的
     # VC_ROOT —— 那边指的是仓库内的路径，本机并不存在。
-    SUBTITLE_VC_ROOT: str = _default_vc_root()
+    SUBTITLE_VC_ROOT: str = default_vc_root()
     # 显式指定要调用的解释器/可执行文件，留空表示自动探测（见 services/subtitle_env.py）。
     # 给「自动探测找不到、但用户知道自己装在哪儿」的情况留的后门。
     SUBTITLE_VC_PYTHON: str = ""
@@ -165,6 +198,32 @@ class Settings(BaseSettings):
     SUBTITLE_DETECT_CACHE_SECONDS: float = 30.0
     # 字幕预览接口最多返回多少字节（超出只截取开头并置 truncated）。
     SUBTITLE_PREVIEW_MAX_BYTES: int = 512 * 1024
+
+    # ---------- 素材抓取（MediaCrawler） ----------
+    # MediaCrawler 的仓库根目录。它与本仓库平级（工具箱根下），自带 .venv
+    # 与登录态缓存，抓取任务全部以「子进程调它的 main.py」方式执行 ——
+    # 它的配置是全局模块变量，import 进本进程会被多任务互相污染，CLI 是
+    # 它官方 WebUI 也在用的隔离边界。
+    CRAWL_MC_ROOT: str = default_mc_root()
+    # 是否启用后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。
+    CRAWL_WORKER_ENABLED: bool = True
+    # 工作线程空闲时的轮询间隔（秒）。
+    CRAWL_JOB_POLL_SECONDS: float = 1.0
+    # 盯 MC 子进程时检查取消/超时信号的间隔（秒）。
+    CRAWL_JOB_TICK_SECONDS: float = 0.5
+    # 进度字段落库的最小间隔（秒），避免高频写库。
+    CRAWL_JOB_PROGRESS_SECONDS: float = 3.0
+    # 单个任务的整体硬超时（秒）。抓取 200 条加下载媒体最多十几分钟，1 小时足够宽。
+    CRAWL_JOB_TIMEOUT_SECONDS: int = 3600
+    # 停止工作线程 / 取消任务时，等待 MC 子进程组自行退出的宽限（秒）。
+    # 比字幕略长：MC 收尾要清理它拉起的 CDP 浏览器，强杀太早会留孤儿 Chrome。
+    CRAWL_JOB_STOP_GRACE_SECONDS: float = 5.0
+    # 单任务最多抓多少条（反爬自保：一口气几千条必然触发风控）。
+    CRAWL_MAX_NOTES_LIMIT: int = 200
+    # 并发抓取数的上限（MC 官方默认 1，加大容易触发风控）。
+    CRAWL_MAX_CONCURRENCY_LIMIT: int = 3
+    # MC 环境探测结果的缓存秒数（探测要起子进程 + 扫目录，不能每请求都做）。
+    CRAWL_ENV_CACHE_SECONDS: float = 30.0
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

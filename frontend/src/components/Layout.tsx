@@ -1,8 +1,10 @@
 import {
+  CloudDownloadOutlined,
   DashboardOutlined,
   FileTextOutlined,
   FontSizeOutlined,
   ScissorOutlined,
+  TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
 import { Layout as AntLayout, Menu, Typography } from 'antd'
@@ -11,20 +13,65 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 
 const { Text, Title } = Typography
 
+/** 导航叶子项（可直接点进去的页面） */
+interface NavLeaf {
+  key: string
+  label: string
+  icon: ReactNode
+}
+
+/** 分组导航项：渲染成 antd Menu 的 group（只是分组标题，不可选中） */
+interface NavGroup {
+  type: 'group'
+  key: string
+  label: string
+  children: NavLeaf[]
+}
+
 /**
  * 侧边栏导航配置。
  *
- * key 就是路由路径 —— 直接把菜单项和路由绑在一起，省掉一层映射，
+ * 叶子项的 key 就是路由路径 —— 直接把菜单项和路由绑在一起，省掉一层映射，
  * 也不会出现「菜单写了这个路径、路由表里却没有」的错位。
  */
-const NAV_ITEMS: { key: string; label: string; icon: ReactNode }[] = [
+const NAV_ITEMS: (NavLeaf | NavGroup)[] = [
   { key: '/', label: '工作台概览', icon: <DashboardOutlined /> },
   { key: '/contents', label: '内容管理', icon: <FileTextOutlined /> },
-  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），字幕用文字，三个别用重了
+  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），字幕用文字，素材抓取用云下载
   { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
   { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
   { key: '/subtitle', label: '字幕提取', icon: <FontSizeOutlined /> },
+  {
+    type: 'group',
+    key: 'g-rewrite',
+    label: '图文二创',
+    children: [
+      { key: '/crawl', label: '素材抓取', icon: <CloudDownloadOutlined /> },
+      { key: '/creators', label: '创作者主页', icon: <TeamOutlined /> },
+    ],
+  },
 ]
+
+/** 摊平后的全部叶子：选中态匹配只看叶子（分组标题不是路由） */
+const NAV_LEAVES: NavLeaf[] = NAV_ITEMS.flatMap((item) =>
+  'children' in item ? item.children : [item],
+)
+
+/** Menu 的 items：叶子原样，分组转成 antd 的 group 结构 */
+const MENU_ITEMS = NAV_ITEMS.map((item) =>
+  'children' in item
+    ? {
+        type: 'group' as const,
+        key: item.key,
+        label: item.label,
+        children: item.children.map((leaf) => ({
+          key: leaf.key,
+          label: leaf.label,
+          icon: leaf.icon,
+        })),
+      }
+    : { key: item.key, label: item.label, icon: item.icon },
+)
 
 /**
  * 全局布局组件：左侧固定导航栏 + 右侧内容区。
@@ -37,9 +84,9 @@ export default function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
 
-  // 精确匹配 '/'，其余按前缀匹配（子路径也算选中这一项）
+  // 精确匹配 '/'，其余按前缀匹配（子路径也算选中这一项）；在摊平的叶子里找
   const selectedKey =
-    NAV_ITEMS.find((item) =>
+    NAV_LEAVES.find((item) =>
       item.key === '/' ? pathname === '/' : pathname.startsWith(item.key),
     )?.key ?? '/'
 
@@ -89,11 +136,7 @@ export default function Layout() {
           <Menu
             mode="inline"
             selectedKeys={[selectedKey]}
-            items={NAV_ITEMS.map((item) => ({
-              key: item.key,
-              label: item.label,
-              icon: item.icon,
-            }))}
+            items={MENU_ITEMS}
             onClick={({ key }) => navigate(key)}
             style={{ flex: 1, borderInlineEnd: 'none' }}
           />

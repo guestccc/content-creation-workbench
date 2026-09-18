@@ -12,7 +12,8 @@
 1. stdio 必须落文件，绝不 PIPE —— ffmpeg 持续输出，无人读取的管道缓冲写满后
    子进程会永久阻塞在 write 上（表现为「任务跑到一半不动了」）；
 2. 必须 start_new_session=True 并整组 kill —— 被调工具自己会拉起子进程，
-   只杀直接子进程会留下孤儿继续啃 CPU。
+   只杀直接子进程会留下孤儿继续啃 CPU。Windows 上 Python 忽略
+   start_new_session，等价的隔离用下面的 CHILD_CREATION_FLAGS。
 """
 
 import os
@@ -27,6 +28,18 @@ from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+#: Windows 上 start_new_session 是空操作，子进程仍挂在后端控制台里 —— 终端
+#: 里按 Ctrl+C 时，CTRL_C_EVENT 会广播给控制台的全部进程，正在跑的抓取 /
+#: 混剪 / 分割 / 字幕任务会被连带打断（MC 打「Received interrupt signal 2」
+#: 后退出，任务被标成失败）。CREATE_NEW_PROCESS_GROUP 把子进程放进不吃
+#: 控制台 Ctrl+C 的新进程组，这才是 Windows 侧的等价隔离。POSIX 上为 0，
+#: start_new_session=True 已经完成同样的事。要停任务走各页面的取消按钮
+#: （terminate_process_group 整组杀，不受此影响）；直接关终端窗口仍会带走
+#: 子进程（CTRL_CLOSE_EVENT 不看进程组），这是预期行为。
+CHILD_CREATION_FLAGS = (
+    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+)
 
 
 def child_env() -> Dict[str, str]:

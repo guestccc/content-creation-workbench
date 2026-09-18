@@ -39,8 +39,20 @@ export class ApiError extends Error {
   }
 }
 
-/** 接口基础路径：开发环境走 vite 代理，生产环境可通过环境变量覆盖 */
-const BASE_URL: string = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+/**
+ * 把任意异常转成给用户看的文案。
+ *
+ * ApiError（后端的业务错误、网络超时等）用后端给的 message —— 它比任何
+ * 兜底文案都具体；其余异常（前端自己抛的、第三方库抛的）才用兜底文案。
+ * 页面里所有的 catch 分支都走这里，不各写各的三元表达式。
+ */
+export function describeError(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback
+}
+
+/** 接口基础路径：开发环境走 vite 代理，生产环境可通过环境变量覆盖。
+ *  导出给拼静态资源地址的场景（如素材抓取的本地媒体 img/video src）。 */
+export const BASE_URL: string = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
 /** 请求超时时间（毫秒） */
 const TIMEOUT_MS = 15000

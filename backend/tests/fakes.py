@@ -11,6 +11,7 @@ SceneRunner 通过 popen_factory 注入它，测试在主线程同步跑完整�
   边跑边往 vct.log 里写进度标记 —— 被测代码正是靠读这个文件拿进度的。
 """
 
+import json
 from pathlib import Path
 from typing import List, Optional
 
@@ -48,6 +49,7 @@ class FakePopen:
         stderr=None,
         stdin=None,
         start_new_session: bool = False,
+        creationflags: int = 0,
         cwd: Optional[str] = None,
         env=None,
         script: Optional[dict] = None,
@@ -71,6 +73,7 @@ class FakePopen:
         self.cwd = cwd
         self.env = env
         self.start_new_session = start_new_session
+        self.creationflags = creationflags
         self.script = dict(script or {})
         self.pid = 40000 + len(FakePopen.instances)
         # 保存 stdout 句柄：真实 vct 的 stdout 被重定向到 vct.log，
@@ -163,6 +166,7 @@ class FakePopen:
 # 视频字幕提取（VideoCaptioner）
 # ---------------------------------------------------------------------------
 
+
 # 一份最小可用的 .srt（两条字幕），替身默认往输出目录写这个内容
 DEFAULT_SRT = (
     "1\n"
@@ -181,9 +185,10 @@ class FakeVcPopen:
 
     argv 形状（与 subtitle_runner.build_argv 对齐）：
         [launcher..., "transcribe", <video>, [--asr X] [--language Y]
-         --format srt, -o, <dir>/, --quiet]
+         --format srt, -o, <输出文件完整路径>, --quiet]
     与 FakePopen 的关键区别：launcher 前缀长度不定，视频参数要靠
-    "transcribe" 定位；-o 的值带结尾斜杠，用前要剥掉。
+    "transcribe" 定位；-o 的值是分配好的输出文件（真实 VC 对带扩展名的
+    路径原样写盘），替身也直接写这个路径。
 
     script 键（缺省即一条顺利转写：退出码 0 + 产出一份两条字幕的 .srt）：
         exit_code          退出码，默认 0；
@@ -211,6 +216,7 @@ class FakeVcPopen:
         stderr=None,
         stdin=None,
         start_new_session: bool = False,
+        creationflags: int = 0,
         cwd: Optional[str] = None,
         env=None,
         script: Optional[dict] = None,
@@ -219,6 +225,7 @@ class FakeVcPopen:
         self.cwd = cwd
         self.env = env
         self.start_new_session = start_new_session
+        self.creationflags = creationflags
         self.script = dict(script or {})
         self.pid = 50000 + len(FakeVcPopen.instances)
         self.stdout = stdout
@@ -264,23 +271,191 @@ class FakeVcPopen:
             pass
 
     def _produce(self) -> None:
-        """按脚本在 -o 目录里写 <stem>.srt（除非 no_output）。"""
+        """按脚本往 -o 指定的输出文件写 .srt（除非 no_output）。
+
+        真实 VC 在 -o 是带扩展名的文件路径时原样写这个路径，替身照做；
+        日志同时打印结果路径（--quiet 契约），方便用例复现「日志只有一行
+        路径」的真实形态。
+        """
+        output = self._arg_after("-o")
+        if output is None:
+            return
+        out = Path(output)
+
+        if not self.script.get("no_output"):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            content = b"" if self.script.get("empty_output") else self.script.get(
+                "srt_content", DEFAULT_SRT
+            )
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            out.write_bytes(content)
+
+        # --quiet 下真实 VC 退出前打印一行输出路径（无论产物是否写成功，只要
+        # 走到 save 这一步就打印）—— 替身在非 no_output 时照做
+        if self.stdout is not None and not self.script.get("no_output"):
+            try:
+                self.stdout.write((str(out) + "\n").encode("utf-8"))
+                self.stdout.flush()
+            except (OSError, ValueError, AttributeError):
+                pass
+
+    def _arg_after(self, flag: str) -> Optional[str]:
+        """取 argv 中某个选项后面的值。"""
+        try:
+            return self.argv[self.argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            return None
+
+
+# ---------------------------------------------------------------------------
+# 素材抓取（MediaCrawler）
+# ---------------------------------------------------------------------------
+
+def mc_note(note_id: str, **overrides) -> dict:
+    """一条 xhs 形态的原始 jsonl 行（其它平台用例用 overrides 换掉字段名）。"""
+    note = {
+        "note_id": note_id,
+        "type": "note",
+        "title": f"标题-{note_id}",
+        "desc": f"正文-{note_id}",
+        "nickname": "测试博主",
+        "liked_count": 10,
+        "comment_count": 2,
+        "share_count": 1,
+        "time": 1747000000000,  # 毫秒时间戳
+        "note_url": f"https://www.xiaohongshu.com/explore/{note_id}",
+        "image_list": "https://img.example/1.webp,https://img.example/2.webp",
+        "source_keyword": "保温杯",
+    }
+    note.update(overrides)
+    return note
+
+
+DEFAULT_MC_NOTES = [mc_note("note1"), mc_note("note2"), mc_note("note3")]
+
+
+class FakeMcPopen:
+    """模拟 MediaCrawler 子进程（python main.py ...）的最小接口。
+
+    argv 形状（与 crawl_runner.build_argv 对齐）：
+        [launcher..., "main.py", "--platform", p, "--type", t, ...,
+         "--save_data_path", <dir>, ...]
+    产物落盘位置（与 MC 的 AsyncFileWriter._get_file_path 约定一致）：
+        {--save_data_path 的值}/{--platform 的值}/jsonl/{--type 的值}_contents_fake.jsonl
+    （注意目录名是 jsonl 不是 json —— 文件类型名就是目录名。）
+
+    script 键（缺省即一次顺利抓取：退出码 0 + 三条 xhs 笔记）：
+        exit_code          退出码，默认 0；
+        notes              落盘的原始 jsonl 行列表，默认 DEFAULT_MC_NOTES；
+                           换平台时给对应平台形态的行即可（字段名按 FIELD_MAP）；
+        no_output          True 时完全不写 jsonl（风控拦截、一条没抓到的场景）；
+        notes_per_poll     每次 poll 先落几条（默认 0：全部笔记在退出那次 poll
+                           一起写）。设成正数 + polls_before_exit 才观察得到
+                           「进度走到一半」的中间状态；
+        hang               True 时 poll 永远返回 None（hang 前已写的不受影响）；
+        polls_before_exit  退出前先空转多少次 poll，默认 0；
+        log_lines          每次 poll 往 stdout 写一行（mc.log）；
+        on_poll            每次 poll 时调用的回调 fn(proc, 第几次)。
+    """
+
+    #: 记录所有实例，便于用例断言「起了几次进程、参数是什么」
+    instances: List["FakeMcPopen"] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        """清空实例记录，每个用例开始前调用。"""
+        cls.instances = []
+
+    def __init__(
+        self,
+        argv,
+        stdout=None,
+        stderr=None,
+        stdin=None,
+        start_new_session: bool = False,
+        creationflags: int = 0,
+        cwd: Optional[str] = None,
+        env=None,
+        script: Optional[dict] = None,
+    ) -> None:
+        self.argv = list(argv)
+        self.cwd = cwd
+        self.env = env
+        self.start_new_session = start_new_session
+        self.creationflags = creationflags
+        self.script = dict(script or {})
+        self.pid = 70000 + len(FakeMcPopen.instances)
+        self.stdout = stdout
+        self.poll_count = 0
+        self._returncode: Optional[int] = None
+        self._written = 0
+        FakeMcPopen.instances.append(self)
+
+    def poll(self) -> Optional[int]:
+        """每次 poll 按需落几条笔记；空转次数用尽后补齐全部并返回退出码。"""
+        self.poll_count += 1
+        probe = self.script.get("on_poll")
+        if probe is not None:
+            probe(self, self.poll_count)
+
+        # 逐 poll 落盘不受 hang 影响：取消/超时场景恰恰要「卡住但已抓到一半」
+        per_poll = int(self.script.get("notes_per_poll", 0))
+        if per_poll:
+            self._write_notes(per_poll)
+
+        if self.script.get("hang"):
+            self._emit_log_line()
+            return None
+
+        remaining = int(self.script.get("polls_before_exit", 0))
+        if self.poll_count <= remaining:
+            self._emit_log_line()
+            return None
+
+        self._emit_log_line()
+        self._write_notes()  # 退出前把剩下的笔记补齐（取消/超时场景也要有产物）
+        self._returncode = int(self.script.get("exit_code", 0))
+        return self._returncode
+
+    def _emit_log_line(self) -> None:
+        """把下一条预置日志写进 stdout 句柄（与 mc.log 是同一个地方）。"""
+        lines: List[str] = list(self.script.get("log_lines") or [])
+        index = self.poll_count - 1
+        if index >= len(lines) or self.stdout is None:
+            return
+        try:
+            self.stdout.write((lines[index] + "\n").encode("utf-8"))
+            self.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            # 句柄已被被测代码关掉（进程退出后），这在真实场景里也不该崩
+            pass
+
+    def _write_notes(self, count: Optional[int] = None) -> None:
+        """把 script["notes"] 里尚未落盘的行写进任务的 jsonl（append 语义）。"""
         if self.script.get("no_output"):
             return
-        out_dir = self._arg_after("-o")
-        if out_dir is None:
+        save_path = self._arg_after("--save_data_path")
+        platform = self._arg_after("--platform")
+        crawler_type = self._arg_after("--type")
+        if not (save_path and platform and crawler_type):
             return
-        out = Path(out_dir.rstrip("/\\"))
-        out.mkdir(parents=True, exist_ok=True)
 
-        video = self._arg_after("transcribe") or "video.mp4"
-        stem = Path(video).stem
-        content = b"" if self.script.get("empty_output") else self.script.get(
-            "srt_content", DEFAULT_SRT
-        )
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        (out / f"{stem}.srt").write_bytes(content)
+        notes: List[dict] = list(self.script.get("notes", DEFAULT_MC_NOTES))
+        pending = notes[self._written:]
+        if not pending:
+            return
+        if count is not None:
+            pending = pending[:count]
+
+        target = Path(save_path) / platform / "jsonl"
+        target.mkdir(parents=True, exist_ok=True)
+        with (target / f"{crawler_type}_contents_fake.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            for note in pending:
+                handle.write(json.dumps(note, ensure_ascii=False) + "\n")
+        self._written += len(pending)
 
     def _arg_after(self, flag: str) -> Optional[str]:
         """取 argv 中某个选项后面的值。"""

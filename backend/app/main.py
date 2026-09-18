@@ -19,6 +19,8 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
 from app.db.session import engine
+from app.services.crawl_job_worker import crawl_job_worker
+from app.services.crawl_runner import recover_interrupted_jobs as recover_interrupted_crawl_jobs
 from app.services.mix_job_worker import mix_job_worker
 from app.services.mix_runner import recover_interrupted_jobs as recover_interrupted_mix_jobs
 from app.services.scene_job_worker import scene_job_worker
@@ -71,6 +73,12 @@ async def lifespan(app: FastAPI):
         atexit.register(_shutdown_subtitle_worker)
         subtitle_job_worker.start()
 
+    if settings.CRAWL_WORKER_ENABLED:
+        # 素材抓取：同一套 DB 即队列模式，回收与启停逻辑与镜头分割完全同构
+        recover_interrupted_crawl_jobs()
+        atexit.register(_shutdown_crawl_worker)
+        crawl_job_worker.start()
+
     yield
 
     logger.info("正在关闭应用")
@@ -83,6 +91,9 @@ async def lifespan(app: FastAPI):
     if settings.SUBTITLE_WORKER_ENABLED:
         atexit.unregister(_shutdown_subtitle_worker)
         _shutdown_subtitle_worker()
+    if settings.CRAWL_WORKER_ENABLED:
+        atexit.unregister(_shutdown_crawl_worker)
+        _shutdown_crawl_worker()
     logger.info("释放数据库连接池")
     engine.dispose()
 
@@ -109,6 +120,14 @@ def _shutdown_subtitle_worker() -> None:
         subtitle_job_worker.stop()
     except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
         logger.exception("停止字幕提取工作线程出现异常")
+
+
+def _shutdown_crawl_worker() -> None:
+    """停止素材抓取工作线程（有界等待，绝不阻塞热重载）。"""
+    try:
+        crawl_job_worker.stop()
+    except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
+        logger.exception("停止素材抓取工作线程出现异常")
 
 
 def create_app() -> FastAPI:
