@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from cw.logs import tail_lines, tail_text
-from cw.process import group_listen_ports
+from cw.process import getpgid, group_listen_ports
 from cw.readiness import (
     check_health,
     log_signals_ready,
@@ -178,10 +178,10 @@ class TestWaitReady:
         )
         try:
             spec = _make_spec(tmp_path, port=None, health_path=None)
-            port = wait_ready(spec, os.getpgid(server.pid), "127.0.0.1", timeout=5.0)
+            port = wait_ready(spec, getpgid(server.pid), "127.0.0.1", timeout=5.0)
             assert port is not None
         finally:
-            os.killpg(os.getpgid(server.pid), signal.SIGKILL)
+            server.kill()
             server.wait(timeout=5)
 
     def test_health_path_must_pass(self, tmp_path, health_server):
@@ -218,7 +218,8 @@ class TestTailText:
 
     def test_small_file_read_in_full(self, tmp_path):
         path = tmp_path / "小.log"
-        path.write_text("第一行\n第二行\n", encoding="utf-8")
+        # 用 write_bytes 避免 Windows 上 write_text 把 \n 转成 \r\n（尾读是原样返回字节）
+        path.write_bytes("第一行\n第二行\n".encode("utf-8"))
         assert tail_text(path) == "第一行\n第二行\n"
 
     def test_large_file_reads_tail(self, tmp_path):

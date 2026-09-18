@@ -31,6 +31,7 @@ from cw.process import (
     clear_handle,
     determine_state,
     ensure_dirs,
+    kill_port_owner,
     logs_dir,
     pidfile_path,
     port_owner,
@@ -125,7 +126,9 @@ def _service_menu(root: Path, spec: ServiceSpec, bind: tuple[str, int]) -> None:
         state = determine_state(spec, root)
 
         actions: list[Choice] = []
-        if state.status in (Status.STOPPED, Status.STALE):
+        if state.status != Status.RUNNING_OWNED:
+            # 端口被占（RUNNING_FOREIGN / PORT_TAKEN）时也允许启动：
+            # 启动前会自动清掉占用端口的进程，所以这里不必把用户挡在门外
             actions.append(Choice("前台运行（Ctrl+C 停止）", value=_ACT_FOREGROUND))
             actions.append(Choice("后台运行并返回", value=_ACT_BACKGROUND))
         if state.status == Status.STALE:
@@ -166,9 +169,9 @@ def _describe_state(state: ServiceState) -> str:
     if state.status == Status.RUNNING_OWNED:
         return f"运行中，PID {state.handle.pid}"
     if state.status == Status.RUNNING_FOREIGN:
-        return "运行中（非本工具启动，无法从这里停止）"
+        return "运行中（非本工具启动），再次启动会先释放端口"
     if state.status == Status.PORT_TAKEN:
-        return f"端口被占用：{state.detail}"
+        return f"端口被占用：{state.detail}（启动时会先释放）"
     if state.status == Status.STALE:
         return "上次启动的进程已退出，但留下了记录"
     return "未运行"
@@ -202,6 +205,21 @@ def _precheck(spec: ServiceSpec) -> None:
             )
 
 
+def _clear_port(spec: ServiceSpec) -> None:
+    """启动前清场：期望端口被占用时杀掉占用者，避免新实例起不来。
+
+    这是用户能感知的副作用，不能悄悄发生——杀掉谁都打印清楚。
+    桌面端没有固定端口（expected_port 为 None），跳过。
+    """
+    if spec.expected_port is None:
+        return
+    owner = kill_port_owner(spec.expected_port)
+    if owner is None:
+        return
+    pid, desc = owner
+    print_warn(f"端口 {spec.expected_port} 被 PID {pid}（{desc}）占用，已清理")
+
+
 def _run_background(root: Path, spec: ServiceSpec, bind: tuple[str, int]) -> None:
     """后台启动一个服务并等待就绪。"""
     try:
@@ -209,6 +227,8 @@ def _run_background(root: Path, spec: ServiceSpec, bind: tuple[str, int]) -> Non
     except PrecheckError as exc:
         print_err(str(exc))
         return
+
+    _clear_port(spec)
 
     log_file = logs_dir(root) / f"{spec.id}.log"
     print_info(f"正在后台启动{spec.label}…（日志 {log_file}）")
@@ -234,6 +254,8 @@ def _run_foreground(root: Path, spec: ServiceSpec, bind: tuple[str, int]) -> Non
     except PrecheckError as exc:
         print_err(str(exc))
         return
+
+    _clear_port(spec)
 
     print_info(f"前台运行{spec.label}，Ctrl+C 停止并返回菜单")
     console.print()

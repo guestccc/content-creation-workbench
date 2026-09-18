@@ -4,6 +4,8 @@
 实现方式是覆盖 FastAPI 的 get_db 依赖，替换为测试专用会话。
 """
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -75,6 +77,20 @@ def client(db_session):
         yield test_client
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def fake_home(tmp_path, monkeypatch):
+    """把「主目录」指到临时目录，供 ~ 展开的用例使用。
+
+    跨平台：POSIX 的 os.path.expanduser 认 HOME；Windows 认 USERPROFILE
+    （实测 Windows 上 HOME 会被忽略）。返回临时目录路径。
+    """
+    if os.name == "nt":
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    else:
+        monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
 
 
 @pytest.fixture()

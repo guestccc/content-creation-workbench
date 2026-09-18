@@ -9,12 +9,18 @@
   - `npm run dev` 会派生 node → vite，`uvicorn --reload` 会派生 reloader → worker；
   - 只终止直接子进程，会留下孤儿继续占着端口，表现为「明明停了却起不来」；
   - 所以后台启动时让服务自成一个进程组（start_new_session=True），停止时整组终止。
+
+Windows 上没有进程组：start_new_session 被忽略，「整组」退化为「以 spawn 的
+进程为根的进程树」（psutil 沿父子链枚举），组 ID 就是根 PID。SIGKILL 在 Windows
+上也不存在，且终止进程的 SIGTERM/SIGKILL 都落到 TerminateProcess（强制终止），
+所以用 SIGTERM 兜底即可。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -37,6 +43,14 @@ _CREATE_TIME_TOLERANCE = 0.001
 
 # 轮询进程组是否清空时的间隔
 _POLL_INTERVAL = 0.1
+
+# 清端口时 SIGTERM 之后的宽限期：给残留进程一点自己收尾的时间
+_KILL_TREE_GRACE = 3.0
+
+# Windows 没有进程组，也没有 SIGKILL（终止进程时 SIGTERM/SIGKILL 都落到
+# TerminateProcess，无优雅/强杀之分），所以 SIGKILL 用 SIGTERM 兜底。
+_IS_WINDOWS = os.name == "nt"
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 class Status(str, Enum):
@@ -201,15 +215,31 @@ def clear_handle(path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def getpgid(pid: int) -> int:
+    """进程所属「组」的标识。
+
+    POSIX 上就是 os.getpgid；Windows 没有进程组，spawn 时无法 setsid，
+    「组」退化为以该进程为根的进程树，组 ID 就是它自己的 PID。
+    """
+    if _IS_WINDOWS:
+        return pid
+    return os.getpgid(pid)
+
+
 def group_members(pgid: int) -> list[psutil.Process]:
-    """枚举进程组内的所有进程。
+    """枚举「组」内的所有进程。
 
     macOS 的 `ps -g` 是「进程组组长」的语义而不是「组内成员」，
     `lsof` 也不能按进程组过滤，所以只能这样逐个比对。
 
     僵尸进程会被排除：它们已经退出、只是还没被回收，
     算进来会让「组是否清空」永远为假。
+
+    Windows 上没有进程组，退化为枚举以 pgid 为根的进程树。
     """
+    if _IS_WINDOWS:
+        return _tree_members(pgid)
+
     members: list[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "status"]):
         try:
@@ -221,6 +251,18 @@ def group_members(pgid: int) -> list[psutil.Process]:
             # 进程在遍历过程中退出是常态，跳过即可
             continue
     return members
+
+
+def _tree_members(root_pid: int) -> list[psutil.Process]:
+    """枚举以 root_pid 为根的进程树（含根），Windows 无进程组时的替代。"""
+    try:
+        root = psutil.Process(root_pid)
+    except psutil.NoSuchProcess:
+        return []
+    try:
+        return [root, *root.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return [root]
 
 
 def group_listen_ports(pgid: int) -> list[int]:
@@ -273,6 +315,20 @@ def _describe_process(proc: psutil.Process) -> str:
         return "未知进程"
 
 
+def kill_port_owner(port: int) -> tuple[int, str] | None:
+    """杀掉正在监听指定端口的进程（连同其子进程），返回被清理的 (pid, 描述)。
+
+    给「启动前清场」用：残留的 vite/uvicorn 会占住端口，新实例起不来。
+    只对端口持有者及其子树动手，绝不碰它所在的进程组——目标是释放端口，
+    不是清理整条链。没人监听时返回 None。
+    """
+    owner = port_owner(port)
+    if owner is None:
+        return None
+    _kill_process_tree(owner[0])
+    return owner
+
+
 # --------------------------------------------------------------------------
 # 身份校验
 # --------------------------------------------------------------------------
@@ -289,7 +345,7 @@ def is_alive(handle: Handle) -> bool:
     try:
         proc = psutil.Process(handle.pid)
         actual_create_time = proc.create_time()
-        actual_pgid = os.getpgid(handle.pid)
+        actual_pgid = getpgid(handle.pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError, ProcessLookupError):
         return False
 
@@ -321,6 +377,27 @@ def _belongs_to_service(pid: int, spec: ServiceSpec) -> bool:
 # --------------------------------------------------------------------------
 
 
+def _resolve_executable(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Windows 上把裸命令名解析成完整路径，供 subprocess.Popen 执行。
+
+    背景：Windows 的 CreateProcess 不认识 .cmd/.bat（npm 就是 npm.cmd），
+    Popen(["npm", ...]) 会直接 FileNotFoundError。shutil.which 会按 PATH 与
+    PATHEXT 找到真实可执行文件（含 .cmd），用它替换 argv[0] 即可。
+    已经带路径分隔符或可执行扩展名的（如后端传的 python.exe 绝对路径）原样返回。
+    """
+    if os.name != "nt" or not argv:
+        return argv
+    head = argv[0]
+    if os.sep in head or (os.altsep and os.altsep in head):
+        return argv
+    if os.path.splitext(head)[1].lower() in (".exe", ".cmd", ".bat", ".com"):
+        return argv
+    resolved = shutil.which(head)
+    if resolved is None:
+        return argv  # 找不到就交给 Popen 报 FileNotFoundError
+    return (resolved, *argv[1:])
+
+
 def spawn_background(spec: ServiceSpec, log_file: Path) -> Handle:
     """在后台启动服务，输出重定向到日志文件。
 
@@ -336,7 +413,7 @@ def spawn_background(spec: ServiceSpec, log_file: Path) -> Handle:
 
     try:
         proc = subprocess.Popen(
-            spec.argv,
+            _resolve_executable(spec.argv),
             cwd=spec.cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
@@ -350,7 +427,7 @@ def spawn_background(spec: ServiceSpec, log_file: Path) -> Handle:
         log_handle.close()
 
     try:
-        pgid = os.getpgid(proc.pid)
+        pgid = getpgid(proc.pid)
         create_time = psutil.Process(proc.pid).create_time()
     except (ProcessLookupError, OSError, psutil.NoSuchProcess) as exc:
         # 启动后立刻退出，通常是依赖没装或命令不存在
@@ -379,12 +456,12 @@ def spawn_foreground(spec: ServiceSpec) -> tuple[Handle, subprocess.Popen]:
     uvicorn / vite 变成孤儿继续占着端口，下次启动报 address already in use。
     """
     try:
-        proc = subprocess.Popen(spec.argv, cwd=spec.cwd)
+        proc = subprocess.Popen(_resolve_executable(spec.argv), cwd=spec.cwd)
     except OSError as exc:
         raise ProcessError(f"启动{spec.label}失败：{exc}") from exc
 
     try:
-        pgid = os.getpgid(proc.pid)
+        pgid = getpgid(proc.pid)
         create_time = psutil.Process(proc.pid).create_time()
     except (ProcessLookupError, OSError, psutil.NoSuchProcess) as exc:
         raise ProcessError(f"{spec.label}启动后立即退出，请检查依赖是否已安装") from exc
@@ -416,7 +493,7 @@ def wait_foreground(proc: subprocess.Popen) -> int:
         try:
             return proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            _signal_group(proc.pid, signal.SIGKILL)
+            _signal_group(proc.pid, _SIGKILL)
             return proc.wait()
 
 
@@ -443,7 +520,7 @@ def stop_group(
     if not is_alive(handle):
         return StopOutcome.REFUSED_IDENTITY
     try:
-        if os.getpgid(handle.pid) != handle.pgid:
+        if getpgid(handle.pid) != handle.pgid:
             return StopOutcome.REFUSED_IDENTITY
     except (ProcessLookupError, PermissionError, OSError):
         return StopOutcome.REFUSED_IDENTITY
@@ -452,7 +529,7 @@ def stop_group(
     if _wait_group_gone(handle.pgid, term_timeout):
         return StopOutcome.GRACEFUL
 
-    _signal_group(handle.pgid, signal.SIGKILL)
+    _signal_group(handle.pgid, _SIGKILL)
     if _wait_group_gone(handle.pgid, kill_timeout):
         return StopOutcome.FORCED
 
@@ -460,16 +537,65 @@ def stop_group(
 
 
 def _signal_group(pid_or_pgid: int, sig: int) -> None:
-    """向进程组发信号。
+    """向进程组发信号（Windows 上退化为向进程树发信号）。
 
     组长先退出后组可能已不存在，这种情况直接忽略；权限不足则如实报告。
     """
+    if _IS_WINDOWS:
+        _signal_tree(pid_or_pgid, sig)
+        return
     try:
         os.killpg(pid_or_pgid, sig)
     except ProcessLookupError:
         pass
     except PermissionError as exc:
         raise ProcessError(f"没有权限终止进程组 {pid_or_pgid}") from exc
+
+
+def _signal_tree(root_pid: int, _sig: int) -> None:
+    """向以 root_pid 为根的进程树发信号（Windows 无 killpg 时的替代）。
+
+    叶子优先：先对子进程下手、最后才是根，避免根先退出后子进程失去父子
+    链的追踪（Windows 上父进程退出不会级联终止子进程）。SIGTERM/SIGKILL 在
+    Windows 上都落到 TerminateProcess，所以 sig 参数实际上不区分，保留仅为
+    与 POSIX 分支保持同一调用签名。
+    """
+    for proc in reversed(_tree_members(root_pid)):
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
+def _kill_process_tree(root_pid: int) -> None:
+    """终止以 root_pid 为根的进程树，叶子优先，先 SIGTERM 再 SIGKILL。
+
+    与 stop_group 不同：这里没有 Handle、没有身份校验依据，只知道「这个 PID
+    正在监听我们想要的端口」这一点。因此只对端口持有者这个明确的靶子下手，
+    不涉及进程组，也绝不向上追溯父进程。
+    """
+    try:
+        root = psutil.Process(root_pid)
+        procs = [*root.children(recursive=True), root]
+    except psutil.NoSuchProcess:
+        return
+
+    # 叶子优先：先子进程后根，避免根先退出后子进程脱离父子链
+    for proc in reversed(procs):
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    # psutil>=6 的 wait_procs 只返回「已退出」列表，不再返回 still alive，
+    # 所以逐个 is_running() 复查，还活着的直接 kill 兜底
+    psutil.wait_procs(procs, timeout=_KILL_TREE_GRACE)
+    for proc in procs:
+        try:
+            if proc.is_running():
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
 
 def _wait_group_gone(pgid: int, timeout: float) -> bool:

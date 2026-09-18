@@ -27,9 +27,11 @@ from cw.process import (
     clear_handle,
     determine_state,
     ensure_dirs,
+    getpgid,
     group_listen_ports,
     group_members,
     is_alive,
+    kill_port_owner,
     pidfile_path,
     port_owner,
     read_handle,
@@ -64,7 +66,7 @@ def _make_handle(**overrides) -> Handle:
     defaults = dict(
         service_id="testsvc",
         pid=os.getpid(),
-        pgid=os.getpgid(0),
+        pgid=getpgid(os.getpid()),
         create_time=psutil.Process(os.getpid()).create_time(),
         mode=Mode.BACKGROUND.value,
         cmd=("python3", "-c", "pass"),
@@ -210,7 +212,7 @@ class TestIsAlive:
         assert is_alive(handle) is False
 
     def test_wrong_pgid_is_dead(self):
-        handle = _make_handle(pgid=os.getpgid(0) + 999999)
+        handle = _make_handle(pgid=getpgid(os.getpid()) + 999999)
         assert is_alive(handle) is False
 
     def test_nonexistent_pid_is_dead(self):
@@ -326,6 +328,33 @@ class TestPortOwner:
         free_port = sock.getsockname()[1]
         sock.close()
         assert port_owner(free_port) is None
+
+
+@POSIX_ONLY
+class TestKillPortOwner:
+    def test_kills_listener(self, tmp_path):
+        """启动前清场：杀掉占用端口的进程，端口随之释放。"""
+        port, server = _start_listener(tmp_path)
+        owner = kill_port_owner(port)
+        try:
+            assert owner is not None
+            assert owner[0] == server.pid
+            server.wait(timeout=5)  # 进程应已被终止
+        finally:
+            if server.poll() is None:
+                os.killpg(os.getpgid(server.pid), signal.SIGKILL)
+                server.wait(timeout=5)
+        assert port_owner(port) is None
+
+    def test_free_port_returns_none(self):
+        # 拿一个确定空闲的端口，没人监听就不该有动作
+        import socket
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        free_port = sock.getsockname()[1]
+        sock.close()
+        assert kill_port_owner(free_port) is None
 
 
 @POSIX_ONLY

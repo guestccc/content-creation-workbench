@@ -105,10 +105,9 @@ class TestCreateJob:
         assert response.status_code == 422, response.text
         assert response.json()["success"] is False
 
-    def test_tilde_path_expanded(self, client, video_dir, tmp_path, monkeypatch):
+    def test_tilde_path_expanded(self, client, video_dir, tmp_path, fake_home):
         """~ 开头的路径应展开成绝对路径。"""
         source, _ = video_dir
-        monkeypatch.setenv("HOME", str(tmp_path))
         response = client.post(
             "/api/v1/scene/jobs",
             json={

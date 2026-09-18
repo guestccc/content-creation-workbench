@@ -34,15 +34,14 @@ def test_list_root_parent_is_none(client):
     assert response.json()["data"]["parent"] is None
 
 
-def test_tilde_expansion(client, tmp_path, monkeypatch):
+def test_tilde_expansion(client, fake_home):
     """~ 应展开为用户主目录。"""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "素材").mkdir()
+    (fake_home / "素材").mkdir()
 
     response = client.get("/api/v1/fs/list", params={"path": "~"})
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    assert data["path"] == str(tmp_path)
+    assert data["path"] == str(fake_home)
     assert [entry["name"] for entry in data["entries"]] == ["素材"]
 
 

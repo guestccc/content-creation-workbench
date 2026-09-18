@@ -97,16 +97,19 @@ class TestBuildArgv:
 
     def test_split_full_params(self):
         """split 模式带全部参数。"""
+        video = Path("/in/视频.mp4")
+        out_dir = Path("/out/视频_scenes")
         argv = build_argv(
             "/repo/vct",
-            Path("/in/视频.mp4"),
-            Path("/out/视频_scenes"),
+            video,
+            out_dir,
             {"detector": "content", "threshold": 25.0, "min_len": 1.5, "copy": True},
             split=True,
         )
+        # str(video) 在 Windows 上是反斜杠，断言必须用同一来源，避免平台差异
         assert argv == [
-            "/repo/vct", "scene", "/in/视频.mp4",
-            "-o", "/out/视频_scenes",
+            "/repo/vct", "scene", str(video),
+            "-o", str(out_dir),
             "--csv", "--split",
             "--detector", "content",
             "--threshold", "25.0",
