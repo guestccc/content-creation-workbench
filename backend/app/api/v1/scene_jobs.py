@@ -10,7 +10,7 @@
 - GET  /jobs                历史任务分页列表
 - GET  /jobs/{id}           任务详情（轮询进度也用它）
 - GET  /jobs/{id}/scenes    预览切点汇总
-- GET  /jobs/{id}/clips     切分产出的片段列表
+- GET  /jobs/{id}/clips     切分产出的片段列表（含 item_index：归哪条视频，供前端分组）
 - GET  /jobs/{id}/clips/{n}/thumb  片段缩略图（首次访问时抽帧生成）
 - GET  /jobs/{id}/clips/{n}/video  片段视频流（支持 Range，可拖动进度条）
 - POST /jobs/{id}/cancel    取消任务
@@ -209,6 +209,7 @@ def list_clips(
         data=[
             SceneClipResponse(
                 index=clip["index"],
+                item_index=clip["item_index"],
                 name=clip["name"],
                 source_name=clip["source_name"],
                 size_bytes=clip["size_bytes"],

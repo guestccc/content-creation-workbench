@@ -138,7 +138,10 @@ export interface SceneEnvironment {
 
 /** 切分产出的片段 */
 export interface SceneClip {
+  /** 片段序号（全任务范围内连续）；缩略图与播放接口用它定位 */
   index: number
+  /** 所属视频在任务内的序号；按它把片段归到各条视频下，不靠文件名猜 */
+  item_index: number
   name: string
   source_name: string
   size_bytes: number

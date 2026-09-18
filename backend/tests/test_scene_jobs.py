@@ -380,11 +380,44 @@ class TestScenesAndClips:
         clips = response.json()["data"]
         assert len(clips) == 2
         assert clips[0]["index"] == 1
+        assert clips[0]["item_index"] == 1
         assert clips[0]["thumb_url"].endswith("/clips/1/thumb")
 
         # 序号越界 → 404（不能借此读到任意文件）
         response = client.get(f"/api/v1/scene/jobs/{created['id']}/clips/99/thumb")
         assert response.status_code == 404, response.text
+
+    def test_clips_carry_owning_item_index(self, client, tmp_path, db_session):
+        """每个片段要知道自己是哪条视频切出来的 —— 前端按它归组。
+
+        这里故意造两条**同名**的视频（放在不同的子目录里，递归扫描）：
+        按文件名归组必然把它们的片段混在一起，`item_index` 才是可信的归属。
+        序号（index）仍是全任务连续的，缩略图/播放接口靠它定位。
+        """
+        source = tmp_path / "素材"
+        for sub in ("甲", "乙"):
+            (source / sub).mkdir(parents=True)
+            (source / sub / "同名.mp4").write_bytes(b"fake")
+        created = _create_split_job(client, source, tmp_path / "输出", recursive=True)
+
+        job = db_session.get(SceneJob, created["id"])
+        assert [item.source_name for item in job.items] == ["同名.mp4", "同名.mp4"]
+        for item in job.items:
+            item.clip_names = ["同名_clip_001.mp4", "同名_clip_002.mp4"]
+            item.clip_count = 2
+            item.status = SceneJobItemStatus.SUCCESS
+            out = tmp_path / "片段输出" / str(item.index)
+            out.mkdir(parents=True)
+            for name in item.clip_names:
+                (out / name).write_bytes(b"fake")
+            item.output_dir = str(out)
+        db_session.commit()
+
+        response = client.get(f"/api/v1/scene/jobs/{created['id']}/clips")
+        assert response.status_code == 200, response.text
+        clips = response.json()["data"]
+        assert [clip["index"] for clip in clips] == [1, 2, 3, 4]
+        assert [clip["item_index"] for clip in clips] == [1, 1, 2, 2]
 
 
 class TestClipVideo:

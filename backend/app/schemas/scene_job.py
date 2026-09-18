@@ -387,7 +387,10 @@ class SceneJobListData(BaseModel):
 class SceneClipResponse(BaseModel):
     """切分产出的一段视频，用于结果缩略图网格。"""
 
-    index: int = Field(description="片段序号，从 1 开始")
+    index: int = Field(description="片段序号，从 1 开始（全任务范围内连续，缩略图/播放接口用它定位）")
+    item_index: int = Field(
+        description="所属视频在任务内的序号，从 1 开始；前端按它把片段归到各条视频下"
+    )
     name: str = Field(description="片段文件名")
     source_name: str = Field(description="来源视频文件名")
     size_bytes: int = Field(description="文件大小（字节）")

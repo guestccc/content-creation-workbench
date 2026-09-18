@@ -92,6 +92,18 @@ const PLAY_BADGE: CSSProperties = {
   pointerEvents: 'none',
 }
 
+/**
+ * 播放器的状态：正在放的那一片，以及它所属的那一组片段。
+ *
+ * 连列表一起记住，是为了让「上一个 / 下一个」知道该在哪儿走 —— 从页面
+ * 的切分结果里点开，范围就是整个任务的片段；从某条视频的弹窗里点开，
+ * 范围就只是那条视频自己的片段，不会串到别人家去。
+ */
+interface PlayerState {
+  clips: SceneClip[]
+  index: number
+}
+
 /** 自定义模板的默认参数 */
 const DEFAULT_CUSTOM = {
   detector: 'adaptive',
@@ -130,8 +142,20 @@ export default function SceneSplit() {
   const [history, setHistory] = useState<SceneJob[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  /** 正在播放的片段；null 表示播放框关着 */
-  const [playingClip, setPlayingClip] = useState<SceneClip | null>(null)
+  /** 播放器；null 表示关着 */
+  const [player, setPlayer] = useState<PlayerState | null>(null)
+
+  // ---------- 历史任务的下钻弹窗 ----------
+  // 两层：先看这条任务切了哪些视频，再看某一条视频切出的片段。
+  /** 第一层弹窗看的是哪条任务；null 表示关着 */
+  const [detailJobId, setDetailJobId] = useState<number | null>(null)
+  const [detailJob, setDetailJob] = useState<SceneJob | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  /** 第二层弹窗看的是哪条视频 */
+  const [detailItem, setDetailItem] = useState<SceneJobItem | null>(null)
+  /** 该视频的片段；预览任务没有片段文件，这里保持空数组 */
+  const [detailItemClips, setDetailItemClips] = useState<SceneClip[]>([])
+  const [detailItemLoading, setDetailItemLoading] = useState(false)
 
   /** 拉取历史任务列表 */
   const loadHistory = useCallback(async () => {
@@ -250,6 +274,26 @@ export default function SceneSplit() {
     return () => window.clearInterval(timer)
   }, [job, loadResults, loadHistory])
 
+  // 弹窗里那条任务还在跑时同样轮询：清单上的进度才不是打开那一刻的快照。
+  // 依赖的是 id 和「在跑」这个布尔值（不是对象本身），否则每次拿到响应都会
+  // 把定时器拆了重建。终态一到，这个副作用自己就停了。
+  const detailJobRunning = detailJob !== null && !isTerminalStatus(detailJob.status)
+  useEffect(() => {
+    if (detailJobId === null || !detailJobRunning) {
+      return
+    }
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          setDetailJob(await fetchSceneJob(detailJobId))
+        } catch {
+          // 单次轮询失败不打断，下个周期会重试
+        }
+      })()
+    }, POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [detailJobId, detailJobRunning])
+
   const videoEntries = useMemo(
     () => (inputData?.entries ?? []).filter((entry) => entry.is_video),
     [inputData],
@@ -329,6 +373,10 @@ export default function SceneSplit() {
         setClips([])
         setSummary(null)
       }
+      if (detailJobId === jobId) {
+        // 正在弹窗里看这条：记录没了就别让它挂在那儿
+        closeJobDetail()
+      }
       void loadHistory()
       messageApi.success('已删除任务记录（磁盘上的片段文件保留）')
     } catch (error) {
@@ -336,19 +384,82 @@ export default function SceneSplit() {
     }
   }
 
-  /** 查看历史任务详情 */
-  const viewJob = async (jobId: number) => {
+  /**
+   * 历史列表点「查看」：弹窗展示这条任务切了哪些视频。
+   *
+   * 刻意不动页面上的 `job` —— 页面上那套进度卡和结果区属于「我正在跑的
+   * 那条任务」，翻旧账不该把它顶掉；弹窗关掉，页面还是原样。
+   */
+  const openJobDetail = async (jobId: number) => {
+    setDetailJobId(jobId)
+    setDetailJob(null)
+    setDetailItem(null)
+    setDetailLoading(true)
     try {
-      const detail = await fetchSceneJob(jobId)
-      setJob(detail)
-      void loadResults(detail)
+      setDetailJob(await fetchSceneJob(jobId))
     } catch (error) {
+      // 读不到就整个收起来，免得留一个空弹窗在那儿
+      setDetailJobId(null)
       messageApi.error(error instanceof ApiError ? error.message : '读取任务失败')
+    } finally {
+      setDetailLoading(false)
     }
+  }
+
+  /** 关掉第一层弹窗：顺手把第二层也关掉，别留个孤儿挂在后面 */
+  const closeJobDetail = () => {
+    setDetailJobId(null)
+    setDetailJob(null)
+    setDetailItem(null)
+  }
+
+  /**
+   * 清单里点「查看」：看这一条视频自己切出的片段。
+   *
+   * 归属按后端给的 item_index 判，不拿文件名去猜 —— 递归扫描时两条视频
+   * 同名是常事，按名字归组会把它们的片段混在一起。预览任务没有片段文件，
+   * 直接展示条目里带的切点清单。
+   */
+  const openItemDetail = async (target: SceneJob, item: SceneJobItem) => {
+    setDetailItem(item)
+    setDetailItemClips([])
+    if (target.mode === 'preview' || item.clip_count === 0) {
+      // 没切出片段的（单镜头、失败、还没轮到）不必白跑一趟接口
+      return
+    }
+    setDetailItemLoading(true)
+    try {
+      const all = await fetchSceneClips(target.id)
+      setDetailItemClips(all.filter((clip) => clip.item_index === item.index))
+    } catch (error) {
+      messageApi.error(error instanceof ApiError ? error.message : '读取片段失败')
+    } finally {
+      setDetailItemLoading(false)
+    }
+  }
+
+  /** 打开播放器：list 是这一片所在的那一组，上一个/下一个在它里面走 */
+  const playClip = (list: SceneClip[], index: number) => {
+    if (index >= 0 && index < list.length) {
+      setPlayer({ clips: list, index })
+    }
+  }
+
+  /** 播放器里切上一个/下一个；到头就停在原地（按钮那边也已经置灰） */
+  const stepPlayer = (delta: number) => {
+    setPlayer((current) => {
+      if (!current) {
+        return current
+      }
+      const next = current.index + delta
+      return next >= 0 && next < current.clips.length ? { ...current, index: next } : current
+    })
   }
 
   const missingDeps = env?.dependencies.filter((dep) => !dep.ok && dep.name !== 'ffprobe') ?? []
   const running = job !== null && !isTerminalStatus(job.status)
+  /** 正在放的那一片 */
+  const playingClip = player ? player.clips[player.index] : null
 
   return (
     <div className="page">
@@ -760,65 +871,7 @@ export default function SceneSplit() {
               rowKey="id"
               pagination={false}
               dataSource={job.items}
-              columns={[
-                { title: '#', dataIndex: 'index', width: 48 },
-                { title: '视频', dataIndex: 'source_name', ellipsis: true },
-                {
-                  title: '状态',
-                  dataIndex: 'status',
-                  width: 90,
-                  render: (status: keyof typeof ITEM_STATUS_META, record) => (
-                    <Space size={4}>
-                      <Tag color={ITEM_STATUS_META[status].color}>
-                        {ITEM_STATUS_META[status].label}
-                      </Tag>
-                      {record.single_shot && status === 'success' && (
-                        <Tooltip title="全片没有画面跳变，切不出片段是正常结果">
-                          <Tag>单镜头</Tag>
-                        </Tooltip>
-                      )}
-                    </Space>
-                  ),
-                },
-                {
-                  // 实时进度：勾了多条视频时，一行一条，用户能看出正在切的是
-                  // 哪一条、切到第几个了。数据来自后端轮询（vct 逐段上报）。
-                  title: '进度',
-                  key: 'progress',
-                  width: 148,
-                  render: (_: unknown, record: SceneJobItem) =>
-                    renderItemProgress(record, job),
-                },
-                {
-                  title: '镜头/片段',
-                  width: 110,
-                  render: (_: unknown, record) =>
-                    record.clip_count > 0 || record.scene_count > 0
-                      ? `${record.scene_count} / ${record.clip_count}`
-                      : '—',
-                },
-                {
-                  title: '耗时',
-                  dataIndex: 'elapsed_seconds',
-                  width: 80,
-                  render: (value: number) => (value > 0 ? `${value}s` : '—'),
-                },
-                {
-                  title: '说明',
-                  dataIndex: 'error_message',
-                  ellipsis: true,
-                  render: (value: string) =>
-                    value ? (
-                      <Tooltip title={value}>
-                        <Text type="danger" style={{ fontSize: 12 }}>
-                          {value}
-                        </Text>
-                      </Tooltip>
-                    ) : (
-                      '—'
-                    ),
-                },
-              ]}
+              columns={itemColumns(job)}
             />
           )}
         </Card>
@@ -906,60 +959,7 @@ export default function SceneSplit() {
           size="small"
           style={{ marginBottom: 16 }}
         >
-          <Row gutter={[12, 12]}>
-            {clips.map((clip) => (
-              <Col key={clip.index} xs={12} sm={8} md={6} lg={4}>
-                <Card
-                  size="small"
-                  hoverable
-                  styles={{ body: { padding: 8 } }}
-                  cover={
-                    // 封面点击即播放：把 Image 的放大预览关掉（preview={false}），
-                    // 缩略图对视频来说没什么可看的，用户要的是看它怎么切出来的。
-                    <Tooltip title="点击播放这一片">
-                      <div
-                        onClick={() => setPlayingClip(clip)}
-                        style={{
-                          position: 'relative',
-                          background: '#000',
-                          height: 96,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          overflow: 'hidden',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <Image
-                          src={clip.thumb_url}
-                          alt={clip.name}
-                          preview={false}
-                          height={96}
-                          style={{ objectFit: 'cover' }}
-                          fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTYiPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9IiMxYTFhMWEiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOe8qeeVpTwvdGV4dD48L3N2Zz4="
-                        />
-                        <span style={PLAY_BADGE}>▶</span>
-                      </div>
-                    </Tooltip>
-                  }
-                >
-                  <Flex justify="space-between" align="center">
-                    <Text style={{ fontSize: 12 }} ellipsis>
-                      #{clip.index}
-                    </Text>
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      {formatBytes(clip.size_bytes)}
-                    </Text>
-                  </Flex>
-                  <Tooltip title={`${clip.source_name} → ${clip.name}`}>
-                    <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                      {clip.name}
-                    </Text>
-                  </Tooltip>
-                </Card>
-              </Col>
-            ))}
-          </Row>
+          <ClipGrid clips={clips} onPlay={playClip} />
         </Card>
       )}
 
@@ -981,16 +981,130 @@ export default function SceneSplit() {
           pagination={false}
           locale={{ emptyText: <Empty description="还没有任务记录" /> }}
           columns={historyColumns({
-            onView: viewJob,
+            onView: openJobDetail,
             onCancel: cancel,
             onDelete: remove,
           })}
         />
       </Card>
 
+      {/* ---------- 第一层：某条任务切了哪些视频 ---------- */}
+      <Modal
+        open={detailJobId !== null}
+        title={
+          <Space size={8}>
+            <span>切片视频任务 #{detailJobId}</span>
+            {detailJob && (
+              <>
+                <Tag>{detailJob.mode === 'preview' ? '预览切点' : '切分片段'}</Tag>
+                <Tag color={JOB_STATUS_META[detailJob.status].color}>
+                  {JOB_STATUS_META[detailJob.status].label}
+                </Tag>
+              </>
+            )}
+          </Space>
+        }
+        footer={null}
+        width={960}
+        onCancel={closeJobDetail}
+      >
+        {detailLoading && !detailJob ? (
+          <Flex justify="center" style={{ padding: 32 }}>
+            <Spin />
+          </Flex>
+        ) : (
+          detailJob && (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
+                <Descriptions.Item label="输入">{detailJob.input_path}</Descriptions.Item>
+                {detailJob.output_dir && (
+                  <Descriptions.Item label="输出">{detailJob.output_dir}</Descriptions.Item>
+                )}
+                <Descriptions.Item label="视频">
+                  {detailJob.completed_videos} / {detailJob.total_videos} 条完成
+                  {detailJob.failed_videos > 0 && ` · ${detailJob.failed_videos} 条失败`}
+                </Descriptions.Item>
+                <Descriptions.Item label="片段总数">
+                  {detailJob.clip_count} 个
+                </Descriptions.Item>
+              </Descriptions>
+
+              {detailJob.error_message && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="部分内容未完成"
+                  description={<Text style={{ fontSize: 12 }}>{detailJob.error_message}</Text>}
+                />
+              )}
+
+              {/* 还在跑的时候这个弹窗自己会轮询，进度列是活的 */}
+              <Table
+                size="small"
+                rowKey="id"
+                pagination={false}
+                dataSource={detailJob.items}
+                locale={{ emptyText: <Empty description="这条任务没有视频明细" /> }}
+                columns={itemColumns(detailJob, (item) => void openItemDetail(detailJob, item))}
+              />
+            </Space>
+          )
+        )}
+      </Modal>
+
+      {/* ---------- 第二层：某条视频切出的片段 ---------- */}
+      <Modal
+        open={detailItem !== null}
+        title={
+          detailItem && (
+            <Space size={8}>
+              <span>{detailItem.source_name}</span>
+              {detailItemClips.length > 0 ? (
+                <Tag color="blue">{detailItemClips.length} 个片段</Tag>
+              ) : (
+                (detailItem.scenes?.length ?? 0) > 0 && (
+                  <Tag color="blue">{detailItem.scenes?.length} 个镜头</Tag>
+                )
+              )}
+            </Space>
+          )
+        }
+        footer={null}
+        width={880}
+        onCancel={() => setDetailItem(null)}
+      >
+        {detailItem && (
+          <Spin spinning={detailItemLoading}>
+            {detailItemClips.length > 0 ? (
+              // 播放范围就是这一条视频的片段，上一个/下一个走到头为止
+              <ClipGrid clips={detailItemClips} onPlay={playClip} />
+            ) : (detailItem.scenes?.length ?? 0) > 0 ? (
+              // 预览任务只有切点，没有文件可播
+              <Table
+                size="small"
+                rowKey="number"
+                pagination={{ pageSize: 12, size: 'small', hideOnSinglePage: true }}
+                dataSource={detailItem.scenes ?? []}
+                columns={scenesColumns}
+              />
+            ) : (
+              <Empty
+                description={
+                  detailItem.status === 'running'
+                    ? '这条还在切，暂时没有片段'
+                    : detailItem.single_shot
+                      ? '全片没有画面跳变，切不出片段'
+                      : '这条没有切出片段'
+                }
+              />
+            )}
+          </Spin>
+        )}
+      </Modal>
+
       {/* ---------- 片段播放器 ---------- */}
       <Modal
-        open={playingClip !== null}
+        open={player !== null}
         title={
           playingClip && (
             <Space size={8}>
@@ -1001,9 +1115,27 @@ export default function SceneSplit() {
             </Space>
           )
         }
-        footer={null}
+        // 底部这排是「上一个 / 下一个」：连播时不用退回网格一个个点
+        footer={
+          player && (
+            <Flex justify="center" align="center" gap={12}>
+              <Button disabled={player.index === 0} onClick={() => stepPlayer(-1)}>
+                上一个
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {player.index + 1} / {player.clips.length}
+              </Text>
+              <Button
+                disabled={player.index >= player.clips.length - 1}
+                onClick={() => stepPlayer(1)}
+              >
+                下一个
+              </Button>
+            </Flex>
+          )
+        }
         width={720}
-        onCancel={() => setPlayingClip(null)}
+        onCancel={() => setPlayer(null)}
         // 关掉就卸载 <video>：否则弹窗关了后台还在下载、还在出声
         destroyOnHidden
       >
@@ -1103,6 +1235,164 @@ function renderItemProgress(record: SceneJobItem, job: SceneJob): ReactNode {
     <Text type="secondary" style={{ fontSize: 12 }}>
       启动中
     </Text>
+  )
+}
+
+/**
+ * 视频清单的列定义：页面上的进度卡和「查看」弹窗共用一套。
+ *
+ * 传了 onView 才多一列「操作」—— 页面上那条任务的结果已经在下面的网格里
+ * 铺开了，不需要再下钻一层。
+ */
+function itemColumns(
+  job: SceneJob,
+  onView?: (item: SceneJobItem) => void,
+): ColumnsType<SceneJobItem> {
+  const columns: ColumnsType<SceneJobItem> = [
+    { title: '#', dataIndex: 'index', width: 48 },
+    { title: '视频', dataIndex: 'source_name', ellipsis: true },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 90,
+      render: (status: keyof typeof ITEM_STATUS_META, record: SceneJobItem) => (
+        <Space size={4}>
+          <Tag color={ITEM_STATUS_META[status].color}>{ITEM_STATUS_META[status].label}</Tag>
+          {record.single_shot && status === 'success' && (
+            <Tooltip title="全片没有画面跳变，切不出片段是正常结果">
+              <Tag>单镜头</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      ),
+    },
+    {
+      // 实时进度：勾了多条视频时，一行一条，用户能看出正在切的是哪一条、
+      // 切到第几个了。数据来自后端轮询（vct 逐段上报）。
+      title: '进度',
+      key: 'progress',
+      width: 148,
+      render: (_: unknown, record: SceneJobItem) => renderItemProgress(record, job),
+    },
+    {
+      title: '镜头/片段',
+      width: 110,
+      render: (_: unknown, record: SceneJobItem) =>
+        record.clip_count > 0 || record.scene_count > 0
+          ? `${record.scene_count} / ${record.clip_count}`
+          : '—',
+    },
+    {
+      title: '耗时',
+      dataIndex: 'elapsed_seconds',
+      width: 80,
+      render: (value: number) => (value > 0 ? `${value}s` : '—'),
+    },
+    {
+      title: '说明',
+      dataIndex: 'error_message',
+      ellipsis: true,
+      render: (value: string) =>
+        value ? (
+          <Tooltip title={value}>
+            <Text type="danger" style={{ fontSize: 12 }}>
+              {value}
+            </Text>
+          </Tooltip>
+        ) : (
+          '—'
+        ),
+    },
+  ]
+
+  if (onView) {
+    columns.push({
+      title: '操作',
+      width: 64,
+      render: (_: unknown, record: SceneJobItem) =>
+        // 没东西可看的（还没轮到、单镜头、失败）别给一个点了没反应的链接
+        record.clip_count > 0 || (record.scenes?.length ?? 0) > 0 ? (
+          <a onClick={() => onView(record)}>查看</a>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
+    })
+  }
+
+  return columns
+}
+
+/**
+ * 片段网格：页面上的「切分结果」和每条视频的片段弹窗共用一套渲染。
+ *
+ * onPlay 传的是「整组片段 + 点的是第几个」，播放器要靠这个组来决定
+ * 上一个 / 下一个走到哪儿为止 —— 弹窗里传的就是那条视频自己的片段。
+ */
+function ClipGrid({
+  clips,
+  onPlay,
+}: {
+  clips: SceneClip[]
+  onPlay: (clips: SceneClip[], index: number) => void
+}) {
+  return (
+    <Row gutter={[12, 12]}>
+      {clips.map((clip, position) => (
+        // 按容器宽度铺满，而不是按视口切死的 1/6：同一个组件既用在整页的
+        // 「切分结果」里，也用在 880 宽的弹窗里，切死的话弹窗里只有 3 个片段
+        // 时会在右边空出一大片。maxWidth 兜住最后一行只剩一个时被拉成巨幅。
+        <Col key={clip.index} flex="1 1 200px" style={{ maxWidth: 320 }}>
+          <Card
+            size="small"
+            hoverable
+            styles={{ body: { padding: 8 } }}
+            cover={
+              // 封面点击即播放：把 Image 的放大预览关掉（preview={false}），
+              // 缩略图对视频来说没什么可看的，用户要的是看它怎么切出来的。
+              <Tooltip title="点击播放这一片">
+                <div
+                  onClick={() => onPlay(clips, position)}
+                  style={{
+                    position: 'relative',
+                    background: '#000',
+                    height: 96,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Image
+                    src={clip.thumb_url}
+                    alt={clip.name}
+                    preview={false}
+                    height={96}
+                    style={{ objectFit: 'cover' }}
+                    fallback="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iOTYiPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9IiMxYTFhMWEiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZmlsbD0iIzg4OCIgZm9udC1zaXplPSIxMiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuaXoOe8qeeVpTwvdGV4dD48L3N2Zz4="
+                  />
+                  <span style={PLAY_BADGE}>▶</span>
+                </div>
+              </Tooltip>
+            }
+          >
+            <Flex justify="space-between" align="center">
+              <Text style={{ fontSize: 12 }} ellipsis>
+                #{clip.index}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {formatBytes(clip.size_bytes)}
+              </Text>
+            </Flex>
+            <Tooltip title={`${clip.source_name} → ${clip.name}`}>
+              <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+                {clip.name}
+              </Text>
+            </Tooltip>
+          </Card>
+        </Col>
+      ))}
+    </Row>
   )
 }
 
