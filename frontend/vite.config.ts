@@ -23,8 +23,8 @@ export default defineConfig({
       output: {
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
-          // antd 体量大且只在「智能镜头分割」页使用，单独切块，
-          // 避免它把主包撑大、拖累既有页面的首屏
+          // antd 体量大（全站组件都来自它），单独切一块供应商包：
+          // 它不随业务代码改动而失效，浏览器可以长期缓存
           antd: ['antd'],
         },
       },

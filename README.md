@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 后端 | FastAPI + SQLAlchemy 2.0 + Pydantic v2 | 自带 OpenAPI 交互式文档 |
 | 数据库 | SQLite（默认） | 通过 `DATABASE_URL` 可切换 PostgreSQL 等 |
-| 前端 | React 18 + TypeScript + Vite 5 | 单页应用，开发环境自动代理接口 |
+| 前端 | React 18 + TypeScript + Vite 5 + antd 6 | 单页应用，开发环境自动代理接口；界面组件统一用 antd，约定见 `frontend/README.md` |
 | 桌面客户端 | Electron + electron-vite + React 18 | 主进程持有凭证并执行发布，渲染进程无 Node 权限 |
 | 后端包管理 | [uv](https://docs.astral.sh/uv/) | 依赖锁定与虚拟环境管理 |
 | 前端 / 客户端包管理 | npm | |

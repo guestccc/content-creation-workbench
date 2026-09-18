@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Alert, Button, Card, Col, Descriptions, Flex, Row, Statistic, Table, Tag, Typography } from 'antd'
+import type { ColumnsType } from 'antd/es/table'
 import { Link } from 'react-router-dom'
 
 import { fetchContents, fetchHealth, fetchStatistics } from '../api/contents'
@@ -6,6 +8,33 @@ import { ApiError } from '../api/client'
 import type { Content, ContentStatistics, HealthData } from '../types/content'
 import { STATUS_META, STATUS_ORDER } from '../types/content'
 import { formatDateTime } from '../utils/format'
+
+const { Title, Text } = Typography
+
+/** 最近更新列表的列定义（不涉及组件状态，放在组件外只建一次） */
+const recentColumns: ColumnsType<Content> = [
+  { title: '标题', dataIndex: 'title', key: 'title', render: (title: string) => <Text strong>{title}</Text> },
+  {
+    title: '平台',
+    dataIndex: 'platform',
+    key: 'platform',
+    render: (platform: string) => platform || <Text type="secondary">—</Text>,
+  },
+  {
+    title: '状态',
+    dataIndex: 'status',
+    key: 'status',
+    render: (status: Content['status']) => (
+      <Tag color={STATUS_META[status].color}>{STATUS_META[status].label}</Tag>
+    ),
+  },
+  {
+    title: '更新时间',
+    dataIndex: 'updated_at',
+    key: 'updated_at',
+    render: (value: string) => <Text type="secondary">{formatDateTime(value)}</Text>,
+  },
+]
 
 /**
  * 工作台概览页。
@@ -57,132 +86,114 @@ export default function Dashboard() {
   const serviceOk = health?.status === 'ok'
 
   return (
-    <>
-      <header className="page-header">
+    <Flex vertical gap={22}>
+      <Flex justify="space-between" align="flex-start" gap={16}>
         <div>
-          <h2 className="page-header__title">工作台概览</h2>
-          <p className="page-header__desc">查看内容创作的整体进展与最近动态</p>
+          <Title level={3} style={{ margin: 0 }}>
+            工作台概览
+          </Title>
+          <Text type="secondary">查看内容创作的整体进展与最近动态</Text>
         </div>
-        <button type="button" className="btn" onClick={() => void load()} disabled={loading}>
-          {loading ? '刷新中…' : '刷新'}
-        </button>
-      </header>
+        <Button onClick={() => void load()} loading={loading}>
+          刷新
+        </Button>
+      </Flex>
 
-      {error && <div className="alert alert--error">⚠️ {error}</div>}
+      {error && <Alert type="error" showIcon message={error} />}
 
       {/* 顶部统计卡片：总数 + 各状态分布 */}
-      <section className="stat-grid">
-        <article className="stat-card">
-          <div className="stat-card__label">内容总数</div>
-          <div className="stat-card__value">{stats ? stats.total : '—'}</div>
-          <div className="stat-card__accent" style={{ background: '#2563eb' }} />
-        </article>
+      <Row gutter={[16, 16]}>
+        <Col flex="1 1 160px">
+          <Card>
+            <Statistic title="内容总数" value={stats ? stats.total : '—'} />
+            <div
+              style={{
+                width: 32,
+                height: 3,
+                marginTop: 10,
+                background: '#2563eb',
+                borderRadius: 2,
+              }}
+            />
+          </Card>
+        </Col>
 
         {STATUS_ORDER.map((status) => (
-          <article className="stat-card" key={status}>
-            <div className="stat-card__label">{STATUS_META[status].label}</div>
-            <div className="stat-card__value">{stats ? stats.by_status[status] : '—'}</div>
-            <div className="stat-card__accent" style={{ background: STATUS_META[status].color }} />
-          </article>
+          <Col flex="1 1 160px" key={status}>
+            <Card>
+              <Statistic title={STATUS_META[status].label} value={stats ? stats.by_status[status] : '—'} />
+              <div
+                style={{
+                  width: 32,
+                  height: 3,
+                  marginTop: 10,
+                  background: STATUS_META[status].color,
+                  borderRadius: 2,
+                }}
+              />
+            </Card>
+          </Col>
         ))}
-      </section>
+      </Row>
 
       {/* 后端服务状态 */}
-      <section className="card" style={{ marginBottom: 22 }}>
-        <div className="card__header">
-          <h3 className="card__title">服务状态</h3>
-          {health && (
-            <span
-              className="badge"
-              style={{
-                color: serviceOk ? '#166534' : '#92400e',
-                background: serviceOk ? '#f0fdf4' : '#fffbeb',
-              }}
-            >
+      <Card
+        title="服务状态"
+        extra={
+          health && (
+            <Tag color={serviceOk ? 'success' : 'warning'}>
               {serviceOk ? '运行正常' : '降级运行'}
-            </span>
-          )}
-        </div>
-        <div className="card__body">
-          {health ? (
-            <div className="field-row">
-              <div>
-                <div className="text-muted" style={{ fontSize: 13 }}>
-                  应用名称
-                </div>
-                <div>{health.app_name}</div>
-              </div>
-              <div>
-                <div className="text-muted" style={{ fontSize: 13 }}>
-                  版本
-                </div>
-                <div className="text-mono">{health.version}</div>
-              </div>
-              <div>
-                <div className="text-muted" style={{ fontSize: 13 }}>
-                  数据库
-                </div>
-                <div style={{ color: databaseOk ? 'var(--color-success)' : 'var(--color-danger)' }}>
-                  {databaseOk ? '已连接' : '未连接'}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="text-muted">
-              无法获取服务状态，请确认后端服务已启动（默认 http://127.0.0.1:8000）
-            </div>
-          )}
-        </div>
-      </section>
+            </Tag>
+          )
+        }
+      >
+        {health ? (
+          <Descriptions
+            column={{ xs: 1, sm: 2, md: 3 }}
+            items={[
+              { key: 'app_name', label: '应用名称', children: health.app_name },
+              {
+                key: 'version',
+                label: '版本',
+                children: <Text code>{health.version}</Text>,
+              },
+              {
+                key: 'database',
+                label: '数据库',
+                children: (
+                  <Text style={{ color: databaseOk ? '#16a34a' : '#dc2626' }}>
+                    {databaseOk ? '已连接' : '未连接'}
+                  </Text>
+                ),
+              },
+            ]}
+          />
+        ) : (
+          <Text type="secondary">
+            无法获取服务状态，请确认后端服务已启动（默认 http://127.0.0.1:8000）
+          </Text>
+        )}
+      </Card>
 
       {/* 最近更新的内容 */}
-      <section className="card">
-        <div className="card__header">
-          <h3 className="card__title">最近更新</h3>
-          <Link to="/contents" className="btn btn--sm">
-            查看全部
+      <Card
+        title="最近更新"
+        extra={
+          <Link to="/contents">
+            <Button size="small">查看全部</Button>
           </Link>
-        </div>
-
-        {loading ? (
-          <div className="placeholder">加载中…</div>
-        ) : recent.length === 0 ? (
-          <div className="placeholder">
-            还没有任何内容，去「内容管理」页创建第一条吧
-          </div>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>标题</th>
-                <th>平台</th>
-                <th>状态</th>
-                <th>更新时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((item) => (
-                <tr key={item.id}>
-                  <td className="table__title">{item.title}</td>
-                  <td>{item.platform || <span className="text-muted">—</span>}</td>
-                  <td>
-                    <span
-                      className="badge"
-                      style={{
-                        color: STATUS_META[item.status].color,
-                        background: `${STATUS_META[item.status].color}1a`,
-                      }}
-                    >
-                      {STATUS_META[item.status].label}
-                    </span>
-                  </td>
-                  <td className="text-muted">{formatDateTime(item.updated_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-    </>
+        }
+      >
+        <Table<Content>
+          rowKey="id"
+          size="small"
+          columns={recentColumns}
+          dataSource={recent}
+          loading={loading}
+          pagination={false}
+          locale={{ emptyText: '还没有任何内容，去「内容管理」页创建第一条吧' }}
+        />
+      </Card>
+    </Flex>
   )
 }

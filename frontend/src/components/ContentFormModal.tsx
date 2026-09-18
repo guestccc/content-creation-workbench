@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState } from 'react'
+import { Alert, AutoComplete, Col, Form, Input, Modal, Row, Select } from 'antd'
 
 import { ApiError } from '../api/client'
 import { createContent, updateContent } from '../api/contents'
@@ -15,7 +16,7 @@ interface ContentFormModalProps {
 }
 
 /** 表单内部状态：标签用字符串编辑，提交时再拆分为数组 */
-interface FormState {
+interface FormValues {
   title: string
   platform: string
   status: ContentStatus
@@ -24,7 +25,7 @@ interface FormState {
   body: string
 }
 
-const EMPTY_FORM: FormState = {
+const EMPTY_FORM: FormValues = {
   title: '',
   platform: '',
   status: 'draft',
@@ -33,8 +34,8 @@ const EMPTY_FORM: FormState = {
   body: '',
 }
 
-/** 把内容实体转换为表单状态（标签用中文逗号连接，便于阅读） */
-function toFormState(content: Content): FormState {
+/** 把内容实体转换为表单初值（标签用中文逗号连接，便于阅读） */
+function toFormValues(content: Content): FormValues {
   return {
     title: content.title,
     platform: content.platform,
@@ -67,48 +68,35 @@ function formatDetails(details: unknown): string {
  * 内容创建 / 编辑弹窗。
  *
  * 同一个表单承担两种职责，由 editing 是否为空区分。
+ * 弹窗由父组件按需挂载，所以表单初值每次都从 editing 重新算 —— 不必担心
+ * 上一次编辑的内容残留在表单里。
  */
 export default function ContentFormModal({ editing, onClose, onSaved }: ContentFormModalProps) {
-  const [form, setForm] = useState<FormState>(editing ? toFormState(editing) : EMPTY_FORM)
+  const [form] = Form.useForm<FormValues>()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  // 支持 ESC 关闭弹窗
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
-
-  /** 更新表单中的单个字段 */
-  const updateField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
-    setForm((prev) => ({ ...prev, [key]: value }))
-  }
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    const title = form.title.trim()
-    if (!title) {
-      setError('标题不能为空')
+  /** 点「保存」：先过表单校验，再提交给后端 */
+  const handleSubmit = async () => {
+    let values: FormValues
+    try {
+      values = await form.validateFields()
+    } catch {
+      // 校验失败：antd 已在对应字段下给出提示，这里只要不关弹窗、不提交
       return
     }
 
     const payload: ContentPayload = {
-      title,
-      platform: form.platform.trim(),
-      status: form.status,
-      author: form.author.trim(),
+      title: values.title.trim(),
+      platform: values.platform?.trim() ?? '',
+      status: values.status,
+      author: values.author?.trim() ?? '',
       // 中英文逗号均作为分隔符，同时过滤掉空标签
-      tags: form.tags
+      tags: (values.tags ?? '')
         .split(/[,，]/)
         .map((tag) => tag.trim())
         .filter(Boolean),
-      body: form.body,
+      body: values.body ?? '',
     }
 
     setSaving(true)
@@ -134,134 +122,77 @@ export default function ContentFormModal({ editing, onClose, onSaved }: ContentF
   }
 
   return (
-    <div
-      className="modal-mask"
-      role="presentation"
-      // 点击遮罩关闭，但点击弹窗内部不关闭
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose()
-        }
-      }}
+    <Modal
+      open
+      title={editing ? '编辑内容' : '新建内容'}
+      width={640}
+      okText="保存"
+      cancelText="取消"
+      confirmLoading={saving}
+      // 关掉后销毁表单，下次打开是干净的
+      destroyOnHidden
+      onCancel={onClose}
+      onOk={() => void handleSubmit()}
     >
-      <div className="modal" role="dialog" aria-modal="true">
-        <div className="modal__header">
-          <h3 className="modal__title">{editing ? '编辑内容' : '新建内容'}</h3>
-          <button type="button" className="modal__close" onClick={onClose} aria-label="关闭">
-            ×
-          </button>
-        </div>
+      {error && (
+        <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />
+      )}
 
-        <form onSubmit={handleSubmit}>
-          <div className="modal__body">
-            {error && <div className="alert alert--error">⚠️ {error}</div>}
+      <Form<FormValues>
+        form={form}
+        layout="vertical"
+        initialValues={editing ? toFormValues(editing) : EMPTY_FORM}
+        // 回车提交：与原来手写表单的行为一致
+        onFinish={() => void handleSubmit()}
+      >
+        <Form.Item
+          name="title"
+          label="标题"
+          rules={[{ required: true, message: '标题不能为空' }]}
+        >
+          <Input maxLength={200} placeholder="例如：秋季新品保温杯种草文案" />
+        </Form.Item>
 
-            <div className="field">
-              <label className="field__label" htmlFor="content-title">
-                标题 <span className="field__required">*</span>
-              </label>
-              <input
-                id="content-title"
-                className="input"
-                value={form.title}
-                maxLength={200}
-                placeholder="例如：秋季新品保温杯种草文案"
-                onChange={(event) => updateField('title', event.target.value)}
+        {/* 平台 / 状态 / 作者并排一行，窄屏下各自换行 */}
+        <Row gutter={16}>
+          <Col xs={24} sm={10}>
+            <Form.Item name="platform" label="目标平台">
+              {/* AutoComplete：既能把常用平台当候选项，也允许直接输入别的 */}
+              <AutoComplete
+                options={PLATFORM_OPTIONS.map((platform) => ({ value: platform }))}
+                placeholder="选择或直接输入"
               />
-            </div>
-
-            <div className="field-row">
-              <div className="field">
-                <label className="field__label" htmlFor="content-platform">
-                  目标平台
-                </label>
-                <input
-                  id="content-platform"
-                  className="input"
-                  list="platform-options"
-                  value={form.platform}
-                  maxLength={50}
-                  placeholder="选择或直接输入"
-                  onChange={(event) => updateField('platform', event.target.value)}
-                />
-                <datalist id="platform-options">
-                  {PLATFORM_OPTIONS.map((platform) => (
-                    <option key={platform} value={platform} />
-                  ))}
-                </datalist>
-              </div>
-
-              <div className="field">
-                <label className="field__label" htmlFor="content-status">
-                  状态
-                </label>
-                <select
-                  id="content-status"
-                  className="select"
-                  value={form.status}
-                  onChange={(event) => updateField('status', event.target.value as ContentStatus)}
-                >
-                  {STATUS_ORDER.map((status) => (
-                    <option key={status} value={status}>
-                      {STATUS_META[status].label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="field">
-                <label className="field__label" htmlFor="content-author">
-                  作者
-                </label>
-                <input
-                  id="content-author"
-                  className="input"
-                  value={form.author}
-                  maxLength={100}
-                  placeholder="创作者名称"
-                  onChange={(event) => updateField('author', event.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="field">
-              <label className="field__label" htmlFor="content-tags">
-                标签
-              </label>
-              <input
-                id="content-tags"
-                className="input"
-                value={form.tags}
-                placeholder="用逗号分隔，例如：保温杯，办公好物"
-                onChange={(event) => updateField('tags', event.target.value)}
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={7}>
+            <Form.Item name="status" label="状态">
+              <Select
+                options={STATUS_ORDER.map((status) => ({
+                  value: status,
+                  label: STATUS_META[status].label,
+                }))}
               />
-              <span className="field__hint">最多 10 个标签，重复标签会自动去除</span>
-            </div>
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={7}>
+            <Form.Item name="author" label="作者">
+              <Input maxLength={100} placeholder="创作者名称" />
+            </Form.Item>
+          </Col>
+        </Row>
 
-            <div className="field">
-              <label className="field__label" htmlFor="content-body">
-                正文
-              </label>
-              <textarea
-                id="content-body"
-                className="textarea"
-                value={form.body}
-                placeholder="在这里撰写内容正文…"
-                onChange={(event) => updateField('body', event.target.value)}
-              />
-            </div>
-          </div>
+        <Form.Item
+          name="tags"
+          label="标签"
+          extra="最多 10 个标签，重复标签会自动去除"
+        >
+          <Input placeholder="用逗号分隔，例如：保温杯，办公好物" />
+        </Form.Item>
 
-          <div className="modal__footer">
-            <button type="button" className="btn" onClick={onClose} disabled={saving}>
-              取消
-            </button>
-            <button type="submit" className="btn btn--primary" disabled={saving}>
-              {saving ? '保存中…' : '保存'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        <Form.Item name="body" label="正文">
+          <Input.TextArea rows={7} placeholder="在这里撰写内容正文…" />
+        </Form.Item>
+      </Form>
+    </Modal>
   )
 }

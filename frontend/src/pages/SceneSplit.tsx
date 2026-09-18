@@ -1312,7 +1312,9 @@ function itemColumns(
       render: (_: unknown, record: SceneJobItem) =>
         // 没东西可看的（还没轮到、单镜头、失败）别给一个点了没反应的链接
         record.clip_count > 0 || (record.scenes?.length ?? 0) > 0 ? (
-          <a onClick={() => onView(record)}>查看</a>
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => onView(record)}>
+            查看
+          </Button>
         ) : (
           <Text type="secondary">—</Text>
         ),
@@ -1467,12 +1469,27 @@ function historyColumns(handlers: {
     },
     {
       title: '操作',
-      width: 150,
+      // 三个操作按钮（查看 / 取消 / 删除）并排，宽度按最宽的那种状态留够
+      width: 180,
       render: (_: unknown, record) => (
         <Space size={4}>
-          <a onClick={() => handlers.onView(record.id)}>查看</a>
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0 }}
+            onClick={() => handlers.onView(record.id)}
+          >
+            查看
+          </Button>
           {!isTerminalStatus(record.status) ? (
-            <a onClick={() => handlers.onCancel(record.id)}>取消</a>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0 }}
+              onClick={() => handlers.onCancel(record.id)}
+            >
+              取消
+            </Button>
           ) : (
             <Popconfirm
               title="删除这条任务记录？"
@@ -1481,7 +1498,9 @@ function historyColumns(handlers: {
               cancelText="取消"
               onConfirm={() => handlers.onDelete(record.id)}
             >
-              <a>删除</a>
+              <Button type="link" size="small" danger style={{ padding: 0 }}>
+                删除
+              </Button>
             </Popconfirm>
           )}
         </Space>
