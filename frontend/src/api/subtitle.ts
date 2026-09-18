@@ -1,0 +1,59 @@
+/**
+ * 视频字幕提取相关的接口调用。
+ *
+ * 每个函数对应后端一个接口，返回值已完成拆包（直接拿到 data）。
+ */
+
+import { del, get, post } from './client'
+import type {
+  SubtitleEnvironment,
+  SubtitleJob,
+  SubtitleJobListData,
+  SubtitleJobPayload,
+  SubtitleFile,
+  SubtitleText,
+} from '../types/subtitle'
+
+/** 探测 VideoCaptioner / ffmpeg 是否可用，未安装时返回按平台的安装指引 */
+export function fetchSubtitleEnvironment(refresh = false): Promise<SubtitleEnvironment> {
+  return get<SubtitleEnvironment>('/subtitle/environment', refresh ? { refresh: true } : undefined)
+}
+
+/** 创建字幕提取任务 */
+export function createSubtitleJob(payload: SubtitleJobPayload): Promise<SubtitleJob> {
+  return post<SubtitleJob>('/subtitle/jobs', payload)
+}
+
+/** 分页查询历史任务（不返回每条视频的明细） */
+export function fetchSubtitleJobs(params: {
+  page?: number
+  page_size?: number
+  status?: string
+}): Promise<SubtitleJobListData> {
+  return get<SubtitleJobListData>('/subtitle/jobs', { ...params })
+}
+
+/** 获取任务详情（轮询进度也用它） */
+export function fetchSubtitleJob(jobId: number): Promise<SubtitleJob> {
+  return get<SubtitleJob>(`/subtitle/jobs/${jobId}`)
+}
+
+/** 获取任务已产出的字幕文件列表 */
+export function fetchSubtitleFiles(jobId: number): Promise<SubtitleFile[]> {
+  return get<SubtitleFile[]>(`/subtitle/jobs/${jobId}/subtitles`)
+}
+
+/** 获取单份字幕的文本内容（预览用，超长会被截断） */
+export function fetchSubtitleText(jobId: number, index: number): Promise<SubtitleText> {
+  return get<SubtitleText>(`/subtitle/jobs/${jobId}/subtitles/${index}`)
+}
+
+/** 取消任务 */
+export function cancelSubtitleJob(jobId: number): Promise<SubtitleJob> {
+  return post<SubtitleJob>(`/subtitle/jobs/${jobId}/cancel`)
+}
+
+/** 删除任务记录（磁盘上已生成的字幕文件保留） */
+export function deleteSubtitleJob(jobId: number): Promise<{ id: number }> {
+  return del<{ id: number }>(`/subtitle/jobs/${jobId}`)
+}

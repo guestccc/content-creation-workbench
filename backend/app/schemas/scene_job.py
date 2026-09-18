@@ -34,23 +34,11 @@ from app.core.scene_templates import (
     TEMPLATE_MAP,
 )
 from app.models.scene_job import SceneJob, SceneJobItem, SceneJobMode
-from app.schemas.common import TimestampMixin, to_utc_iso
+from app.schemas.common import TimestampMixin, absolutize_path, to_utc_iso
 
-
-def _absolutize(value: str, field: str) -> str:
-    """展开 ~ 并规范化为绝对路径；相对路径直接判非法。
-
-    用 os.path.abspath 而不是 Path.resolve()：前者只做词法规范化，
-    不会去解析符号链接（macOS 上 /tmp 会被 resolve 成 /private/tmp，
-    会让用户看到自己没输入过的路径）。
-    """
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError(f"{field} 不能为空")
-    expanded = os.path.expanduser(cleaned)
-    if not os.path.isabs(expanded):
-        raise ValueError(f"{field} 必须是绝对路径（以 / 开头），当前为：{cleaned}")
-    return os.path.abspath(expanded)
+# 实现已提到 schemas/common.py（字幕提取要用同一份校验），这里保留旧名字，
+# 免得本模块内部与既有测试的引用一起改。
+_absolutize = absolutize_path
 
 
 # --------------------------------------------------------------------------

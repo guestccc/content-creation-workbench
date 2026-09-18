@@ -60,6 +60,26 @@ def db_session():
         Base.metadata.drop_all(bind=test_engine)
 
 
+@pytest.fixture(autouse=True)
+def _fake_vc_installed(monkeypatch):
+    """字幕相关用例默认假定 VideoCaptioner 已装好，探测结果为已安装。
+
+    创建任务时服务层会先 detect() 确认工具可用 —— 测试不该依赖开发机上
+    真的装着 VideoCaptioner。「怎么探测、缓存、安装指引」由
+    test_subtitle_env.py 单独覆盖；需要「未安装」场景的用例自己再
+    monkeypatch 一次覆盖本夹具即可。
+    """
+    from app.services.subtitle_env import VcInstall
+
+    fake = VcInstall(
+        installed=True,
+        launcher=["/fake/python", "-m", "videocaptioner"],
+        kind="venv-python",
+        ffmpeg_path="/fake/ffmpeg",
+    )
+    monkeypatch.setattr("app.services.subtitle_job_service.detect", lambda *a, **k: fake)
+
+
 @pytest.fixture()
 def client(db_session):
     """提供覆盖了数据库依赖的测试客户端。

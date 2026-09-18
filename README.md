@@ -75,7 +75,7 @@
 │   ├── README.md             # 每一段放什么（见下）
 │   ├── source/               # ① 原始素材：待切的视频往这里拷
 │   ├── clips/                # ② 镜头分割产物：每条原片一个 <视频名>_scenes/
-│   ├── subtitle/             # ③ 字幕与文案产物（.srt / .txt）
+│   ├── subtitle/             # ③ 字幕提取产物：每条视频一个 <视频名>.srt
 │   └── output/               # ④ 成片，待发布
 │
 └── README.md                 # 本文件
@@ -187,6 +187,30 @@ Web 工作台的「智能镜头分割」页调用仓库根目录的 `vct` 命令
 
 以上原委见 `docs/镜头分割设计说明.md` 第 8、9、10 节。
 
+### 4. 视频字幕提取（可选）
+
+Web 工作台的「字幕提取」页调用 **VideoCaptioner** 把视频里的语音转成
+`.srt` 字幕：每条视频一份，落在 `materials/subtitle/`（重名自动加 `-2` / `-3`），
+点列表里的文件名可以直接在页面上预览字幕文本。
+
+VideoCaptioner **不在本仓库里**，需要另行安装 —— 页面顶部的环境自检会告诉你
+装没装、缺什么，并按当前系统给出可复制的安装命令：
+
+- macOS：`python3 -m pip install videocaptioner`，再 `brew install ffmpeg`
+- Windows：`py -3.11 -m pip install videocaptioner`，再 `winget install Gyan.FFmpeg`
+
+装好后点页面上的「重新检测」即可，**不用重启服务**。后端只检测不替你安装；
+转写前要先把视频转成音频，所以 ffmpeg 是必需依赖，缺了它页面会明确提示。
+
+两点使用上的说明：
+
+- **进度只有「第几条 · 已用时长」，没有百分比** —— VideoCaptioner 的进度条
+  只在终端里渲染，后端拿不到机器可读的进度，所以如实不编分母；
+- 识别引擎默认用免费的 `bijian`（中英、不用申请 key）；识别语言留空即自动检测。
+
+为什么不走仓库里的 `vct` 包装、检测顺序与缓存、结果为什么以产物为准，
+见 `docs/字幕提取设计说明.md`。
+
 ### 素材放哪儿：`materials/`
 
 仓库根目录的 `materials/` 是素材仓库，**按流程分成四段**，每一段只放一类东西。
@@ -196,7 +220,7 @@ Web 工作台的「智能镜头分割」页调用仓库根目录的 `vct` 命令
 materials/
 ├── source/     ① 原始素材：待切的视频往这里拷（页面的默认输入目录）
 ├── clips/      ② 镜头分割产物：每条原片一个 <视频名>_scenes/（页面的默认输出目录）
-├── subtitle/   ③ 字幕与文案产物（.srt / .txt），留给 vct 的字幕流程
+├── subtitle/   ③ 字幕提取产物：每条视频一个 <视频名>.srt
 └── output/     ④ 成片，待发布
 ```
 
@@ -204,7 +228,7 @@ materials/
 | --- | --- | --- |
 | `source/` | 相机、手机、剪辑软件导出的原片 | **你自己拷**。页面打开时输入目录默认停在这里 |
 | `clips/` | 切好的单镜头片段 | 后端。每条原片单独建 `<视频名>_scenes/`，重名追加 `-2`、`-3` |
-| `subtitle/` | 识别出的字幕、写好的文案 | 留给 vct 的字幕流程 |
+| `subtitle/` | 识别出的字幕（.srt） | 后端。字幕提取功能逐条视频转写，重名追加 `-2`、`-3` |
 | `output/` | 拼好待发布的成片 | 后续的合成 / 导出流程 |
 
 根目录本身不放东西 —— 原片进 `source/`，产物进各自的分段目录，
@@ -234,6 +258,11 @@ materials/
 | `SCENE_JOB_VIDEO_TIMEOUT_SECONDS` | `3600` | 单条视频的硬超时 |
 | `SCENE_INPUT_EXTENSIONS` | `.mp4,.mov,.mkv,.avi,.webm,.m4v` | 可处理的视频扩展名 |
 | `SCENE_MAX_BATCH_FILES` | `200` | 单个任务最多处理的视频数 |
+| `SUBTITLE_VC_ROOT` | 自动指向工具箱目录的 `VideoCaptioner/` | VideoCaptioner 根目录（探测它下面的 `.venv` 用） |
+| `SUBTITLE_VC_PYTHON` | 空（自动探测） | 显式指定装了 videocaptioner 的解释器或脚本，优先级最高 |
+| `SUBTITLE_WORKER_ENABLED` | `true` | 是否启用后台转写工作线程 |
+| `SUBTITLE_JOB_VIDEO_TIMEOUT_SECONDS` | `1800` | 单条视频转写的硬超时 |
+| `SUBTITLE_DETECT_CACHE_SECONDS` | `30` | 环境探测结果的缓存时长（页面「重新检测」会绕过） |
 
 内置模板（参数定义在 `backend/app/core/scene_templates.py`，前端只展示不维护）：
 
@@ -257,7 +286,7 @@ materials/
 - `/api/v1/fs/list` 是面向本机单用户的无鉴权目录列举接口，
   **把 `HOST` 改成 `0.0.0.0` 暴露到局域网之前，必须先加鉴权或恢复根目录白名单**。
 
-### 4. 启动桌面客户端（可选）
+### 5. 启动桌面客户端（可选）
 
 只有需要执行代理发布时才需要启动，后端与 Web 工作台可以先独立使用。
 

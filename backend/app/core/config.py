@@ -12,6 +12,21 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_vc_root() -> str:
+    """VideoCaptioner 的默认安装位置：工具箱根目录下的 VideoCaptioner/。
+
+    本文件位于 <工具箱>/内容创作工作台/backend/app/core/config.py，
+    所以 parents[3] 是仓库根、parents[4] 是工具箱根。把仓库单独拷到别处时
+    parents[4] 可能不存在（下标越界），这时退回仓库根 —— 配置的默认值
+    不该让整个应用起不来，探测不到会在页面上如实报告。
+    """
+    resolved = Path(__file__).resolve()
+    try:
+        return str(resolved.parents[4] / "VideoCaptioner")
+    except IndexError:
+        return str(resolved.parents[3] / "VideoCaptioner")
+
+
 class Settings(BaseSettings):
     """全局配置对象。
 
@@ -115,6 +130,42 @@ class Settings(BaseSettings):
     # 归一化编码速度档：veryfast 在画质几乎不变的前提下明显快于 medium。
     MIX_ENCODE_PRESET: str = "veryfast"
 
+    # ---------- 视频字幕提取 ----------
+    # VideoCaptioner 的安装根目录。它**不在本仓库里**，而是与本仓库平级：
+    # 本文件位于 <工具箱>/内容创作工作台/backend/app/core/config.py，
+    # parents[3] = 内容创作工作台，parents[4] = 内容制作工具（工具箱根），
+    # VideoCaptioner 就放在工具箱根下。注意别照抄 vctl/env.py 里的
+    # VC_ROOT —— 那边指的是仓库内的路径，本机并不存在。
+    SUBTITLE_VC_ROOT: str = _default_vc_root()
+    # 显式指定要调用的解释器/可执行文件，留空表示自动探测（见 services/subtitle_env.py）。
+    # 给「自动探测找不到、但用户知道自己装在哪儿」的情况留的后门。
+    SUBTITLE_VC_PYTHON: str = ""
+    # 是否启用后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。
+    SUBTITLE_WORKER_ENABLED: bool = True
+    # 工作线程空闲时的轮询间隔（秒）。
+    SUBTITLE_JOB_POLL_SECONDS: float = 1.0
+    # 执行单个视频时检查取消信号的间隔（秒）。
+    SUBTITLE_JOB_TICK_SECONDS: float = 0.5
+    # 进度字段落库的最小间隔（秒），避免高频写库。
+    SUBTITLE_JOB_PROGRESS_SECONDS: float = 3.0
+    # 单条视频的硬超时（秒）。转写比切割慢得多，给得比 SCENE 宽一倍。
+    SUBTITLE_JOB_VIDEO_TIMEOUT_SECONDS: int = 1800
+    # 停止工作线程 / 取消任务时，等待子进程组自行退出的宽限（秒），之后强杀。
+    SUBTITLE_JOB_STOP_GRACE_SECONDS: float = 3.0
+    # 可处理的视频扩展名（小写、带点）。
+    SUBTITLE_INPUT_EXTENSIONS: List[str] = Field(
+        default_factory=lambda: [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"]
+    )
+    # 单个任务最多处理的视频数，防止误选一个几千条素材的目录把队列占满。
+    SUBTITLE_MAX_BATCH_FILES: int = 200
+    # 默认 ASR 引擎，取值见 app/core/subtitle_asr.py。bijian 免费、免配置、中英通吃。
+    SUBTITLE_DEFAULT_ASR: str = "bijian"
+    # VideoCaptioner 探测结果的缓存秒数。探测要起一次子进程（约 0.1 秒），
+    # 不能每次请求都做；前端「重新检测」按钮走 force=True 绕过缓存。
+    SUBTITLE_DETECT_CACHE_SECONDS: float = 30.0
+    # 字幕预览接口最多返回多少字节（超出只截取开头并置 truncated）。
+    SUBTITLE_PREVIEW_MAX_BYTES: int = 512 * 1024
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_cors_origins(cls, value):
@@ -127,13 +178,14 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    @field_validator("SCENE_INPUT_EXTENSIONS", mode="before")
+    @field_validator("SCENE_INPUT_EXTENSIONS", "SUBTITLE_INPUT_EXTENSIONS", mode="before")
     @classmethod
     def _split_scene_extensions(cls, value):
         """支持用逗号分隔的字符串配置视频扩展名。
 
         例如：SCENE_INPUT_EXTENSIONS=.mp4,.mov
         同时兼容标准 JSON 数组写法；统一转小写并补上点号前缀。
+        镜头分割与字幕提取共用这一份规范化逻辑（扩展名的写法没有理由不同）。
         """
         if isinstance(value, str) and not value.strip().startswith("["):
             value = [item.strip() for item in value.split(",") if item.strip()]

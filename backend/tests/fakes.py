@@ -157,3 +157,134 @@ class FakePopen:
             return self.argv[self.argv.index(flag) + 1]
         except (ValueError, IndexError):
             return None
+
+
+# ---------------------------------------------------------------------------
+# 视频字幕提取（VideoCaptioner）
+# ---------------------------------------------------------------------------
+
+# 一份最小可用的 .srt（两条字幕），替身默认往输出目录写这个内容
+DEFAULT_SRT = (
+    "1\n"
+    "00:00:00,000 --> 00:00:02,000\n"
+    "第一句字幕\n"
+    "\n"
+    "2\n"
+    "00:00:02,000 --> 00:00:04,000\n"
+    "第二句字幕\n"
+    "\n"
+)
+
+
+class FakeVcPopen:
+    """模拟 VideoCaptioner transcribe 子进程的最小接口。
+
+    argv 形状（与 subtitle_runner.build_argv 对齐）：
+        [launcher..., "transcribe", <video>, [--asr X] [--language Y]
+         --format srt, -o, <dir>/, --quiet]
+    与 FakePopen 的关键区别：launcher 前缀长度不定，视频参数要靠
+    "transcribe" 定位；-o 的值带结尾斜杠，用前要剥掉。
+
+    script 键（缺省即一条顺利转写：退出码 0 + 产出一份两条字幕的 .srt）：
+        exit_code          退出码，默认 0；
+        no_output          True 时不产出 .srt（退出码 0 但产物缺失的场景）；
+        srt_content        自定义 .srt 内容，默认 DEFAULT_SRT；
+        empty_output       True 时产出一个 0 字节 .srt（判失败用）；
+        hang               True 时 poll 永远返回 None；
+        polls_before_exit  退出前先空转多少次 poll；
+        log_lines          每次 poll 往 stdout 写一行；
+        on_poll            每次 poll 时调用的回调 fn(proc, 第几次)。
+    """
+
+    #: 记录所有实例，便于用例断言「起了几次进程、参数是什么」
+    instances: List["FakeVcPopen"] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        """清空实例记录，每个用例开始前调用。"""
+        cls.instances = []
+
+    def __init__(
+        self,
+        argv,
+        stdout=None,
+        stderr=None,
+        stdin=None,
+        start_new_session: bool = False,
+        cwd: Optional[str] = None,
+        env=None,
+        script: Optional[dict] = None,
+    ) -> None:
+        self.argv = list(argv)
+        self.cwd = cwd
+        self.env = env
+        self.start_new_session = start_new_session
+        self.script = dict(script or {})
+        self.pid = 50000 + len(FakeVcPopen.instances)
+        self.stdout = stdout
+        self.poll_count = 0
+        self._returncode: Optional[int] = None
+        self._produced = False
+        FakeVcPopen.instances.append(self)
+
+    def poll(self) -> Optional[int]:
+        """首次（空转次数用尽后的）调用生产产物并返回退出码；hang 时永远 None。"""
+        self.poll_count += 1
+        probe = self.script.get("on_poll")
+        if probe is not None:
+            probe(self, self.poll_count)
+
+        if self.script.get("hang"):
+            self._emit_log_line()
+            return None
+
+        remaining = int(self.script.get("polls_before_exit", 0))
+        if self.poll_count <= remaining:
+            self._emit_log_line()
+            return None
+
+        self._emit_log_line()
+        if not self._produced:
+            self._produce()
+            self._produced = True
+            self._returncode = int(self.script.get("exit_code", 0))
+        return self._returncode
+
+    def _emit_log_line(self) -> None:
+        """把下一条预置日志写进 stdout 句柄（与真实 vc 的日志文件是同一个地方）。"""
+        lines: List[str] = list(self.script.get("log_lines") or [])
+        index = self.poll_count - 1
+        if index >= len(lines) or self.stdout is None:
+            return
+        try:
+            self.stdout.write((lines[index] + "\n").encode("utf-8"))
+            self.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            # 句柄已被被测代码关掉（进程退出后），这在真实场景里也不该崩
+            pass
+
+    def _produce(self) -> None:
+        """按脚本在 -o 目录里写 <stem>.srt（除非 no_output）。"""
+        if self.script.get("no_output"):
+            return
+        out_dir = self._arg_after("-o")
+        if out_dir is None:
+            return
+        out = Path(out_dir.rstrip("/\\"))
+        out.mkdir(parents=True, exist_ok=True)
+
+        video = self._arg_after("transcribe") or "video.mp4"
+        stem = Path(video).stem
+        content = b"" if self.script.get("empty_output") else self.script.get(
+            "srt_content", DEFAULT_SRT
+        )
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        (out / f"{stem}.srt").write_bytes(content)
+
+    def _arg_after(self, flag: str) -> Optional[str]:
+        """取 argv 中某个选项后面的值。"""
+        try:
+            return self.argv[self.argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            return None

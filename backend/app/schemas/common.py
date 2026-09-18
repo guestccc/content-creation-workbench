@@ -5,6 +5,7 @@
 前端只需判断 success 字段即可分流。
 """
 
+import os
 from datetime import datetime, timezone
 from typing import Generic, TypeVar
 
@@ -12,6 +13,28 @@ from pydantic import BaseModel, Field, field_serializer
 
 # 响应数据类型变量
 T = TypeVar("T")
+
+
+def absolutize_path(value: str, field: str) -> str:
+    """展开 ~ 并规范化为绝对路径；相对路径直接判非法。
+
+    后端的 cwd 与用户敲命令时的 cwd 不是一回事，相对路径会指向一个用户
+    完全没预期的地方，所以宁可 422 也不猜。
+
+    用 os.path.abspath 而不是 Path.resolve()：前者只做词法规范化，
+    不会去解析符号链接（macOS 上 /tmp 会被 resolve 成 /private/tmp，
+    会让用户看到自己没输入过的路径）。
+
+    Raises:
+        ValueError: 值为空或不是绝对路径（Pydantic 会转成 422 响应）。
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field} 不能为空")
+    expanded = os.path.expanduser(cleaned)
+    if not os.path.isabs(expanded):
+        raise ValueError(f"{field} 必须是绝对路径（以 / 开头），当前为：{cleaned}")
+    return os.path.abspath(expanded)
 
 
 def to_utc_iso(value: datetime) -> str:

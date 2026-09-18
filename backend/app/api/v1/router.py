@@ -5,7 +5,16 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import accounts, contents, fs, health, mix_jobs, publish_tasks, scene_jobs
+from app.api.v1 import (
+    accounts,
+    contents,
+    fs,
+    health,
+    mix_jobs,
+    publish_tasks,
+    scene_jobs,
+    subtitle_jobs,
+)
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -14,4 +23,5 @@ api_router.include_router(accounts.router)
 api_router.include_router(publish_tasks.router)
 api_router.include_router(scene_jobs.router)
 api_router.include_router(mix_jobs.router)
+api_router.include_router(subtitle_jobs.router)
 api_router.include_router(fs.router)

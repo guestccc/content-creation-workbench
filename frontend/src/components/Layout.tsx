@@ -1,6 +1,7 @@
 import {
   DashboardOutlined,
   FileTextOutlined,
+  FontSizeOutlined,
   ScissorOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
@@ -19,9 +20,10 @@ const { Text, Title } = Typography
 const NAV_ITEMS: { key: string; label: string; icon: ReactNode }[] = [
   { key: '/', label: '工作台概览', icon: <DashboardOutlined /> },
   { key: '/contents', label: '内容管理', icon: <FileTextOutlined /> },
-  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），两个别用重了
+  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），字幕用文字，三个别用重了
   { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
   { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
+  { key: '/subtitle', label: '字幕提取', icon: <FontSizeOutlined /> },
 ]
 
 /**

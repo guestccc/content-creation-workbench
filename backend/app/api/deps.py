@@ -15,6 +15,7 @@ from app.services.content_service import ContentService
 from app.services.mix_job_service import MixJobService
 from app.services.publish_task_service import PublishTaskService
 from app.services.scene_job_service import SceneJobService
+from app.services.subtitle_job_service import SubtitleJobService
 
 # 数据库会话依赖
 DbSession = Annotated[Session, Depends(get_db)]
@@ -73,9 +74,15 @@ def get_mix_job_service(db: DbSession) -> MixJobService:
     return MixJobService(db)
 
 
+def get_subtitle_job_service(db: DbSession) -> SubtitleJobService:
+    """构造字幕提取任务服务实例。"""
+    return SubtitleJobService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
 PublishTaskServiceDep = Annotated[PublishTaskService, Depends(get_publish_task_service)]
 SceneJobServiceDep = Annotated[SceneJobService, Depends(get_scene_job_service)]
 MixJobServiceDep = Annotated[MixJobService, Depends(get_mix_job_service)]
+SubtitleJobServiceDep = Annotated[SubtitleJobService, Depends(get_subtitle_job_service)]

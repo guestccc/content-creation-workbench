@@ -20,6 +20,12 @@ from app.models.scene_job import (
     SceneJobMode,
     SceneJobStatus,
 )
+from app.models.subtitle_job import (
+    SubtitleJob,
+    SubtitleJobItem,
+    SubtitleJobItemStatus,
+    SubtitleJobStatus,
+)
 
 __all__ = [
     "Account",
@@ -38,4 +44,8 @@ __all__ = [
     "SceneJobItemStatus",
     "SceneJobMode",
     "SceneJobStatus",
+    "SubtitleJob",
+    "SubtitleJobItem",
+    "SubtitleJobItemStatus",
+    "SubtitleJobStatus",
 ]

@@ -30,17 +30,25 @@ logger = get_logger(__name__)
 
 
 def child_env() -> Dict[str, str]:
-    """构造子进程环境变量：把 ~/.local/bin 与工具箱的 ffmpeg-bin 前插到 PATH。
+    """构造子进程环境变量：把几个「工具常在但 PATH 里没有」的目录前插到 PATH。
 
-    背景：vct 自己会去 ~/.local/bin 找 scenedetect，但 ffmpeg 只查 PATH
-    和 ffmpeg-bin/；uvicorn 若从图形界面或 launchd 启动，PATH 会非常贫瘠，
-    不补 PATH 切割会全量失败。
+    背景：uvicorn 若从图形界面或 launchd 启动，PATH 会非常贫瘠，而工具
+    只会去 PATH 里找。补上这几处：
+    - `~/.local/bin`：vct 自己就在这里找 scenedetect；
+    - `<工具箱>/ffmpeg-bin`：vct 没找到 ffmpeg 时的兜底位置；
+    - `<VideoCaptioner>/../ffmpeg-bin`：同一层级的另一个 ffmpeg 存放点，
+      字幕提取要先把视频转成音频，缺 ffmpeg 会全量失败。
+
+    重复目录无害（PATH 里同名目录只有第一个生效），所以不做去重判断。
     """
     env = dict(os.environ)
     extra = [
         str(Path.home() / ".local" / "bin"),
         str(Path(settings.SCENE_VCT_PATH).resolve().parent / "ffmpeg-bin"),
     ]
+    if settings.SUBTITLE_VC_ROOT:
+        extra.append(str(Path(settings.SUBTITLE_VC_ROOT).expanduser().parent / "ffmpeg-bin"))
+
     current = env.get("PATH", "")
     env["PATH"] = os.pathsep.join(extra + ([current] if current else []))
     return env

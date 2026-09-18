@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, DatabaseError, NotFoundError
 from app.core.logging import get_logger
+from app.core import video_files
 from app.core.scene_templates import resolve_params
 from app.db.session import transaction
 from app.models.content import utcnow
@@ -49,67 +50,28 @@ logger = get_logger(__name__)
 
 
 def is_video_file(name: str) -> bool:
-    """按后端配置的扩展名白名单判断是否为可处理的视频文件。"""
-    return Path(name).suffix.lower() in settings.SCENE_INPUT_EXTENSIONS
+    """按后端配置的扩展名白名单判断是否为可处理的视频文件。
+
+    实现在 core/video_files.py（字幕提取要用同一套规则），这里只是把
+    扩展名白名单填上本功能的配置 —— 调用方（含 api/v1/fs.py）保持原样。
+    """
+    return video_files.is_video_file(name, settings.SCENE_INPUT_EXTENSIONS)
 
 
 def enumerate_videos(
     input_path: str, *, recursive: bool, files: Optional[List[str]] = None
 ) -> List[Path]:
-    """把输入路径展开成一份确定的视频清单。
+    """把输入路径展开成一份确定的视频清单（白名单与批量上限取本功能的配置）。
 
-    规则：
-    - 输入是文件：直接用这一条（扩展名不在白名单也接受 —— 用户显式点名了它）；
-    - 输入是目录：按扩展名白名单枚举，recursive 决定是否下钻子目录；
-      跳过隐藏文件和 macOS 的 AppleDouble（._ 开头）文件；
-    - 传了 files（前端勾选的文件名）时只保留勾选项。
-
-    Returns:
-        排序后的视频绝对路径列表。
-
-    Raises:
-        BadRequestError: 路径不存在、不是文件/目录、目录里没有可处理的视频、
-            或勾选的文件名在目录中不存在。
+    规则与异常见 core/video_files.enumerate_videos —— 那里是唯一实现。
     """
-    source = Path(input_path)
-
-    if not source.exists():
-        raise BadRequestError(f"输入路径不存在：{input_path}")
-
-    if source.is_file():
-        return [source]
-
-    if not source.is_dir():
-        raise BadRequestError(f"输入路径既不是文件也不是目录：{input_path}")
-
-    # 目录：枚举视频文件
-    if files:
-        # 前端勾选模式：只取勾选项，文件名已在 schema 层禁止路径分隔符
-        candidates = [source / name for name in files]
-        missing = [p.name for p in candidates if not p.is_file()]
-        if missing:
-            raise BadRequestError(f"以下文件在输入目录中不存在：{missing}")
-        videos = candidates
-    else:
-        iterator = source.rglob("*") if recursive else source.iterdir()
-        videos = [
-            entry
-            for entry in iterator
-            if entry.is_file()
-            and not entry.name.startswith(".")
-            and is_video_file(entry.name)
-        ]
-
-    videos.sort(key=lambda p: str(p).lower())
-
-    if not videos:
-        raise BadRequestError(f"输入目录下没有可处理的视频文件：{input_path}")
-    if len(videos) > settings.SCENE_MAX_BATCH_FILES:
-        raise BadRequestError(
-            f"一次最多处理 {settings.SCENE_MAX_BATCH_FILES} 条视频，当前共 {len(videos)} 条；"
-            "请改用文件勾选或分批处理"
-        )
-    return videos
+    return video_files.enumerate_videos(
+        input_path,
+        recursive=recursive,
+        files=files,
+        extensions=settings.SCENE_INPUT_EXTENSIONS,
+        max_files=settings.SCENE_MAX_BATCH_FILES,
+    )
 
 
 def _allocate_output_dirs(
