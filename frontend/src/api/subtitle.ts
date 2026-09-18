@@ -4,7 +4,7 @@
  * 每个函数对应后端一个接口，返回值已完成拆包（直接拿到 data）。
  */
 
-import { del, get, post } from './client'
+import { del, get, post, put } from './client'
 import type {
   SubtitleEnvironment,
   SubtitleJob,
@@ -17,6 +17,16 @@ import type {
 /** 探测 VideoCaptioner / ffmpeg 是否可用，未安装时返回按平台的安装指引 */
 export function fetchSubtitleEnvironment(refresh = false): Promise<SubtitleEnvironment> {
   return get<SubtitleEnvironment>('/subtitle/environment', refresh ? { refresh: true } : undefined)
+}
+
+/**
+ * 手动指定 VideoCaptioner 的安装目录（path 为空串表示恢复自动探测）。
+ *
+ * 后端会把路径写进 backend/.env 并原地热更新，返回值就是最新的自检结果，
+ * 调用方直接拿它渲染，不必再发一次 GET。
+ */
+export function updateSubtitleVcRoot(path: string): Promise<SubtitleEnvironment> {
+  return put<SubtitleEnvironment>('/subtitle/environment/vc-root', { path })
 }
 
 /** 创建字幕提取任务 */

@@ -213,8 +213,11 @@ def clean_path(raw: str) -> str:
         if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
             text = text[1:-1].strip()
 
-    # 还原反斜杠转义：`\ ` -> ` `，`\(` -> `(` 等
-    if "\\" in text:
+    # 还原反斜杠转义：`\ ` -> ` `，`\(` -> `(` 等。
+    # 这是 macOS/Linux 拖拽进终端的产物，只在 POSIX 上做；Windows 的 `\`
+    # 是路径分隔符，剥掉会把 E:\a\b.mp4 碾成盘符相对路径 E:ab.mp4，
+    # resolve() 会把它拼到当前目录下，报「输入文件不存在」还看不出病因。
+    if "\\" in text and os.name != "nt":
         text = re.sub(r"\\(.)", r"\1", text)
 
     # 展开 ~

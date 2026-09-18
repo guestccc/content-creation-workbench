@@ -116,6 +116,12 @@ export interface SubtitleEnvironment {
   default_input_dir: string
   /** 默认输出目录：materials/subtitle */
   default_output_dir: string
+  /** VideoCaptioner 目录的来源：environment（环境变量）/ env_file（.env）/ auto（自动探测） */
+  vc_root_source: string
+  /** 自动发现扫描的父目录（工具箱根），给目录选择器当初始位置 */
+  vc_search_dir: string
+  /** 需要注意但不算失败的情况（如目录不像 VideoCaptioner、设置会被环境变量覆盖） */
+  warnings: string[]
   install_hints: InstallHint[]
   asr_engines: AsrEngine[]
 }
@@ -180,23 +186,4 @@ export const ITEM_STATUS_META: Record<
 /** 判断任务是否已结束（用于停止轮询） */
 export function isTerminalStatus(status: SubtitleJobStatus): boolean {
   return status === 'success' || status === 'partial' || status === 'failed' || status === 'cancelled'
-}
-
-/** 把秒数格式化为 mm:ss */
-export function formatElapsed(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds))
-  const minutes = Math.floor(total / 60)
-  const rest = total % 60
-  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
-}
-
-/** 格式化字节数 */
-export function formatBytes(bytes: number): string {
-  if (bytes <= 0) {
-    return '—'
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(0)} KB`
-  }
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }

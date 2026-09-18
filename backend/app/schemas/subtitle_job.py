@@ -49,7 +49,12 @@ class SubtitleEnvironmentResponse(BaseModel):
     installed: bool = Field(description="是否探测到可用的 VideoCaptioner")
     ready: bool = Field(description="能否开始转写：装了 VideoCaptioner 且 ffmpeg 可用")
     launcher: List[str] = Field(description="后端实际调用的命令前缀（诊断用）")
-    kind: str = Field(description="命中方式：override / venv-python / backend-python / path 等")
+    kind: str = Field(
+        description=(
+            "命中方式：override / venv-python / backend-python / path 等；"
+            "前缀 discovered- 表示是靠目录名模糊匹配找到的"
+        )
+    )
     root: str = Field(description="探测时使用的 VideoCaptioner 根目录")
     version: str = Field(description="VideoCaptioner 版本，拿不到为空")
     python_version: str = Field(description="目标解释器的 Python 版本")
@@ -71,6 +76,36 @@ class SubtitleEnvironmentResponse(BaseModel):
     )
     install_hints: List[InstallHint] = Field(description="按当前系统给出的安装指引")
     asr_engines: List[AsrEngineResponse] = Field(description="可选的 ASR 引擎")
+    # 以下三个字段都带默认值：环境的键是从 probe_environment() 的字典展开来的，
+    # 给了默认值，旧调用方（含测试里伪造的字典）不补这几个键也不会校验失败。
+    vc_root_source: str = Field(
+        default="auto",
+        description=(
+            "当前生效的 VideoCaptioner 目录来自哪一层："
+            "environment（系统环境变量）/ env_file（backend/.env，含页面指定）/ auto（自动探测）"
+        ),
+    )
+    vc_search_dir: str = Field(
+        default="",
+        description="自动探测扫描的父目录，页面上的目录选择器用它作为初始位置",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="需要提醒用户的配置问题，例如环境变量盖过了 .env 里写的值",
+    )
+
+
+class SubtitleVcRootUpdate(BaseModel):
+    """手动指定 VideoCaptioner 的安装目录。"""
+
+    path: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "VideoCaptioner 根目录（绝对路径，支持 ~ 开头）。"
+            "空串表示清除指定，恢复自动探测"
+        ),
+    )
 
 
 class SubtitleJobCreate(BaseModel):

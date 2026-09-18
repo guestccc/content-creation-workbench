@@ -683,11 +683,23 @@ class TestIsCancel(unittest.TestCase):
 
 
 class TestCleanPath(unittest.TestCase):
-    """macOS 拖拽路径清洗 —— 改造交互层不该影响它。"""
+    r"""macOS 拖拽路径清洗 —— 改造交互层不该影响它。
+
+    反斜杠反转义是 POSIX 专属行为（Windows 的 `\` 是路径分隔符），
+    所以这类用例必须钉住 os.name 再跑，不能随当前平台漂移。
+    注意替换的是 ui 模块里的 os 引用 —— 直接 patch 全局 os.name
+    会让 pathlib 在实例化时读到假平台而炸掉。
+    """
+
+    @staticmethod
+    def _patch_platform(name: str):
+        # clean_path 只用到 os.name 和 os.path.expanduser
+        return mock.patch.object(ui, "os", SimpleNamespace(name=name, path=os.path))
 
     def test_drag_escaped_space(self):
-        self.assertEqual(ui.clean_path(r"/Users/me/my\ file.mp4"),
-                         "/Users/me/my file.mp4")
+        with self._patch_platform("posix"):
+            self.assertEqual(ui.clean_path(r"/Users/me/my\ file.mp4"),
+                             "/Users/me/my file.mp4")
 
     def test_quoted_path(self):
         self.assertEqual(ui.clean_path("'/Users/me/my file.mp4'"),
@@ -701,7 +713,19 @@ class TestCleanPath(unittest.TestCase):
 
     def test_escaped_parens(self):
         # 有些终端会把 () 一起转义
-        self.assertEqual(ui.clean_path(r"/tmp/素材\(1\).mp4"), "/tmp/素材(1).mp4")
+        with self._patch_platform("posix"):
+            self.assertEqual(ui.clean_path(r"/tmp/素材\(1\).mp4"), "/tmp/素材(1).mp4")
+
+    def test_windows_path_backslashes_kept(self):
+        # Windows 的 `\` 是分隔符不是转义符：剥掉会把绝对路径碾成
+        # 盘符相对路径（E:a\b.mp4 -> E:ab.mp4），resolve() 拼到当前目录下。
+        with self._patch_platform("nt"):
+            self.assertEqual(ui.clean_path(r"E:\带货\素材\视频 1.mp4"),
+                             r"E:\带货\素材\视频 1.mp4")
+
+    def test_windows_quoted_path_backslashes_kept(self):
+        with self._patch_platform("nt"):
+            self.assertEqual(ui.clean_path(r'"D:\clips\a.mp4"'), r"D:\clips\a.mp4")
 
     def test_tilde_expanded(self):
         expected = os.path.expanduser("~/Desktop/素材.mp4")

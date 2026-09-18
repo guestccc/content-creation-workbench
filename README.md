@@ -258,7 +258,7 @@ materials/
 | `SCENE_JOB_VIDEO_TIMEOUT_SECONDS` | `3600` | 单条视频的硬超时 |
 | `SCENE_INPUT_EXTENSIONS` | `.mp4,.mov,.mkv,.avi,.webm,.m4v` | 可处理的视频扩展名 |
 | `SCENE_MAX_BATCH_FILES` | `200` | 单个任务最多处理的视频数 |
-| `SUBTITLE_VC_ROOT` | 自动指向工具箱目录的 `VideoCaptioner/` | VideoCaptioner 根目录（探测它下面的 `.venv` 用） |
+| `SUBTITLE_VC_ROOT` | 自动指向工具箱目录的 `VideoCaptioner/` | VideoCaptioner 根目录（探测它下面的 `.venv` 用）。除这个路径外，还会自动模糊匹配同级 `VideoCaptioner*` 目录；也可以在「字幕提取」页面上手动选目录，后端会把结果写回本项 |
 | `SUBTITLE_VC_PYTHON` | 空（自动探测） | 显式指定装了 videocaptioner 的解释器或脚本，优先级最高 |
 | `SUBTITLE_WORKER_ENABLED` | `true` | 是否启用后台转写工作线程 |
 | `SUBTITLE_JOB_VIDEO_TIMEOUT_SECONDS` | `1800` | 单条视频转写的硬超时 |

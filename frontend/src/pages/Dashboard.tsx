@@ -4,7 +4,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { Link } from 'react-router-dom'
 
 import { fetchContents, fetchHealth, fetchStatistics } from '../api/contents'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import type { Content, ContentStatistics, HealthData } from '../types/content'
 import { STATUS_META, STATUS_ORDER } from '../types/content'
 import { formatDateTime } from '../utils/format'
@@ -72,7 +72,7 @@ export default function Dashboard() {
     // 统计是首页核心数据，它失败时给出明确提示
     if (statsResult.status === 'rejected') {
       const reason: unknown = statsResult.reason
-      setError(reason instanceof ApiError ? reason.message : '加载失败，请稍后重试')
+      setError(describeError(reason, '加载失败，请稍后重试'))
     }
 
     setLoading(false)

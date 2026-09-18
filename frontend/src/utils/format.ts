@@ -34,3 +34,30 @@ export function toDateTimeLocal(iso: string): string {
     `T${pad(date.getHours())}:${pad(date.getMinutes())}`
   )
 }
+
+/** 把秒数格式化为 mm:ss（秒数可能为 null / 非正，这时给占位符而不是 00:00） */
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null || seconds <= 0) {
+    return '--:--'
+  }
+  return formatElapsed(seconds)
+}
+
+/** 把秒数格式化为 mm:ss（已耗时这类必然非负的场景） */
+export function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+}
+
+/** 格式化字节数；非正数给占位符 */
+export function formatBytes(bytes: number): string {
+  if (bytes <= 0) {
+    return '—'
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`
+  }
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}

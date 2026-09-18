@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, Card, Flex, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Flex, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import { deleteContent, fetchContents } from '../api/contents'
 import ContentFormModal from '../components/ContentFormModal'
+import { useApiMessage } from '../hooks'
 import type { Content, ContentStatus } from '../types/content'
 import { PLATFORM_OPTIONS, STATUS_META, STATUS_ORDER } from '../types/content'
 import { formatDateTime } from '../utils/format'
@@ -42,7 +43,7 @@ export default function ContentList() {
 
   // antd 的 message / Modal.confirm 需要挂到当前 React 树上（useXxx 形式），
   // 直接用 message.xxx 静态方法会拿不到 ConfigProvider 的主题与语言
-  const [messageApi, messageContext] = message.useMessage()
+  const { message: messageApi, fail, contextHolder } = useApiMessage()
   const [confirmApi, confirmContext] = Modal.useModal()
 
   const load = useCallback(async () => {
@@ -60,7 +61,7 @@ export default function ContentList() {
       setItems(data.items)
       setTotal(data.total)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : '加载失败，请稍后重试')
+      setError(describeError(err, '加载失败，请稍后重试'))
     } finally {
       setLoading(false)
     }
@@ -109,7 +110,7 @@ export default function ContentList() {
         void load()
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : '删除失败，请稍后重试')
+      fail(err, '删除失败，请稍后重试')
     }
   }
 
@@ -192,7 +193,7 @@ export default function ContentList() {
 
   return (
     <Flex vertical gap={22}>
-      {messageContext}
+      {contextHolder}
       {confirmContext}
 
       <Flex justify="space-between" align="flex-start" gap={16}>

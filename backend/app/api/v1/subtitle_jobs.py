@@ -5,6 +5,7 @@
 
 接口一览：
 - GET  /environment              运行环境自检（VideoCaptioner / ffmpeg / 安装指引）
+- PUT  /environment/vc-root      手动指定 VideoCaptioner 目录（空串 = 恢复自动探测）
 - POST /jobs                     创建字幕提取任务
 - GET  /jobs                     历史任务分页列表
 - GET  /jobs/{id}                任务详情（轮询进度也用它）
@@ -14,10 +15,13 @@
 - DELETE /jobs/{id}              删除任务记录
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter, Path as PathParam, Query
 
 from app.api.deps import SubtitleJobServiceDep
 from app.core.config import settings
+from app.core.exceptions import BadRequestError
 from app.core.logging import get_logger
 from app.models.subtitle_job import SubtitleJobStatus
 from app.schemas.common import ApiResponse
@@ -28,9 +32,15 @@ from app.schemas.subtitle_job import (
     SubtitleJobListData,
     SubtitleJobResponse,
     SubtitleTextData,
+    SubtitleVcRootUpdate,
     engines_payload_response,
 )
-from app.services.subtitle_env import probe_environment
+from app.services.subtitle_env import looks_like_vc, probe_environment, reset_cache
+from app.services.subtitle_settings import (
+    normalize_vc_root,
+    sync_from_env_file,
+    write_vc_root,
+)
 
 router = APIRouter(prefix="/subtitle", tags=["视频字幕提取"])
 logger = get_logger(__name__)
@@ -49,7 +59,64 @@ def get_environment(
     指引只是文本，后端绝不替用户执行安装 —— 网页触发的安装命令既不可靠
     （权限、网络、杀毒软件），也不该有（网页进程不该有装软件的权力）。
     """
+    # 「重新检测」顺带捡起用户手工改过的 .env：settings 单例在进程启动时读过
+    # 一次就放手了，不同步的话页面显示的值会跟文件里写的对不上。
+    if refresh and sync_from_env_file():
+        reset_cache()
     env = probe_environment(refresh=refresh)
+    return ApiResponse(
+        data=SubtitleEnvironmentResponse(**env, asr_engines=engines_payload_response())
+    )
+
+
+@router.put(
+    "/environment/vc-root",
+    response_model=ApiResponse[SubtitleEnvironmentResponse],
+    summary="手动指定 VideoCaptioner 安装目录",
+)
+def set_vc_root(payload: SubtitleVcRootUpdate) -> ApiResponse[SubtitleEnvironmentResponse]:
+    """把用户选定的目录写进 backend/.env，并就地重新探测。
+
+    为什么要有这个入口：VideoCaptioner 不在本仓库里，装在哪台机器上都不一样，
+    而且从 GitHub 下载解压出来的目录常带 `-master` 之类后缀，光靠猜路径必然
+    有猜不中的时候。让用户直接在页面上指一下，比让他去改配置文件靠谱。
+
+    校验只拦「根本用不了」的情况（路径不存在 / 不是目录 / 含换行引号这类
+    写不进 .env 的字符）。选了**看起来不像** VideoCaptioner 的目录不拦 ——
+    报错走 warnings，让用户看着探测结果自己判断，而不是被一个自以为是的
+    规则挡在门外。
+
+    body 里 path 传空串表示清除指定、恢复自动探测。
+    """
+    path = normalize_vc_root(payload.path)
+
+    if path:
+        target = Path(path)
+        if not target.exists():
+            raise BadRequestError(f"路径不存在：{path}")
+        if not target.is_dir():
+            raise BadRequestError(f"路径不是目录：{path}")
+
+    try:
+        write_vc_root(path)
+    except ValueError as exc:
+        # 值里带了换行/引号之类写不进 .env 的字符
+        raise BadRequestError(str(exc)) from exc
+
+    # 写盘只保证「下次启动也生效」；当前进程要立刻用上新值，得原地改这个单例
+    settings.SUBTITLE_VC_ROOT = path
+    reset_cache()
+
+    env = probe_environment(refresh=True)
+
+    # 目录看着不像 VideoCaptioner 时补一句提醒，但不阻止操作
+    warnings = list(env.get("warnings") or [])
+    if path and not looks_like_vc(Path(path)):
+        warnings.append(
+            f"所选目录里没有看到 .venv 或 videocaptioner/，可能不是 VideoCaptioner 的安装目录。"
+        )
+    env["warnings"] = warnings
+
     return ApiResponse(
         data=SubtitleEnvironmentResponse(**env, asr_engines=engines_payload_response())
     )

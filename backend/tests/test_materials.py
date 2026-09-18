@@ -3,7 +3,7 @@
 这个模块是「素材放哪儿」的唯一权威来源：列目录接口、环境自检、启动建骨架
 都从它取路径。测试守住三件事：
 
-1. 骨架是**四段齐全**的 —— 少建一段，新克隆的仓库就会退化成随便堆的一层；
+1. 骨架是**五段齐全**的 —— 少建一段，新克隆的仓库就会退化成随便堆的一层；
 2. 分段名是**白名单**的 —— 拼错的段名要立刻报错，不能默默生成一个新目录；
 3. 路径解析**只有一处** —— ~ 在这里展开，调用方拿到的就该是展开后的绝对路径。
 """
@@ -15,6 +15,7 @@ import pytest
 from app.core.config import settings
 from app.core.materials import (
     CLIPS,
+    CRAWL,
     OUTPUT,
     SOURCE,
     SUBDIRS,
@@ -24,15 +25,15 @@ from app.core.materials import (
     subdir,
 )
 
-#: 规划里的四个分段，写成字面量而不是从 SUBDIRS 取 —— 断言才有意义，
+#: 规划里的五个分段，写成字面量而不是从 SUBDIRS 取 —— 断言才有意义，
 #: 否则拿 SUBDIRS 跟自己比，删掉一段测试照样绿。
-EXPECTED_SUBDIRS = ["source", "clips", "subtitle", "output"]
+EXPECTED_SUBDIRS = ["source", "clips", "subtitle", "output", "crawl"]
 
 
-def test_plan_has_exactly_four_segments():
-    """规划就是按流程分的四段，顺序也固定（文档与日志都按这个顺序写）。"""
+def test_plan_has_exactly_five_segments():
+    """规划就是按流程分的五段（视频四段 + 图文抓取），顺序也固定（文档与日志都按这个顺序写）。"""
     assert list(SUBDIRS) == EXPECTED_SUBDIRS
-    assert {SOURCE, CLIPS, SUBTITLE, OUTPUT} == set(EXPECTED_SUBDIRS)
+    assert {SOURCE, CLIPS, SUBTITLE, OUTPUT, CRAWL} == set(EXPECTED_SUBDIRS)
 
 
 def test_ensure_materials_layout_creates_all_subdirs(tmp_path, monkeypatch):

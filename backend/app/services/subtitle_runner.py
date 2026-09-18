@@ -26,7 +26,6 @@ b. **结果以产物为准，不只看退出码**。VideoCaptioner 会在收尾�
    退出码只用来填失败原因。
 """
 
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -48,6 +47,7 @@ from app.models.subtitle_job import (
 
 # 子进程工具函数与镜头分割 / 混剪共用，实现都在 media_tools
 from app.services.media_tools import (
+    CHILD_CREATION_FLAGS,
     child_env,
     command_line,
     probe_duration,
@@ -71,13 +71,14 @@ ALLOWED_PARAMS = ("asr", "language", "format")
 _ERROR_MARKERS = ("✗ Error:", "✗ ", "Error:", "error:")
 
 
-def build_argv(launcher: List[str], video: Path, out_dir: Path, params: dict) -> List[str]:
+def build_argv(launcher: List[str], video: Path, output_path: Path, params: dict) -> List[str]:
     """把白名单参数映射成 VideoCaptioner transcribe 的 argv。
 
-    几个必须照做的细节（读它的 CLI 源码确认）：
-    - `-o` 必须是**已存在的目录**（调用方保证）并且带结尾斜杠：不带扩展名又
-      不是目录时，它会把这个值当成**文件名**，字幕就落到一个没有扩展名的
-      文件里去了；
+    几个必须照做的细节（读它的 CLI 源码确认，cli/commands/transcribe.py）：
+    - `-o` 传**完整的输出文件路径**而不是目录：带扩展名的路径会被它原样当作
+      输出文件。传目录的话它按 `<视频名>.srt` 自己起名 —— 那跟我们的重名分配
+      （`-2` / `-3` 后缀）完全脱节：转写其实成功了、写到了另一个文件里，这里
+      却按分配的路径判定「未产出」，还顺手覆盖了上一份产物（出过的真实事故）；
     - `--quiet` 让它只打印结果路径，人读的输出整段省掉 —— 日志小得多；
     - `--language` 只在显式给了语言时才传，留空即「自动检测」（那是它的默认值）。
 
@@ -85,7 +86,7 @@ def build_argv(launcher: List[str], video: Path, out_dir: Path, params: dict) ->
         launcher: 调用前缀，来自 subtitle_env.detect()，形如
             `[解释器, "-m", "videocaptioner"]` 或 `["/path/videocaptioner"]`。
         video: 输入视频（绝对路径）。
-        out_dir: 输出目录（已存在）。
+        output_path: 分配好的输出文件（含 .srt 扩展名；父目录由调用方预建）。
         params: 任务参数（json 列里的字典）。
     """
     argv = list(launcher) + ["transcribe", str(video)]
@@ -101,8 +102,7 @@ def build_argv(launcher: List[str], video: Path, out_dir: Path, params: dict) ->
     output_format = params.get("format") or "srt"
     argv += ["--format", str(output_format)]
 
-    # 目录必须以分隔符结尾 —— 见上面 `-o` 的说明
-    argv += ["-o", str(out_dir) + os.sep, "--quiet"]
+    argv += ["-o", str(output_path), "--quiet"]
     return argv
 
 
@@ -360,11 +360,14 @@ class SubtitleRunner:
                 if item.status != SubtitleJobItemStatus.PENDING:
                     continue
 
-                # 取消 / 服务停止：当前条及后续全部标记 skipped，保留已产出的字幕
-                if self._is_cancelled(db, job_id) or (
-                    stop_event is not None and stop_event.is_set()
-                ):
+                # 取消 / 服务停止：后续条目标记 skipped，保留已产出的字幕。
+                # 两种原因必须分开写 —— 服务停止时标成「任务已取消」，用户会以为
+                # 谁点了取消，对真正的中断原因（如热重载）毫无头绪。
+                if self._is_cancelled(db, job_id):
                     self._skip_item(db, item, reason="任务已取消")
+                    continue
+                if stop_event is not None and stop_event.is_set():
+                    self._skip_item(db, item, reason="服务停止或重启，未执行")
                     continue
 
                 self._run_item(db, job, item, launcher, stop_event)
@@ -434,7 +437,7 @@ class SubtitleRunner:
             )
             return
 
-        argv = build_argv(launcher, Path(item.source_path), out_dir, dict(job.params or {}))
+        argv = build_argv(launcher, Path(item.source_path), output_path, dict(job.params or {}))
         logger.info(
             "开始转写 | job=%s | item=%s | %s", job.id, item.index, item.source_name
         )
@@ -450,6 +453,7 @@ class SubtitleRunner:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                creationflags=CHILD_CREATION_FLAGS,
                 cwd=str(out_dir),
                 env=child_env(),
             )
@@ -494,7 +498,8 @@ class SubtitleRunner:
                 status=SubtitleJobItemStatus.FAILED,
                 started_monotonic=started_monotonic,
                 exit_code=exit_code,
-                error="服务停止，任务中断",
+                # 不是转写本身失败（退出码是kill的产物），把「可以重试」写明
+                error="服务停止或重启，任务中断（可直接重新发起）",
             )
             return
         if aborted == "timeout":
@@ -597,16 +602,25 @@ class SubtitleRunner:
 
         tail = read_log_tail(log_path)
         summary = summarize_failure(tail)
+        summary_is_error = any(marker in summary for marker in _ERROR_MARKERS)
+        if exit_code == 0 and not summary_is_error:
+            # 退出码 0 但没产出（识别不出语音、写入被跳过等）：--quiet 模式下日志
+            # 往往只有一行输出路径，拿它当失败原因等于什么都没说（出过的真实事故：
+            # 用户看到一行路径，完全不知道发生了什么）。如实说「成功结束但没产出」，
+            # 日志原文附在后面供排查。
+            reason = "转写正常结束，但未产出字幕文件（可能视频里没有可识别的语音）"
+            error = f"{reason}\n\n{tail}" if tail else reason
+        elif summary:
+            # 摘要与日志是同一段时别再拼一次，否则同一句显示两遍
+            error = f"{summary}\n\n{tail}" if tail != summary else summary
+        else:
+            error = tail or f"退出码 {exit_code}，未产出字幕文件"
         self._finish_item(
             db, job, item,
             status=SubtitleJobItemStatus.FAILED,
             started_monotonic=started_monotonic,
             exit_code=exit_code,
-            error=(
-                f"{summary}\n\n{tail}"
-                if summary
-                else (tail or f"退出码 {exit_code}，未产出字幕文件")
-            ),
+            error=error,
         )
 
     def _fail_all(self, db: Session, job: SubtitleJob, reason: str) -> None:

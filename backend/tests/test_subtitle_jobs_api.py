@@ -9,8 +9,27 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.services import subtitle_settings
 from app.services.subtitle_env import VcInstall
 from tests.fakes import DEFAULT_SRT
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vc_settings(monkeypatch, tmp_path):
+    """把「手动指定 VideoCaptioner 目录」涉及的持久化与运行态全隔离掉。
+
+    - `.env` 指到 tmp：那个接口会**真的读写**这个文件，绝不能碰开发机上的
+      backend/.env（里面是用户自己的配置）；
+    - settings 单例做快照：接口里的赋值是应用代码的裸赋值，monkeypatch
+      拦不住写入本身，只能靠 teardown 恢复；
+    - 清掉可能存在的同名环境变量：它会盖过 .env，让「写进去了没有」类的
+      断言取决于开发机的 shell。
+    """
+    monkeypatch.setattr(subtitle_settings, "_ENV_PATH", tmp_path / ".env")
+    monkeypatch.delenv("SUBTITLE_VC_ROOT", raising=False)
+    original_root = settings.SUBTITLE_VC_ROOT
+    yield
+    settings.SUBTITLE_VC_ROOT = original_root
 
 
 @pytest.fixture()
@@ -93,6 +112,169 @@ class TestEnvironment:
         client.get("/api/v1/subtitle/environment")
         client.get("/api/v1/subtitle/environment", params={"refresh": True})
         assert seen == [False, True]
+
+
+def _stub_probe(monkeypatch, **overrides):
+    """把探测层换成固定的返回，只钉接口层的写盘与校验行为。
+
+    不跑真探测：那样会起子进程、扫描开发机的真实目录，既慢又让断言依赖本机。
+    """
+    payload = {
+        "installed": False, "ready": False, "launcher": [], "kind": "",
+        "root": "", "version": "", "python_version": "", "config_file": "",
+        "config_exists": False, "ffmpeg_path": "", "detail": "",
+        "platform": "windows", "platform_label": "Windows",
+        "python_platform": "test", "materials_dir": "/tmp/m",
+        "default_input_dir": "/tmp/m/source", "default_output_dir": "/tmp/m/subtitle",
+        "install_hints": [], "vc_root_source": "env_file", "vc_search_dir": "/tmp",
+        "warnings": [],
+    }
+    payload.update(overrides)
+    monkeypatch.setattr(
+        "app.api.v1.subtitle_jobs.probe_environment", lambda refresh=False: dict(payload)
+    )
+
+
+class TestSetVcRoot:
+    """手动指定 VideoCaptioner 目录（PUT /environment/vc-root）。"""
+
+    def test_writes_value_and_reports_back(self, client, monkeypatch, tmp_path):
+        """选定目录 → 写进 .env → 当前进程立刻生效。"""
+        target = tmp_path / "VideoCaptioner-master"
+        (target / ".venv").mkdir(parents=True)
+        _stub_probe(monkeypatch, installed=True, ready=True)
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": str(target)}
+        )
+
+        assert response.status_code == 200, response.text
+        assert subtitle_settings.read_vc_root() == str(target)
+        # 不等重启就生效，靠的是原地改 settings 单例
+        assert Path(settings.SUBTITLE_VC_ROOT) == target
+
+    def test_empty_path_resets_to_auto(self, client, monkeypatch, tmp_path):
+        """空串 = 清除指定，恢复自动探测。"""
+        target = tmp_path / "VideoCaptioner"
+        target.mkdir()
+        _stub_probe(monkeypatch)
+        client.put("/api/v1/subtitle/environment/vc-root", json={"path": str(target)})
+        assert subtitle_settings.read_vc_root()  # 先确认真的存进去了
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": ""}
+        )
+
+        assert response.status_code == 200, response.text
+        assert subtitle_settings.read_vc_root() == ""
+        assert settings.SUBTITLE_VC_ROOT == ""
+
+    def test_missing_path_returns_400(self, client, monkeypatch, tmp_path):
+        """路径不存在 → 400，且不写盘。"""
+        _stub_probe(monkeypatch)
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root",
+            json={"path": str(tmp_path / "并没有这个目录")},
+        )
+        assert response.status_code == 400
+        assert subtitle_settings.read_vc_root() is None
+
+    def test_file_path_returns_400(self, client, monkeypatch, tmp_path):
+        """给的是文件而不是目录 → 400。"""
+        a_file = tmp_path / "videocaptioner.exe"
+        a_file.write_text("x", encoding="utf-8")
+        _stub_probe(monkeypatch)
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": str(a_file)}
+        )
+        assert response.status_code == 400
+
+    def test_newline_in_path_returns_400(self, client, monkeypatch, tmp_path):
+        """路径里塞换行能往 .env 追加任意配置键，是一次配置注入。"""
+        _stub_probe(monkeypatch)
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root",
+            json={"path": "/opt/vc\nSUBTITLE_WORKER_ENABLED=false"},
+        )
+        assert response.status_code == 400
+        assert subtitle_settings.read_vc_root() is None
+
+    def test_unrelated_directory_is_allowed_with_warning(
+        self, client, monkeypatch, tmp_path
+    ):
+        """选了不像 VideoCaptioner 的目录：照常接受，只给提醒。
+
+        严格的「必须像 VideoCaptioner」校验正是这次探测不到的原因，
+        不能再拿它当门槛挡用户。
+        """
+        plain = tmp_path / "随便一个目录"
+        plain.mkdir()
+        _stub_probe(monkeypatch)
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": str(plain)}
+        )
+
+        assert response.status_code == 200, response.text
+        assert Path(settings.SUBTITLE_VC_ROOT) == plain
+        warnings = response.json()["data"]["warnings"]
+        assert any("videocaptioner" in text for text in warnings)
+
+    def test_looks_like_vc_directory_gets_no_extra_warning(
+        self, client, monkeypatch, tmp_path
+    ):
+        """目录里确实有 .venv 时不该多嘴。"""
+        target = tmp_path / "VideoCaptioner"
+        (target / ".venv").mkdir(parents=True)
+        _stub_probe(monkeypatch, installed=True, ready=True)
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": str(target)}
+        )
+        assert response.json()["data"]["warnings"] == []
+
+    def test_warnings_from_probe_layer_pass_through(
+        self, client, monkeypatch, tmp_path
+    ):
+        """探测层给出的提醒要原样传给前端。
+
+        典型场景是环境变量盖过了 .env：那句话由 subtitle_settings 生成、
+        经 probe_environment 带出来，这里只钉「有没有传到」。文案本身在
+        test_subtitle_settings.py 里测。
+        """
+        target = tmp_path / "VideoCaptioner"
+        (target / ".venv").mkdir(parents=True)
+        _stub_probe(monkeypatch, warnings=["系统环境变量里已经设置了 SUBTITLE_VC_ROOT"])
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": str(target)}
+        )
+
+        assert response.status_code == 200
+        warnings = " ".join(response.json()["data"]["warnings"])
+        assert "环境变量" in warnings
+
+    def test_tilde_is_expanded(self, client, monkeypatch):
+        """带 ~ 的路径要展开后再落盘，否则写进去的是字面量。"""
+        _stub_probe(monkeypatch)
+        home = Path.home()
+
+        response = client.put(
+            "/api/v1/subtitle/environment/vc-root", json={"path": "~"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert "~" not in (subtitle_settings.read_vc_root() or "")
+        assert Path(settings.SUBTITLE_VC_ROOT) == home
+
+    def test_route_is_not_swallowed_by_job_id(self, client, monkeypatch):
+        """静态路径不能被 /jobs/{job_id} 之类吞掉（本文件顶部的路由契约）。"""
+        _stub_probe(monkeypatch)
+        response = client.get("/api/v1/subtitle/environment")
+        assert response.status_code == 200
+        # PUT 到 /jobs/{id} 不存在的路由应该 405，而不是走到 job 详情上
+        assert client.put("/api/v1/subtitle/jobs/1", json={}).status_code == 405
 
 
 class TestCreateJob:

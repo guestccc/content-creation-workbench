@@ -18,6 +18,7 @@ import csv
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -34,6 +35,7 @@ from app.models.content import utcnow
 # 子进程工具函数与混剪共用，实现移到了 media_tools；这里原样再导出，
 # 是为了让本模块的既有调用方（含 tests/test_scene_runner.py）不必改 import。
 from app.services.media_tools import (  # noqa: F401  (重导出)
+    CHILD_CREATION_FLAGS,
     child_env,
     command_line,
     find_tool,
@@ -78,20 +80,64 @@ PROGRESS_PHASE_SPLIT = "split"
 # --------------------------------------------------------------------------
 
 
-def build_argv(vct_bin: str, video: Path, out_dir: Path, params: dict, *, split: bool) -> List[str]:
+def vct_launcher(vct_path: str) -> List[str]:
+    """给出起 vct 子进程的 argv 前缀（平台相关的唯一分岔口）。
+
+    POSIX：直接 exec vct 脚本，`#!/usr/bin/env bash` 由内核处理 —— [vct_path]。
+
+    Windows：CreateProcess 执行不了无扩展名的脚本（shebang 只是文本，硬起
+    就是 WinError 193「%1 不是有效的 Win32 应用程序」），所以绕开脚本、
+    用后端自己的解释器跑模块：vctl 只用标准库，后端的解释器必然 ≥3.10。
+    vct 脚本里「找解释器」的那段工作在这里顶掉，「设 PYTHONPATH /
+    禁写 pyc」的那段在 scene_child_env() 里顶掉。
+    """
+    if os.name == "nt":
+        return [sys.executable, "-u", "-m", "vctl"]
+    return [vct_path]
+
+
+def scene_child_env() -> Dict[str, str]:
+    """child_env() 的镜头分割封装：Windows 上额外注入 vctl 的 import 路径。
+
+    Windows 走 `python -m vctl`（见 vct_launcher），vctl 包躺在工具箱根
+    目录下而不在 site-packages 里，必须把工具箱根目录塞进 PYTHONPATH ——
+    这正是 vct 脚本里 `export PYTHONPATH="${HERE}..."` 那一行。已有的
+    PYTHONPATH 保留（可能指向用户自己的开发目录）。PYTHONDONTWRITEBYTECODE
+    同脚本原意：免得工具箱目录散落 __pycache__。
+
+    POSIX 不注这些 —— vct 脚本自己会设，这里重复只会留下两份要同步的真相。
+    """
+    env = child_env()
+    if os.name != "nt":
+        return env
+    toolbox_root = str(Path(settings.SCENE_VCT_PATH).resolve().parent)
+    existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if toolbox_root not in existing:
+        existing.insert(0, toolbox_root)
+    env["PYTHONPATH"] = os.pathsep.join(existing)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Windows 的 stdio 默认编码随控制台代码页（中文系统是 GBK）：vct 的中文
+    # 日志落进 vct.log 就是 GBK 字节，read_log_tail 按 UTF-8 读回来全是乱码，
+    # 失败原因就白记了。PYTHONIOENCODING 只影响 stdio 三个流，不碰文件默认编码。
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def build_argv(launcher: List[str], video: Path, out_dir: Path, params: dict, *, split: bool) -> List[str]:
     """把白名单参数映射成 vct scene 的 argv。
 
     只认 params 里的四个白名单键（detector/threshold/min_len/copy），
     其余键直接忽略 —— params 来自数据库，不信任其中的额外内容。
 
     Args:
-        vct_bin: vct 可执行文件路径。
+        launcher: 进程启动前缀（vct_launcher 的产物）：POSIX 是脚本路径
+            本身，Windows 是 [解释器, -u, -m, vctl]。
         video: 输入视频（必须是绝对路径，以服务名开头的 `-` 路径已被 schema 层挡掉）。
         out_dir: 输出目录。
         params: resolve_params 的产物。
         split: True 切出片段，False 只检测导出 CSV。
     """
-    argv = [vct_bin, "scene", str(video), "-o", str(out_dir), "--csv"]
+    argv = [*launcher, "scene", str(video), "-o", str(out_dir), "--csv"]
 
     if split:
         argv.append("--split")
@@ -361,7 +407,7 @@ class SceneRunner:
         *,
         session_factory: sessionmaker = SessionLocal,
         popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
-        vct_bin: Optional[str] = None,
+        launcher: Optional[List[str]] = None,
         tick_seconds: Optional[float] = None,
         progress_seconds: Optional[float] = None,
         video_timeout_seconds: Optional[int] = None,
@@ -372,7 +418,8 @@ class SceneRunner:
         Args:
             session_factory: 数据库会话工厂（执行线程自己开会话，与请求线程隔离）。
             popen_factory: 子进程工厂，测试注入 FakePopen。
-            vct_bin: vct 路径，默认取配置。
+            launcher: vct 子进程的 argv 前缀，默认 vct_launcher(settings.SCENE_VCT_PATH)
+                （按平台分岔）。测试注入定值，让断言不随平台漂移。
             tick_seconds: 等待子进程时的轮询间隔。
             progress_seconds: 进度字段落库的最小间隔。
             video_timeout_seconds: 单视频硬超时。
@@ -380,7 +427,7 @@ class SceneRunner:
         """
         self.session_factory = session_factory
         self.popen_factory = popen_factory
-        self.vct_bin = vct_bin or settings.SCENE_VCT_PATH
+        self.launcher = list(launcher) if launcher is not None else vct_launcher(settings.SCENE_VCT_PATH)
         self.tick_seconds = (
             tick_seconds if tick_seconds is not None else settings.SCENE_JOB_TICK_SECONDS
         )
@@ -432,12 +479,15 @@ class SceneRunner:
                 if item.status != SceneJobItemStatus.PENDING:
                     continue
 
-                # 取消 / 服务停止：当前条及后续全部标记 skipped，保留已完成的结果。
+                # 取消 / 服务停止：后续条目标记 skipped，保留已完成的结果。
+                # 两种原因必须分开写 —— 服务停止时标成「任务已取消」，用户会以为
+                # 谁点了取消，对真正的中断原因（如热重载）毫无头绪。
                 # _run_item 内部若撞上取消会把当前条目标记好，这里兜住后续的条目。
-                if self._is_cancelled(db, job_id) or (
-                    stop_event is not None and stop_event.is_set()
-                ):
+                if self._is_cancelled(db, job_id):
                     self._skip_item(db, item, reason="任务已取消")
+                    continue
+                if stop_event is not None and stop_event.is_set():
+                    self._skip_item(db, item, reason="服务停止或重启，未执行")
                     continue
 
                 self._run_item(db, job, item, stop_event)
@@ -502,7 +552,7 @@ class SceneRunner:
         db.commit()
 
         argv = build_argv(
-            self.vct_bin, Path(item.source_path), out_dir, dict(job.params or {}), split=split
+            self.launcher, Path(item.source_path), out_dir, dict(job.params or {}), split=split
         )
         logger.info("处理视频 | job=%s | item=%s | %s", job.id, item.index, item.source_name)
 
@@ -517,8 +567,9 @@ class SceneRunner:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                creationflags=CHILD_CREATION_FLAGS,
                 cwd=str(out_dir),
-                env=child_env(),
+                env=scene_child_env(),
             )
             self._set_child_pid(db, job.id, process.pid)
 
@@ -561,7 +612,8 @@ class SceneRunner:
                 status=SceneJobItemStatus.FAILED,
                 started_monotonic=started_monotonic,
                 exit_code=exit_code,
-                error="服务停止，任务中断",
+                # 不是处理本身失败（退出码是kill的产物），把「可以重试」写明
+                error="服务停止或重启，任务中断（可直接重新发起）",
             )
             return
         if aborted == "timeout":

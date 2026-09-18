@@ -20,6 +20,9 @@
  * 为什么不做独立素材区：素材可能来自任意目录，先在一个大网格里翻找、
  * 再回头确认「我到底往哪一段加了什么」，视线要来回跑。改成三段各自选，
  * 每张卡片的「+ 添加素材」直接决定这批素材的归属，选完立刻在卡片里看到结果。
+ *
+ * 页面自己不写状态机：素材库、任务生命周期、历史列表分别在 useAsyncData /
+ * useJobRunner / useJobList 里，这里只做编排与布局。
  */
 
 import {
@@ -29,7 +32,7 @@ import {
   CloseOutlined,
   PlayCircleOutlined,
 } from '@ant-design/icons'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -45,12 +48,11 @@ import {
   Select,
   Space,
   Spin,
-  Table,
   Tag,
   Tooltip,
   Typography,
-  message,
 } from 'antd'
+import type { ColumnsType } from 'antd/es/table'
 
 import {
   addMixSource,
@@ -63,8 +65,17 @@ import {
   fetchMixLibrary,
   removeMixSource,
 } from '../api/mix'
-import { ApiError } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
+import HistoryCard from '../components/HistoryCard'
+import VideoPreviewModal from '../components/VideoPreviewModal'
+import { jobStatusColumn } from '../components/jobColumns'
+import {
+  useApiMessage,
+  useAsyncData,
+  useDirectoryPicker,
+  useJobList,
+  useJobRunner,
+} from '../hooks'
 import {
   JOB_STATUS_META,
   OUTPUT_STATUS_META,
@@ -75,16 +86,12 @@ import type {
   MixClip,
   MixEnvironment,
   MixJob,
-  MixJobListData,
-  MixLibraryData,
+  MixJobPayload,
   MixOutputItem,
 } from '../types/mix'
-import { formatBytes, formatDuration } from '../types/scene'
+import { formatBytes, formatDuration } from '../utils/format'
 
 const { Text, Title } = Typography
-
-/** 轮询间隔：与镜头分割页一致 */
-const POLL_INTERVAL_MS = 1500
 
 /** 一个素材目录最多渲染多少张卡片：几千条素材全铺出来会把页面拖垮 */
 const MAX_RENDERED_CLIPS = 200
@@ -305,13 +312,8 @@ const PLAY_BADGE: React.CSSProperties = {
 }
 
 export default function MixCut() {
-  const [messageApi, contextHolder] = message.useMessage()
-
-  // ---------- 环境与素材 ----------
-  const [env, setEnv] = useState<MixEnvironment | null>(null)
-  const [library, setLibrary] = useState<MixLibraryData | null>(null)
-  const [libraryLoading, setLibraryLoading] = useState(false)
-  const [libraryError, setLibraryError] = useState('')
+  const { message, fail, contextHolder } = useApiMessage()
+  const picker = useDirectoryPicker<'output' | 'source'>()
 
   // ---------- 三段编排 ----------
   const [opening, setOpening] = useState<string[]>([])
@@ -333,20 +335,11 @@ export default function MixCut() {
   const [pickSelected, setPickSelected] = useState<string[]>([])
   /** 弹窗里的筛选关键字（按文件名/相对路径模糊匹配） */
   const [pickKeyword, setPickKeyword] = useState('')
-  /** 素材目录选择器（从弹窗里唤起，与输出目录选择器分开） */
-  const [sourcePickerOpen, setSourcePickerOpen] = useState(false)
   const [addingSource, setAddingSource] = useState(false)
 
   // ---------- 合成设置 ----------
   const [count, setCount] = useState(1)
   const [outputDir, setOutputDir] = useState('')
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-
-  // ---------- 任务与成品 ----------
-  const [job, setJob] = useState<MixJob | null>(null)
-  const [history, setHistory] = useState<MixJobListData | null>(null)
-  const [historyLoading, setHistoryLoading] = useState(false)
 
   // ---------- 预览弹窗 ----------
   const [previewClip, setPreviewClip] = useState<MixClip | null>(null)
@@ -355,16 +348,55 @@ export default function MixCut() {
   const [orderDetail, setOrderDetail] = useState<{ job: MixJob; output: MixOutputItem } | null>(
     null,
   )
-  /** 素材预览的来源页（弹窗里也能「加入列表」） */
+  /** 历史任务的详情弹窗 */
   const [historyDetail, setHistoryDetail] = useState<MixJob | null>(null)
+
+  // ---------- 后端数据 ----------
+  const environment = useAsyncData({
+    load: () => fetchMixEnvironment(),
+    failMessage: '环境自检失败',
+    // 环境自检失败不阻断页面：素材库与历史仍可看，告警区由 env 为 null 兜住
+    silent: true,
+    // 环境自检回来后，输出目录默认停在 materials/output（用户已经选过就不动）
+    onLoaded: (data) => setOutputDir((current) => current || data.default_output_dir),
+  })
+  const env: MixEnvironment | null = environment.data
+
+  const library = useAsyncData({
+    load: () => fetchMixLibrary(),
+    failMessage: '素材加载失败',
+    fail,
+    onLoaded: (data) => {
+      // 弹窗里正看着的目录被移除了就切到第一个（空库时清空）
+      setPickSourceId((prev) =>
+        data.sources.some((source) => source.id === prev) ? prev : (data.sources[0]?.id ?? ''),
+      )
+    },
+  })
+
+  const history = useJobList<MixJob>({ fetchList: fetchMixJobs })
+
+  const runner = useJobRunner<MixJob, MixJobPayload>({
+    create: createMixJob,
+    cancel: cancelMixJob,
+    remove: deleteMixJob,
+    fetchJob: fetchMixJob,
+    isTerminal: (job) => isTerminalStatus(job.status),
+    fail,
+    onChanged: history.reload,
+    onRemoved: () => setHistoryDetail(null),
+  })
+
+  const clips = library.data?.clips ?? []
+  const sources = library.data?.sources ?? []
 
   const clipMap = useMemo(() => {
     const map = new Map<string, MixClip>()
-    for (const clip of library?.clips ?? []) {
+    for (const clip of clips) {
       map.set(clip.id, clip)
     }
     return map
-  }, [library])
+  }, [clips])
 
   /**
    * 按任务里存的路径反查素材。
@@ -376,7 +408,7 @@ export default function MixCut() {
   const findClipByPath = useMemo(() => {
     const byAbs = new Map<string, MixClip>()
     const byName = new Map<string, MixClip>()
-    for (const clip of library?.clips ?? []) {
+    for (const clip of clips) {
       byAbs.set(clip.abs_path, clip)
       if (!byName.has(clip.name)) {
         byName.set(clip.name, clip)
@@ -396,46 +428,7 @@ export default function MixCut() {
       }
       return byName.get(raw.split('/').pop() ?? raw)
     }
-  }, [library, env])
-
-  // ---------- 初始加载 ----------
-  useEffect(() => {
-    void (async () => {
-      try {
-        setEnv(await fetchMixEnvironment())
-      } catch {
-        // 环境自检失败不阻断页面：素材库与历史仍可看，告警区由 env 为 null 兜住
-      }
-    })()
-    void loadLibrary()
-    void loadHistory()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // 环境自检回来后，输出目录默认停在 materials/output
-  useEffect(() => {
-    if (env && !outputDir) {
-      setOutputDir(env.default_output_dir)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [env])
-
-  const loadLibrary = useCallback(async () => {
-    setLibraryLoading(true)
-    setLibraryError('')
-    try {
-      const data = await fetchMixLibrary()
-      setLibrary(data)
-      // 弹窗里正看着的目录被移除了就切到第一个（空库时清空）
-      setPickSourceId((prev) =>
-        data.sources.some((s) => s.id === prev) ? prev : (data.sources[0]?.id ?? ''),
-      )
-    } catch (err) {
-      setLibraryError(err instanceof ApiError ? err.message : '素材加载失败')
-    } finally {
-      setLibraryLoading(false)
-    }
-  }, [])
+  }, [clips, env])
 
   // ---------- 选片弹窗操作 ----------
   /** 打开某一段的选片弹窗：把这列表已选的片段带进去，方便继续加或者去掉 */
@@ -444,7 +437,7 @@ export default function MixCut() {
     setPickSelected(sectionState[section][0])
     setPickKeyword('')
     setPickSourceId((prev) =>
-      library?.sources.some((s) => s.id === prev) ? prev : (library?.sources[0]?.id ?? ''),
+      sources.some((source) => source.id === prev) ? prev : (sources[0]?.id ?? ''),
     )
   }
 
@@ -461,24 +454,22 @@ export default function MixCut() {
       return
     }
     sectionState[pickerSection][1](pickSelected)
-    messageApi.success(
-      `「${SECTION_META[pickerSection].title}」已加入 ${pickSelected.length} 条素材`,
-    )
+    message.success(`「${SECTION_META[pickerSection].title}」已加入 ${pickSelected.length} 条素材`)
     setPickerSection(null)
   }
 
   /** 添加素材目录：只登记目录，文件不会被复制或移动。加完直接切到这个新目录 */
   const handleAddSource = async (path: string) => {
-    setSourcePickerOpen(false)
+    picker.close()
     setAddingSource(true)
     try {
       const source = await addMixSource(path)
-      messageApi.success(`已添加素材目录：${source.path}`)
+      message.success(`已添加素材目录：${source.path}`)
       setPickSourceId(source.id)
       setPickKeyword('')
-      await loadLibrary()
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '添加素材目录失败')
+      await library.reload()
+    } catch (error) {
+      fail(error, '添加素材目录失败')
     } finally {
       setAddingSource(false)
     }
@@ -488,9 +479,7 @@ export default function MixCut() {
   const handleRemoveSource = async (sourceId: string) => {
     // 先按当前扫描结果算出这个目录下的片段，把它们从三个列表里一并摘掉 ——
     // 目录一移走，这些 id 就再也解析不到，留在列表里建任务时必然报「素材不存在」
-    const doomed = new Set(
-      (library?.clips ?? []).filter((c) => c.source_id === sourceId).map((c) => c.id),
-    )
+    const doomed = new Set(clips.filter((clip) => clip.source_id === sourceId).map((clip) => clip.id))
     if (doomed.size > 0) {
       for (const [list, setter] of Object.values(sectionState)) {
         const kept = list.filter((id) => !doomed.has(id))
@@ -502,50 +491,16 @@ export default function MixCut() {
     }
     try {
       await removeMixSource(sourceId)
-      messageApi.success(
+      message.success(
         doomed.size > 0
           ? `已移除素材目录，其中 ${doomed.size} 条素材也从列表里摘掉了（磁盘文件保留）`
           : '已移除素材目录（磁盘文件保留）',
       )
-      await loadLibrary()
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '移除素材目录失败')
+      await library.reload()
+    } catch (error) {
+      fail(error, '移除素材目录失败')
     }
   }
-
-  const loadHistory = useCallback(async () => {
-    setHistoryLoading(true)
-    try {
-      setHistory(await fetchMixJobs({ page: 1, page_size: 10 }))
-    } catch {
-      // 历史加载失败不打断主流程
-    } finally {
-      setHistoryLoading(false)
-    }
-  }, [])
-
-  // ---------- 任务轮询 ----------
-  const jobRunning = job !== null && !isTerminalStatus(job.status)
-  useEffect(() => {
-    if (!jobRunning || job === null) {
-      return
-    }
-    const jobId = job.id
-    const timer = window.setInterval(() => {
-      void (async () => {
-        try {
-          const fresh = await fetchMixJob(jobId)
-          setJob(fresh)
-          if (isTerminalStatus(fresh.status)) {
-            void loadHistory()
-          }
-        } catch {
-          // 单次轮询失败不打断，下个周期会重试
-        }
-      })()
-    }, POLL_INTERVAL_MS)
-    return () => window.clearInterval(timer)
-  }, [jobRunning, job, loadHistory])
 
   // ---------- 三段编排操作 ----------
   const removeFrom = (section: SectionKey, index: number) => {
@@ -586,61 +541,40 @@ export default function MixCut() {
     return ''
   }, [opening, middle, ending, outputDir, count, permutationLimit])
 
-  // ---------- 提交 ----------
+  /** 提交任务 */
   const submit = async () => {
-    setSubmitting(true)
-    try {
-      const created = await createMixJob({
-        opening,
-        middle,
-        ending,
-        count,
-        output_dir: outputDir,
-      })
-      setJob(created)
-      messageApi.success(`任务 #${created.id} 已创建，开始混剪`)
-      void loadHistory()
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '创建任务失败')
-    } finally {
-      setSubmitting(false)
+    const created = await runner.submit({
+      opening,
+      middle,
+      ending,
+      count,
+      output_dir: outputDir,
+    })
+    if (created) {
+      message.success(`任务 #${created.id} 已创建，开始混剪`)
     }
   }
 
   const cancelJob = async (jobId: number) => {
-    try {
-      const updated = await cancelMixJob(jobId)
-      if (job?.id === jobId) {
-        setJob(updated)
-      }
-      messageApi.success('任务已取消')
-      void loadHistory()
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '取消失败')
+    if (await runner.cancel(jobId)) {
+      message.success('任务已取消')
     }
   }
 
   const removeJob = async (jobId: number) => {
-    try {
-      await deleteMixJob(jobId)
-      messageApi.success('记录已删除（成片文件保留在磁盘上）')
-      if (job?.id === jobId) {
-        setJob(null)
-      }
-      setHistoryDetail(null)
-      void loadHistory()
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '删除失败')
+    if (await runner.remove(jobId)) {
+      message.success('记录已删除（成片文件保留在磁盘上）')
     }
   }
 
   const openHistoryDetail = async (jobId: number) => {
-    try {
-      setHistoryDetail(await fetchMixJob(jobId))
-    } catch (err) {
-      messageApi.error(err instanceof ApiError ? err.message : '加载任务详情失败')
+    const detail = await runner.read(jobId, '加载任务详情失败')
+    if (detail) {
+      setHistoryDetail(detail)
     }
   }
+
+  const job = runner.job
 
   // ---------- 渲染：选片弹窗 ----------
   /**
@@ -655,16 +589,14 @@ export default function MixCut() {
     }
     const meta = SECTION_META[pickerSection]
     const ordered = pickerSection !== 'middle'
-    const sources = library?.sources ?? []
-    const current = sources.find((s) => s.id === pickSourceId) ?? sources[0]
+    const current = sources.find((source) => source.id === pickSourceId) ?? sources[0]
 
-    const clipsOfSource = current
-      ? (library?.clips ?? []).filter((c) => c.source_id === current.id)
-      : []
+    const clipsOfSource = current ? clips.filter((clip) => clip.source_id === current.id) : []
     const text = pickKeyword.trim().toLowerCase()
     const filtered = text
       ? clipsOfSource.filter(
-          (c) => c.name.toLowerCase().includes(text) || c.rel_path.toLowerCase().includes(text),
+          (clip) =>
+            clip.name.toLowerCase().includes(text) || clip.rel_path.toLowerCase().includes(text),
         )
       : clipsOfSource
 
@@ -689,12 +621,12 @@ export default function MixCut() {
           </Flex>
         }
       >
-        {libraryLoading && !library ? (
+        {library.loading && !library.data ? (
           <Flex justify="center" style={{ padding: 32 }}>
             <Spin />
           </Flex>
-        ) : libraryError ? (
-          <Alert type="error" message="素材加载失败" description={libraryError} showIcon />
+        ) : library.error ? (
+          <Alert type="error" message="素材加载失败" description={library.error} showIcon />
         ) : sources.length === 0 ? (
           <Flex vertical gap={12} align="center" style={{ padding: '24px 0' }}>
             <Empty
@@ -705,7 +637,12 @@ export default function MixCut() {
                 </>
               }
             />
-            <Button type="primary" ghost loading={addingSource} onClick={() => setSourcePickerOpen(true)}>
+            <Button
+              type="primary"
+              ghost
+              loading={addingSource}
+              onClick={() => picker.open('source')}
+            >
               添加目录
             </Button>
           </Flex>
@@ -716,9 +653,9 @@ export default function MixCut() {
                 value={current?.id}
                 onChange={setPickSourceId}
                 style={{ minWidth: 260 }}
-                options={sources.map((s) => ({
-                  value: s.id,
-                  label: `${s.name}（${s.clip_count}）`,
+                options={sources.map((source) => ({
+                  value: source.id,
+                  label: `${source.name}（${source.clip_count}）`,
                 }))}
               />
               <Input
@@ -728,10 +665,10 @@ export default function MixCut() {
                 onChange={(event) => setPickKeyword(event.target.value)}
                 style={{ width: 180 }}
               />
-              <Button loading={addingSource} onClick={() => setSourcePickerOpen(true)}>
+              <Button loading={addingSource} onClick={() => picker.open('source')}>
                 添加目录
               </Button>
-              <Button onClick={() => void loadLibrary()} loading={libraryLoading}>
+              <Button onClick={() => void library.reload()} loading={library.loading}>
                 重新扫描
               </Button>
               <Popconfirm
@@ -994,7 +931,6 @@ export default function MixCut() {
     )
   }
 
-
   // ---------- 渲染：进度 ----------
   const renderProgress = () => {
     if (!job || isTerminalStatus(job.status)) {
@@ -1009,9 +945,7 @@ export default function MixCut() {
     // 阶段内百分比：归一化阶段用片段数折算，拼接阶段用成片数折算 —— 分母都真实存在
     const percent =
       job.current_phase === 'normalize' && job.total_clips > 0
-        ? Math.round(
-            ((job.done_clips + job.progress_percent / 100) / job.total_clips) * 100,
-          )
+        ? Math.round(((job.done_clips + job.progress_percent / 100) / job.total_clips) * 100)
         : job.current_phase === 'concat' && job.total_outputs > 0
           ? Math.round(
               ((job.completed_outputs + job.progress_percent / 100) / job.total_outputs) * 100,
@@ -1140,9 +1074,7 @@ export default function MixCut() {
                                 />
                               ))}
                             </Flex>
-                            <Text
-                              style={{ fontSize: 10, color: SECTION_META[group.key].hex }}
-                            >
+                            <Text style={{ fontSize: 10, color: SECTION_META[group.key].hex }}>
                               {SECTION_META[group.key].title} {group.items.length}
                             </Text>
                           </Flex>
@@ -1229,23 +1161,14 @@ export default function MixCut() {
   }
 
   // ---------- 渲染：历史任务 ----------
-  const historyColumns = [
+  const historyColumns = (): ColumnsType<MixJob> => [
     {
       title: 'ID',
       dataIndex: 'id',
       width: 70,
       render: (id: number) => `#${id}`,
     },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      width: 100,
-      render: (status: MixJob['status']) => (
-        <Tooltip title={JOB_STATUS_META[status].hint}>
-          <Tag color={JOB_STATUS_META[status].color}>{JOB_STATUS_META[status].label}</Tag>
-        </Tooltip>
-      ),
-    },
+    jobStatusColumn<MixJob>(JOB_STATUS_META),
     {
       title: '成片',
       key: 'outputs',
@@ -1321,11 +1244,11 @@ export default function MixCut() {
           description={
             <Flex vertical gap={4}>
               {env.dependencies
-                .filter((d) => !d.ok)
-                .map((d) => (
-                  <Text key={d.name}>
-                    {d.name}：{d.detail}
-                    {d.fix_hint && <Text code>（{d.fix_hint}）</Text>}
+                .filter((dependency) => !dependency.ok)
+                .map((dependency) => (
+                  <Text key={dependency.name}>
+                    {dependency.name}：{dependency.detail}
+                    {dependency.fix_hint && <Text code>（{dependency.fix_hint}）</Text>}
                   </Text>
                 ))}
             </Flex>
@@ -1364,9 +1287,7 @@ export default function MixCut() {
             <Text code style={{ fontSize: 12 }}>
               {outputDir || '未选择'}
             </Text>
-            <Button onClick={() => setPickerOpen(true)}>
-              选择目录
-            </Button>
+            <Button onClick={() => picker.open('output')}>选择目录</Button>
           </Space>
           {estimate > 0 && (
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1375,8 +1296,8 @@ export default function MixCut() {
           )}
           <Button
             type="primary"
-            disabled={Boolean(validationError) || submitting || jobRunning}
-            loading={submitting}
+            disabled={Boolean(validationError) || runner.submitting || runner.running}
+            loading={runner.submitting}
             onClick={() => void submit()}
           >
             {validationError || (count > 1 ? `开始混剪 ${count} 条` : '开始混剪')}
@@ -1399,9 +1320,7 @@ export default function MixCut() {
           extra={
             !isTerminalStatus(job.status) ? (
               <Popconfirm title="确定取消该任务？" onConfirm={() => void cancelJob(job.id)}>
-                <Button danger>
-                  取消
-                </Button>
+                <Button danger>取消</Button>
               </Popconfirm>
             ) : undefined
           }
@@ -1419,76 +1338,47 @@ export default function MixCut() {
       )}
 
       {/* ---------- 历史任务 ---------- */}
-      <Card title="历史任务">
-        <Table<MixJob>
-          rowKey="id"
-          columns={historyColumns}
-          dataSource={history?.items ?? []}
-          loading={historyLoading}
-          pagination={{
-            total: history?.total ?? 0,
-            pageSize: 10,
-            showSizeChanger: false,
-            onChange: (page) => {
-              setHistoryLoading(true)
-              void fetchMixJobs({ page, page_size: 10 })
-                .then(setHistory)
-                .catch(() => undefined)
-                .finally(() => setHistoryLoading(false))
-            },
-          }}
-        />
-      </Card>
+      <HistoryCard
+        columns={historyColumns()}
+        dataSource={history.items}
+        loading={history.loading}
+        pagination={{
+          total: history.total,
+          pageSize: 10,
+          showSizeChanger: false,
+          current: history.page,
+          onChange: history.setPage,
+        }}
+      />
 
       {/* ---------- 选片弹窗（哪一段的素材、从哪个目录挑，都在这里面） ---------- */}
       {renderMaterialPicker()}
 
       {/* ---------- 素材预览弹窗 ---------- */}
-      <Modal
+      <VideoPreviewModal
         open={previewClip !== null}
         title={previewClip?.name}
-        footer={null}
-        width={480}
-        onCancel={() => setPreviewClip(null)}
-        // 关掉就卸载 <video>：否则弹窗关了后台还在下载、还在出声
-        destroyOnHidden
-      >
-        {previewClip && (
-          <Flex vertical gap={8}>
-            <video
-              key={previewClip.id}
-              src={previewClip.video_url}
-              controls
-              autoPlay
-              style={{ width: '100%', maxHeight: '70vh', background: '#000', borderRadius: 6 }}
-            />
-            {/* 素材可以来自任意目录，把绝对路径亮出来，便于确认它到底取自哪儿 */}
+        src={previewClip?.video_url}
+        videoKey={previewClip?.id}
+        caption={
+          previewClip && (
+            // 素材可以来自任意目录，把绝对路径亮出来，便于确认它到底取自哪儿
             <Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
               {previewClip.abs_path}
             </Text>
-          </Flex>
-        )}
-      </Modal>
+          )
+        }
+        onClose={() => setPreviewClip(null)}
+      />
 
       {/* ---------- 成品预览弹窗 ---------- */}
-      <Modal
+      <VideoPreviewModal
         open={previewOutput !== null}
         title={previewOutput ? `第 ${previewOutput.index} 条成片` : ''}
-        footer={null}
-        width={480}
-        onCancel={() => setPreviewOutput(null)}
-        destroyOnHidden
-      >
-        {previewOutput && (
-          <video
-            key={previewOutput.id}
-            src={previewOutput.video_url}
-            controls
-            autoPlay
-            style={{ width: '100%', maxHeight: '70vh', background: '#000', borderRadius: 6 }}
-          />
-        )}
-      </Modal>
+        src={previewOutput?.video_url}
+        videoKey={previewOutput?.id}
+        onClose={() => setPreviewOutput(null)}
+      />
 
       {/* ---------- 成片拼接顺序弹窗 ---------- */}
       {renderOrderDetail()}
@@ -1525,21 +1415,21 @@ export default function MixCut() {
 
       {/* ---------- 目录选择器 ---------- */}
       <DirectoryPicker
-        open={pickerOpen}
+        open={picker.active === 'output'}
         title="选择输出目录"
         initialPath={outputDir || env?.default_output_dir}
-        onClose={() => setPickerOpen(false)}
+        onClose={picker.close}
         onSelect={(path) => {
           setOutputDir(path)
-          setPickerOpen(false)
+          picker.close()
         }}
       />
       {/* 素材目录选择器：从选片弹窗里唤起，选完自动切到那个目录 */}
       <DirectoryPicker
-        open={sourcePickerOpen}
+        open={picker.active === 'source'}
         title="选择素材目录"
         initialPath={env?.default_source_dir}
-        onClose={() => setSourcePickerOpen(false)}
+        onClose={picker.close}
         onSelect={(path) => void handleAddSource(path)}
       />
     </Flex>

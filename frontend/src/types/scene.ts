@@ -232,25 +232,3 @@ export const ITEM_STATUS_META: Record<
 export function isTerminalStatus(status: SceneJobStatus): boolean {
   return status === 'success' || status === 'partial' || status === 'failed' || status === 'cancelled'
 }
-
-/** 格式化字节数，用于片段卡片展示文件大小 */
-export function formatBytes(bytes: number): string {
-  if (bytes <= 0) {
-    return '—'
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(0)} KB`
-  }
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-/** 把秒数格式化为 mm:ss */
-export function formatDuration(seconds: number | null): string {
-  if (seconds === null || seconds <= 0) {
-    return '--:--'
-  }
-  const total = Math.round(seconds)
-  const minutes = Math.floor(total / 60)
-  const rest = total % 60
-  return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
-}

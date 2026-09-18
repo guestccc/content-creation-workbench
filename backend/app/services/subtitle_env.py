@@ -25,6 +25,7 @@
 """
 
 import json
+import locale
 import os
 import platform
 import subprocess
@@ -33,12 +34,13 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
-from app.core.config import settings
+from app.core.config import repo_root, settings, toolbox_root
 from app.core.logging import get_logger
 from app.core.materials import SOURCE, SUBTITLE, materials_root, subdir
 from app.services.media_tools import child_env, find_tool
+from app.services.subtitle_settings import shadowing_warning, vc_root_source
 
 logger = get_logger(__name__)
 
@@ -154,12 +156,117 @@ def _sibling_python(script: Path) -> Optional[Path]:
     return None
 
 
+def _search_dirs() -> List[Path]:
+    """模糊匹配时扫的父目录：工具箱根 + 仓库根。
+
+    VideoCaptioner 按约定放在工具箱根下（与本仓库平级），但也允许直接放进
+    仓库里，两个位置都扫一遍。目录不存在的直接跳过。
+    """
+    dirs: List[Path] = []
+    for base in (toolbox_root(), repo_root()):
+        if base is not None and base.is_dir():
+            dirs.append(base)
+    return dirs
+
+
+def looks_like_vc(root: Path) -> bool:
+    """这个目录看起来是不是一份 VideoCaptioner 安装。
+
+    宽松判定：有 `.venv`（官方一键脚本与本机源码安装的形态）、有
+    `videocaptioner/` 包目录（源码树）、或有打包好的 exe 都算。目的是滤掉
+    「碰巧也叫 VideoCaptioner* 的无关目录」，不是严格校验 —— 所以页面上
+    手动指定目录时**不用它当门槛**（那正是这次探测不到的原因），只拿它
+    生成一句提醒。
+    """
+    return (
+        (root / ".venv").is_dir()
+        or (root / PACKAGE_MODULE).is_dir()
+        or (root / "VideoCaptioner.exe").is_file()
+    )
+
+
+def _discover_roots(search_dirs: Optional[List[Path]] = None) -> List[Path]:
+    """扫出 `<搜索目录>/VideoCaptioner*` 里像 VideoCaptioner 的那些目录。
+
+    为什么需要模糊匹配：从 GitHub 下载 zip 解压出来的目录名默认带后缀
+    （`VideoCaptioner-master` / `-main` / 带版本号），而配置里的默认值只有
+    `VideoCaptioner` 一个精确路径 —— 用户明明装了却探测不到，就是这么来的。
+
+    Args:
+        search_dirs: 要扫的父目录；不传则用 `_search_dirs()`。
+            这个参数是给测试注入 tmp_path 用的，生产走默认。
+
+    Returns:
+        命中的目录，精确名 `VideoCaptioner` 排在前面，其余按名称字典序 ——
+        多次探测的候选顺序必须确定，否则同一台机器上结果会飘。
+    """
+    bases = _search_dirs() if search_dirs is None else search_dirs
+    found: List[Path] = []
+    for base in bases:
+        try:
+            children = list(base.glob("VideoCaptioner*"))
+        except OSError:
+            # 目录权限不足或扫描中途被删，跳过这个父目录就好，不该让探测整个失败
+            continue
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            try:
+                if not child.is_dir():
+                    continue
+            except OSError:
+                continue
+            if looks_like_vc(child):
+                found.append(child)
+
+    found.sort(key=lambda path: (path.name != "VideoCaptioner", path.name.lower()))
+    return found
+
+
+def vc_root_candidates() -> List[Tuple[Path, str]]:
+    """探测会尝试的根目录，按优先级：(路径, 来源)。
+
+    来源取值：
+    - `explicit` —— 配置里显式指定的（`SUBTITLE_VC_ROOT`，含页面手动指定的）；
+    - `discovered` —— 模糊匹配扫出来的。
+
+    按 resolve 后的路径去重（Windows 上还要忽略大小写），否则「显式值正好等于
+    模糊匹配结果」时会把同一套 venv 候选加两遍。
+    """
+    result: List[Tuple[Path, str]] = []
+    seen: Set[str] = set()
+
+    def push(path: Path, source: str) -> None:
+        try:
+            text = str(path.resolve())
+        except OSError:
+            text = str(path)
+        # Windows 上路径大小写不敏感，不做 casefold 会把同一个目录算成两个。
+        # 只碰 os.name（不碰 os.path）是为了留住测试里「换掉整个 os 替身来
+        # 模拟另一个平台」的接缝。
+        key = text.casefold() if os.name == "nt" else text
+        if key in seen:
+            return
+        seen.add(key)
+        result.append((path, source))
+
+    configured = (settings.SUBTITLE_VC_ROOT or "").strip()
+    if configured:
+        push(Path(configured).expanduser(), "explicit")
+    for path in _discover_roots():
+        push(path, "discovered")
+
+    return result
+
+
 def _candidates() -> List[Tuple[List[str], str, str]]:
     """按优先级列出「可能的调用方式」：(launcher, kind, root)。
 
     顺序遵从「越确定越靠前」：
-    1. 配置里显式指定的（用户说了算）；
-    2. VideoCaptioner 根目录下的 venv —— 本机与官方一键脚本的装法；
+    1. 配置里显式指定的解释器（用户说了算）；
+    2. 各候选根目录下的 venv —— 本机与官方一键脚本的装法。显式指定的根在前
+       （kind 仍是 `venv-python` / `venv-script`），模糊匹配到的在后
+       （kind 带 `discovered-` 前缀，便于诊断时看清是哪来的）；
     3. 后端自己的解释器 —— 覆盖「直接 pip install 到后端环境」这种最常见的情况，
        且这一步就地判断、不起子进程；
     4. PATH 上的 videocaptioner。
@@ -168,26 +275,29 @@ def _candidates() -> List[Tuple[List[str], str, str]]:
     对 `bin/python`），别处不再分平台。
     """
     candidates: List[Tuple[List[str], str, str]] = []
-    root = settings.SUBTITLE_VC_ROOT
-    root_path = Path(root).expanduser() if root else None
+    configured_root = settings.SUBTITLE_VC_ROOT
 
     if settings.SUBTITLE_VC_PYTHON:
         # 先按「这是个解释器」试，再按「这是个可执行脚本」试 —— 用户填哪种都行
         override = str(Path(settings.SUBTITLE_VC_PYTHON).expanduser())
-        candidates.append(([override, "-m", PACKAGE_MODULE], "override", root))
-        candidates.append(([override], "override-script", root))
+        candidates.append(([override, "-m", PACKAGE_MODULE], "override", configured_root))
+        candidates.append(([override], "override-script", configured_root))
 
-    if root_path is not None:
+    for root_path, source in vc_root_candidates():
+        root = str(root_path)
+        # 显式指定的保持原来的 kind 字符串，模糊匹配的显式标出来源
+        prefix = "" if source == "explicit" else f"{source}-"
         venv = root_path / ".venv"
         if os.name == "nt":
             candidates.append(([str(venv / "Scripts" / "python.exe"), "-m", PACKAGE_MODULE],
-                               "venv-python", root))
+                               f"{prefix}venv-python", root))
             candidates.append(([str(venv / "Scripts" / f"{PACKAGE_MODULE}.exe")],
-                               "venv-script", root))
+                               f"{prefix}venv-script", root))
         else:
             candidates.append(([str(venv / "bin" / "python"), "-m", PACKAGE_MODULE],
-                               "venv-python", root))
-            candidates.append(([str(venv / "bin" / PACKAGE_MODULE)], "venv-script", root))
+                               f"{prefix}venv-python", root))
+            candidates.append(([str(venv / "bin" / PACKAGE_MODULE)], f"{prefix}venv-script",
+                               root))
 
     # 后端环境里就地判断，命中才去验证（find_spec 不导入包，也不产生副作用）
     if _module_available_locally():
@@ -245,7 +355,6 @@ def _probe(launcher: List[str]) -> Optional[dict]:
         result = subprocess.run(
             argv,
             capture_output=True,
-            text=True,
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
             env=child_env(),
@@ -256,7 +365,28 @@ def _probe(launcher: List[str]) -> Optional[dict]:
 
     if result.returncode != 0:
         return None
-    return parser(result.stdout)
+    return parser(_decode_probe_output(result.stdout or b""))
+
+
+def _decode_probe_output(data: bytes) -> str:
+    """探测子进程输出的解码：先 UTF-8 再本地代码页，都不行就替换坏字节。
+
+    按字节捕获、自己解码，而不是 text=True：子进程可能吐出与父进程代码页
+    不一致的字节（真实踩过：中文 Windows 上子进程写 GBK，父进程开着 UTF-8
+    模式，text=True 的解码在 subprocess 的读线程里抛 UnicodeDecodeError，
+    result.stdout 变成 None，后面 splitlines 直接 AttributeError）。探测
+    看不懂输出顶多是返回 None 换下一条候选，绝不该崩。
+    """
+    candidates = ["utf-8"]
+    preferred = locale.getpreferredencoding(False)
+    if preferred and preferred.lower() not in ("utf-8", "utf8"):
+        candidates.append(preferred)
+    for encoding in candidates:
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def _parse_probe_json(stdout: str) -> Optional[dict]:
@@ -346,9 +476,16 @@ def _detect_uncached() -> VcInstall:
         )
         return install
 
-    # 一条都没通：给用户一句能自己判断的说明，而不是「未知错误」
-    root_hint = f"（已查找 {last_root}）" if last_root else ""
-    logger.info("未探测到可用的 VideoCaptioner | 最后尝试=%s", last_kind or "无候选")
+    # 一条都没通：给用户一句能自己判断的说明，而不是「未知错误」。
+    # 这里要列出**所有**找过的根目录，不能只说最后一个 —— 多根候选下只说
+    # 最后一个，用户会以为自己装的那个位置根本没被找过。
+    searched = [str(root) for root, _source in vc_root_candidates()]
+    root_hint = f"（已查找 {'、'.join(searched)}）" if searched else ""
+    logger.info(
+        "未探测到可用的 VideoCaptioner | 最后尝试=%s | 已查找=%s",
+        last_kind or "无候选",
+        "、".join(searched) or "无候选根目录",
+    )
     return VcInstall(
         installed=False,
         kind=last_kind,
@@ -356,7 +493,9 @@ def _detect_uncached() -> VcInstall:
         ffmpeg_path=find_tool("ffmpeg") or "",
         detail=(
             f"没有找到可用的 VideoCaptioner{root_hint}。"
-            "可以按下面的命令安装，或把 SUBTITLE_VC_PYTHON 指到已有的解释器。"
+            "已经装了却探测不到时，多半是目录名不一样（比如从 GitHub 下载解压出来的"
+            "带 -master 后缀）—— 可以在本页手动指定它的目录。"
+            "也可以按下面的命令安装，或把 SUBTITLE_VC_PYTHON 指到已有的解释器。"
         ),
     )
 
@@ -496,6 +635,15 @@ def install_hints(install: Optional[VcInstall] = None) -> List[dict]:
     return hints
 
 
+def vc_search_dir() -> str:
+    """模糊匹配扫描的首选父目录（工具箱根），给前端目录选择器当初始位置。
+
+    空串表示推不出（仓库被单独拷出来、那一层不存在），前端会退到默认目录。
+    """
+    dirs = _search_dirs()
+    return str(dirs[0]) if dirs else ""
+
+
 def probe_environment(*, refresh: bool = False) -> dict:
     """组装环境自检结果，直接给 `/subtitle/environment` 用。
 
@@ -504,8 +652,12 @@ def probe_environment(*, refresh: bool = False) -> dict:
 
     Returns:
         与 `SubtitleEnvironmentResponse` 字段一一对应的字典。
+        **新增键时务必同步加到 schemas/subtitle_job.py 的同名模型上** ——
+        FastAPI 的 response_model 会把模型里没有的键静默丢掉，前端拿不到
+        还查不出原因。
     """
     install = detect(force=refresh)
+    warning = shadowing_warning()
     return {
         **install.as_payload(),
         "platform": platform_key(),
@@ -515,4 +667,7 @@ def probe_environment(*, refresh: bool = False) -> dict:
         "default_input_dir": str(subdir(SOURCE)),
         "default_output_dir": str(subdir(SUBTITLE)),
         "install_hints": install_hints(install),
+        "vc_root_source": vc_root_source(),
+        "vc_search_dir": vc_search_dir(),
+        "warnings": [warning] if warning else [],
     }

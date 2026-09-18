@@ -8,7 +8,6 @@
 - launcher 缺失时整条任务必须落到 failed 终态（修过的 bug：曾经永远停在 running）。
 """
 
-import os
 import threading
 from pathlib import Path
 
@@ -100,11 +99,11 @@ def _refresh(db_session, job: SubtitleJob) -> SubtitleJob:
 
 
 class TestBuildArgv:
-    """命令行拼装：白名单、-o 尾斜杠、可选参数省略。"""
+    """命令行拼装：白名单、-o 传完整输出文件、可选参数省略。"""
 
     def test_launcher_prefix_then_transcribe_then_video(self, tmp_path):
         video = tmp_path / "口播.mp4"
-        argv = build_argv(FAKE_LAUNCHER, video, tmp_path, {"asr": "bijian"})
+        argv = build_argv(FAKE_LAUNCHER, video, tmp_path / "口播.srt", {"asr": "bijian"})
         assert argv[: len(FAKE_LAUNCHER)] == FAKE_LAUNCHER
         assert argv[len(FAKE_LAUNCHER)] == "transcribe"
         assert argv[len(FAKE_LAUNCHER) + 1] == str(video)
@@ -114,7 +113,7 @@ class TestBuildArgv:
         argv = build_argv(
             FAKE_LAUNCHER,
             tmp_path / "a.mp4",
-            tmp_path,
+            tmp_path / "a.srt",
             {"asr": "jianying", "language": "zh", "format": "srt", "evil": "--rm"},
         )
         assert argv[argv.index("--asr") + 1] == "jianying"
@@ -123,24 +122,31 @@ class TestBuildArgv:
         assert "evil" not in argv
         assert "--rm" not in argv
 
-    def test_output_dir_ends_with_separator(self, tmp_path):
-        """-o 必须带结尾斜杠：不带又非目录时 VideoCaptioner 会把它当文件名。"""
-        argv = build_argv(FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path, {})
-        assert argv[argv.index("-o") + 1] == str(tmp_path) + os.sep
+    def test_output_is_the_allocated_file_verbatim(self, tmp_path):
+        """-o 必须原样是分配好的输出文件（含重名的 -2 后缀）。
+
+        修过的 bug：-o 传目录时 VC 自己按「视频名.srt」起名，跟分配的 -2 路径
+        脱节 —— 转写其实成功了、写到了另一个文件，还覆盖了上一份产物，这里却
+        按分配路径判「未产出」报失败。带扩展名的路径 VC 会原样使用
+        （cli/commands/transcribe.py 的文件模式分支）。
+        """
+        allocated = tmp_path / "口播-2.srt"
+        argv = build_argv(FAKE_LAUNCHER, tmp_path / "口播.mp4", allocated, {})
+        assert argv[argv.index("-o") + 1] == str(allocated)
 
     def test_quiet_always_on(self, tmp_path):
-        argv = build_argv(FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path, {})
+        argv = build_argv(FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path / "a.srt", {})
         assert "--quiet" in argv
 
     def test_empty_language_omitted(self, tmp_path):
         """留空即「自动检测」，不能把空串传给 CLI。"""
         argv = build_argv(
-            FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path, {"language": ""}
+            FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path / "a.srt", {"language": ""}
         )
         assert "--language" not in argv
 
     def test_default_format_is_srt(self, tmp_path):
-        argv = build_argv(FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path, {})
+        argv = build_argv(FAKE_LAUNCHER, tmp_path / "a.mp4", tmp_path / "a.srt", {})
         assert argv[argv.index("--format") + 1] == "srt"
 
 
@@ -203,7 +209,7 @@ class TestRunJobSuccess:
             assert log_path.is_file()
 
     def test_argv_reaches_subprocess(self, db_session, tmp_path):
-        """起子进程的 argv：launcher 前缀 + transcribe + 视频 + -o 尾斜杠。"""
+        """起子进程的 argv：launcher 前缀 + transcribe + 视频 + -o 分配路径。"""
         job = _make_job(db_session, tmp_path)
         _make_runner().run_job(job.id)
 
@@ -211,7 +217,8 @@ class TestRunJobSuccess:
         argv = FakeVcPopen.instances[0].argv
         assert argv[: len(FAKE_LAUNCHER)] == FAKE_LAUNCHER
         assert argv[len(FAKE_LAUNCHER)] == "transcribe"
-        assert argv[argv.index("-o") + 1].endswith(os.sep)
+        # -o 必须是分配好的那份输出文件（而不是目录），与 item 落库的路径一致
+        assert argv[argv.index("-o") + 1] == job.items[0].output_path
         assert argv[argv.index("--asr") + 1] == "bijian"
         assert argv[argv.index("--language") + 1] == "zh"
 
@@ -264,6 +271,28 @@ class TestResultJudgement:
         assert item.status == SubtitleJobItemStatus.FAILED
         assert item.subtitle_exists is False
         assert "未产出字幕文件" in item.error_message
+
+    def test_exit_zero_no_output_does_not_show_bare_path(self, db_session, tmp_path):
+        """退出码 0、日志只有一行输出路径（--quiet 的正常输出）：不能拿路径当失败原因。
+
+        复现的真实事故：VC 把字幕写到了自己起的名字里（-o 传目录时的行为），
+        分配的路径上没有产物，日志里只有它打印的结果路径一行 —— 界面上展示的
+        「失败原因」就是那行路径，用户完全看不懂发生了什么。
+        """
+        job = _make_job(db_session, tmp_path, names=("无声.mp4",))
+        allocated = Path(job.items[0].output_path)
+        runner = _make_runner(
+            scripts=[{"no_output": True, "log_lines": [str(allocated)]}]
+        )
+        assert runner.run_job(job.id) is True
+
+        job = _refresh(db_session, job)
+        item = job.items[0]
+        assert item.status == SubtitleJobItemStatus.FAILED
+        # 第一行是能看懂的结论，路径只在后面的日志原文里出现
+        first_line = item.error_message.splitlines()[0]
+        assert "未产出字幕文件" in first_line
+        assert str(allocated) not in first_line
 
     def test_partial_when_some_fail(self, db_session, tmp_path):
         """一批里成败各半：任务 partial，字幕数只算成功的。"""
@@ -378,6 +407,8 @@ class TestTimeoutAndStop:
         assert all(
             item.status == SubtitleJobItemStatus.SKIPPED for item in job.items
         )
+        # 服务停止不能写成「任务已取消」—— 用户会以为谁点了取消
+        assert job.items[0].error_message == "服务停止或重启，未执行"
         assert job.status == SubtitleJobStatus.FAILED
         assert job.skipped_videos == 2
         assert FakeVcPopen.instances == []
@@ -398,7 +429,9 @@ class TestTimeoutAndStop:
         first, second = job.items
         assert first.status == SubtitleJobItemStatus.FAILED
         assert "服务停止" in first.error_message
+        assert "可直接重新发起" in first.error_message
         assert second.status == SubtitleJobItemStatus.SKIPPED
+        assert second.error_message == "服务停止或重启，未执行"
         assert job.status == SubtitleJobStatus.FAILED
 
 

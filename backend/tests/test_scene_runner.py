@@ -8,8 +8,11 @@
 5. 启动时回收上次异常退出的 running 任务。
 """
 
+import os
+import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,11 +34,16 @@ from app.services.scene_runner import (
     parse_scenes_csv,
     read_log_tail,
     recover_interrupted_jobs,
+    scene_child_env,
     summarize_failure,
     terminate_process_group,
+    vct_launcher,
 )
 from tests.conftest import TestingSessionLocal
 from tests.fakes import FakePopen
+
+# 注入给 runner 的假启动前缀：断言不随运行平台漂移（真实前缀见 vct_launcher）
+FAKE_LAUNCHER = ["/repo/vct"]
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +91,9 @@ def _make_runner(scripts=None, **overrides) -> SceneRunner:
 
     # 默认 tick / progress 都设成 0：测试里子进程是假的，没什么可等。
     # 要验证节流本身的用例用 overrides 覆盖掉这两项。
-    options = {"tick_seconds": 0, "progress_seconds": 0}
+    # launcher 注入假前缀：真实前缀按平台分岔（见 vct_launcher），
+    # argv 断言不该随运行平台漂移。
+    options = {"launcher": FAKE_LAUNCHER, "tick_seconds": 0, "progress_seconds": 0}
     options.update(overrides)
     return SceneRunner(
         session_factory=TestingSessionLocal,
@@ -99,14 +109,14 @@ def _refresh(db_session, job: SceneJob) -> SceneJob:
 
 
 class TestBuildArgv:
-    """argv 构造：白名单参数映射。"""
+    """argv 构造：launcher 前缀 + 白名单参数映射。"""
 
     def test_split_full_params(self):
         """split 模式带全部参数。"""
         video = Path("/in/视频.mp4")
         out_dir = Path("/out/视频_scenes")
         argv = build_argv(
-            "/repo/vct",
+            FAKE_LAUNCHER,
             video,
             out_dir,
             {"detector": "content", "threshold": 25.0, "min_len": 1.5, "copy": True},
@@ -114,7 +124,7 @@ class TestBuildArgv:
         )
         # str(video) 在 Windows 上是反斜杠，断言必须用同一来源，避免平台差异
         assert argv == [
-            "/repo/vct", "scene", str(video),
+            *FAKE_LAUNCHER, "scene", str(video),
             "-o", str(out_dir),
             "--csv", "--split",
             "--detector", "content",
@@ -126,7 +136,7 @@ class TestBuildArgv:
     def test_preview_omits_split_and_none_threshold(self):
         """预览模式不带 --split；threshold 为 None 时不传该参数（用检测器默认值）。"""
         argv = build_argv(
-            "/repo/vct",
+            FAKE_LAUNCHER,
             Path("/in/a.mp4"),
             Path("/out"),
             {"detector": "adaptive", "threshold": None, "min_len": 0.6, "copy": False},
@@ -137,11 +147,69 @@ class TestBuildArgv:
         assert "--copy" not in argv
         # 未知键不进 argv（params 来自数据库，不信任额外内容）
         argv2 = build_argv(
-            "/repo/vct", Path("/in/a.mp4"), Path("/out"),
+            FAKE_LAUNCHER, Path("/in/a.mp4"), Path("/out"),
             {"detector": "adaptive", "evil": "--overwrite"},
             split=False,
         )
         assert "--overwrite" not in argv2
+
+
+class TestVctLauncher:
+    """vct 启动前缀的平台分岔（修过的 bug：Windows 硬起 bash 脚本 → WinError 193）。
+
+    Windows 的 CreateProcess 执行不了无扩展名的脚本 —— shebang 对它只是文本，
+    硬起 `vct` 就是「%1 不是有效的 Win32 应用程序」。POSIX 由内核处理 shebang，
+    直接 exec 脚本即可。
+
+    平台分岔的测试 seam：只替换 scene_runner 模块命名空间里的 `os` 引用，
+    不能 monkeypatch 全局 os.name —— pathlib 实例化时才读 os.name，
+    改成 "posix" 会让 Windows 上的 Path.home() 直接 NotImplementedError。
+    """
+
+    def test_posix_executes_script_directly(self, monkeypatch):
+        monkeypatch.setattr(scene_runner_module, "os", SimpleNamespace(name="posix"))
+        assert vct_launcher("/repo/vct") == ["/repo/vct"]
+
+    def test_windows_runs_module_with_backend_interpreter(self, monkeypatch):
+        """vctl 只用标准库，后端自己的解释器必然能跑，不用再找一遍 Python。"""
+        monkeypatch.setattr(scene_runner_module, "os", SimpleNamespace(name="nt"))
+        assert vct_launcher(r"E:\repo\vct") == [sys.executable, "-u", "-m", "vctl"]
+
+
+class TestSceneChildEnv:
+    """Windows 的 `python -m vctl` 依赖注入：PYTHONPATH 指向工具箱根目录。
+
+    vctl 包不在 site-packages 里，找得到它的唯一依据就是 PYTHONPATH ——
+    这正是 vct 脚本里 export 的那一行，绕开脚本后必须由这里顶掉。
+    """
+
+    def test_windows_injects_toolbox_root_and_keeps_existing(self, monkeypatch, tmp_path):
+        # pathsep 取真值：child_env 等内部代码仍在真实平台上跑，假 os 只提供 name
+        monkeypatch.setattr(
+            scene_runner_module, "os", SimpleNamespace(name="nt", pathsep=os.pathsep)
+        )
+        monkeypatch.setattr(
+            scene_runner_module.settings, "SCENE_VCT_PATH", str(tmp_path / "vct")
+        )
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path / "别处"))
+
+        env = scene_child_env()
+
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        # 工具箱根目录（vct 的父目录）在最前，用户已有的 PYTHONPATH 保留
+        assert Path(parts[0]) == tmp_path
+        assert str(tmp_path / "别处") in parts
+        # 与 vct 脚本一致：禁写 .pyc，别弄脏工具箱目录
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+        # stdio 强制 UTF-8：否则中文 Windows 上 vct.log 是 GBK 字节，
+        # read_log_tail 按 UTF-8 读回来，给用户看的失败原因全是乱码
+        assert env["PYTHONIOENCODING"] == "utf-8"
+
+    def test_posix_leaves_env_alone(self, monkeypatch):
+        """POSIX 由 vct 脚本自己设这些变量，这里多手只会留下两份要同步的真相。"""
+        monkeypatch.setattr(scene_runner_module, "os", SimpleNamespace(name="posix"))
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        assert "PYTHONPATH" not in scene_child_env()
 
 
 class TestParseScenesCsv:
@@ -333,6 +401,7 @@ class TestRunJob:
         # 子进程调用契约：--split + --csv，独立会话，stdio 落文件
         assert len(FakePopen.instances) == 2
         call = FakePopen.instances[0]
+        assert call.argv[: len(FAKE_LAUNCHER)] == FAKE_LAUNCHER
         assert "--split" in call.argv and "--csv" in call.argv
         assert call.start_new_session is True
         assert (Path(call.cwd) / "vct.log").exists()
@@ -426,6 +495,7 @@ class TestRunJob:
         runner = SceneRunner(
             session_factory=TestingSessionLocal,
             popen_factory=cancelling_factory,
+            launcher=FAKE_LAUNCHER,
             tick_seconds=0,
             progress_seconds=0,
         )
@@ -467,6 +537,8 @@ class TestRunJob:
         job = _refresh(db_session, job)
         assert job.status == SceneJobStatus.FAILED
         assert all(item.status == SceneJobItemStatus.SKIPPED for item in job.items)
+        # 服务停止不能写成「任务已取消」—— 用户会以为谁点了取消
+        assert job.items[0].error_message == "服务停止或重启，未执行"
         # 没有起任何子进程
         assert FakePopen.instances == []
 
@@ -575,6 +647,7 @@ class TestProgressReporting:
         runner = SceneRunner(
             session_factory=TestingSessionLocal,
             popen_factory=cancelling_factory,
+            launcher=FAKE_LAUNCHER,
             tick_seconds=0,
             progress_seconds=0,
         )

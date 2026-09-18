@@ -78,9 +78,10 @@ def test_default_path_is_materials_dir(client, tmp_path, monkeypatch):
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["path"] == str(materials)
-    # 列默认目录时会顺路把四个分段补齐，所以根下既有素材也有分段目录（目录在前）
+    # 列默认目录时会顺路把五个分段补齐，所以根下既有素材也有分段目录（目录在前）
     assert [entry["name"] for entry in data["entries"]] == [
         "clips",
+        "crawl",
         "output",
         "source",
         "subtitle",

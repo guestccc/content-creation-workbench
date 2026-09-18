@@ -11,7 +11,7 @@ import { Alert, Button, Empty, Input, List, Modal, Space, Spin, Tag, Typography 
 
 import { fetchDirectory } from '../api/filesystem'
 import type { FsEntry, FsListData } from '../types/scene'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 
 const { Text } = Typography
 
@@ -56,7 +56,7 @@ export default function DirectoryPicker({
       setData(result)
       setInputPath(result.path)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : '读取目录失败')
+      setError(describeError(err, '读取目录失败'))
     } finally {
       setLoading(false)
     }
