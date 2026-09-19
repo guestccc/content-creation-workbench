@@ -18,6 +18,7 @@ from app.api.v1 import (
     publish_tasks,
     scene_jobs,
     subtitle_jobs,
+    voicebox,
 )
 
 api_router = APIRouter()
@@ -33,3 +34,4 @@ api_router.include_router(creators.router)
 api_router.include_router(crawl_cookies.router)
 api_router.include_router(finalcut_jobs.router)
 api_router.include_router(fs.router)
+api_router.include_router(voicebox.router)

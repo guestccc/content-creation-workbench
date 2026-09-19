@@ -60,6 +60,19 @@ def default_mc_root() -> str:
         return str(repo_root() / "MediaCrawler")
     return str(base / "MediaCrawler")
 
+
+def default_voicebox_base_url() -> str:
+    """Voicebox 服务的默认地址：本机回环地址上的固定端口。
+
+    Voicebox 桌面端启动时会在 17493 起服务，端口是它写死的，所以这里不需要
+    探测 —— 连不上就如实报告并让用户在页面上改（远程 GPU 部署时才需要改）。
+
+    公开而非私有，是因为 services/voicebox_settings.py 在「用户把 .env 里
+    那行整个删掉」时要拿它当回退值 —— 默认值必须只有这一个来源。
+    """
+    return "http://127.0.0.1:17493"
+
+
 class Settings(BaseSettings):
     """全局配置对象。
 
@@ -279,6 +292,21 @@ class Settings(BaseSettings):
     FINALCUT_RENDER_CRF: int = 20
     FINALCUT_RENDER_PRESET: str = "veryfast"
 
+    # ---------- 智能配音（Voicebox） ----------
+    # Voicebox 是外部桌面应用，自带一个常驻 HTTP 服务（默认 127.0.0.1:17493）。
+    # 我们只调它的 REST 接口，**不起子进程**：装了就用，没装就提示用户去开它 ——
+    # 后端不替用户装软件（与素材抓取/字幕提取同一套边界）。
+    VOICEBOX_BASE_URL: str = default_voicebox_base_url()
+    # /generate 是同步阻塞接口，长文案在 CPU 上要跑几分钟，超时留足。
+    VOICEBOX_TIMEOUT_SECONDS: int = 600
+    # 服务探测结果的缓存时长（秒）：页面每次进都要自检，不该每次都真连一次。
+    VOICEBOX_ENV_CACHE_SECONDS: float = 30.0
+    # 单次配音的文案字数上限，与上游 GenerationRequest 的 maxLength 对齐。
+    VOICEBOX_MAX_TEXT_CHARS: int = 5000
+    # 内存等待队列上限：Voicebox 一次只跑一条，堆太多不如早点告诉用户。
+    VOICEBOX_MAX_PENDING: int = 20
+    # 产物列表一次最多返回多少条（扫盘 + 索引，不翻页）。
+    VOICEBOX_LIST_LIMIT: int = 500
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

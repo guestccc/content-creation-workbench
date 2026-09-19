@@ -5,6 +5,7 @@ import {
   FontSizeOutlined,
   RocketOutlined,
   ScissorOutlined,
+  SoundOutlined,
   TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
@@ -43,11 +44,13 @@ const NAV_ITEMS: (NavLeaf | NavGroup)[] = [
     key: 'g-video',
     label: '视频二创',
     children: [
-      // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），一键成品用火箭（直接出片），字幕用文字
+      // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），一键成品用火箭（直接出片），
+      // 字幕用文字，配音用喇叭（出的是声音）
       { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
       { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
       { key: '/finalcut', label: '一键成品', icon: <RocketOutlined /> },
       { key: '/subtitle', label: '字幕提取', icon: <FontSizeOutlined /> },
+      { key: '/dubbing', label: '智能配音', icon: <SoundOutlined /> },
     ],
   },
   {

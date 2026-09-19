@@ -8,9 +8,11 @@ export default defineConfig({
     port: 5173,
     // 开发环境把 /api 请求代理到后端服务，
     // 这样前端统一使用相对路径请求，既避免跨域，也无需维护两套地址。
+    // 目标地址可用 VITE_PROXY_TARGET 覆盖（比如后端换到别的端口启动时，
+    // 不用改配置文件：VITE_PROXY_TARGET=http://127.0.0.1:8001 npm run dev）。
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },
