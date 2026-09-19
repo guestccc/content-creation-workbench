@@ -11,6 +11,7 @@ from app.api.v1 import (
     crawl_cookies,
     crawl_jobs,
     creators,
+    finalcut_jobs,
     fs,
     health,
     mix_jobs,
@@ -30,4 +31,5 @@ api_router.include_router(subtitle_jobs.router)
 api_router.include_router(crawl_jobs.router)
 api_router.include_router(creators.router)
 api_router.include_router(crawl_cookies.router)
+api_router.include_router(finalcut_jobs.router)
 api_router.include_router(fs.router)

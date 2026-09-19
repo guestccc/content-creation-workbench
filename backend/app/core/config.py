@@ -230,6 +230,55 @@ class Settings(BaseSettings):
     # MC 环境探测结果的缓存秒数（探测要起子进程 + 扫目录，不能每请求都做）。
     CRAWL_ENV_CACHE_SECONDS: float = 30.0
 
+    # ---------- AI（一键成品的文案生成） ----------
+    # OpenAI 兼容的 chat/completions 端点（默认 DeepSeek）。换供应商只改这里。
+    AI_BASE_URL: str = "https://api.deepseek.com/v1"
+    # API key。默认空 = 未配置；页面上可以填写并写回 .env（见 services/ai_settings.py）。
+    AI_API_KEY: str = ""
+    # 模型名（DeepSeek 的通用对话模型是 deepseek-chat）。
+    AI_MODEL: str = "deepseek-chat"
+    # 采样温度。文案生成要一点发散性，但不要放飞到语无伦次。
+    AI_TEMPERATURE: float = 0.9
+    # 单次 HTTP 请求的超时（秒）。这也是「取消文案任务」的延迟上界：
+    # 在途请求无法即时中断，runner 只能在相位边界弃结果。
+    AI_TIMEOUT_SECONDS: int = 120
+    # 生成内容的最大 token 数（5 条文案 + 拆解的量，4096 足够宽裕）。
+    AI_MAX_TOKENS: int = 4096
+    # 超时 / 5xx / 429 时的重试次数（4xx 其它错误不重试，重试也不会变好）。
+    AI_MAX_RETRIES: int = 1
+    # 自定义 system 提示词，留空用内置的（services/finalcut_copy.py）。
+    AI_SYSTEM_PROMPT: str = ""
+
+    # ---------- 一键成品 ----------
+    # 是否启用后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。
+    FINALCUT_WORKER_ENABLED: bool = True
+    # 工作线程空闲时的轮询间隔（秒）。
+    FINALCUT_WORKER_POLL_SECONDS: float = 2.0
+    # 盯 ffmpeg 子进程时检查进度/取消信号的间隔（秒）。
+    FINALCUT_TICK_SECONDS: float = 0.2
+    # 进度字段落库的最小间隔（秒），避免高频写库。
+    FINALCUT_PROGRESS_SECONDS: float = 1.0
+    # 停止工作线程 / 取消任务时，等待子进程组自行退出的宽限（秒），之后强杀。
+    FINALCUT_STOP_GRACE_SECONDS: float = 5.0
+    # 单条成片烧字的硬超时（秒）。
+    FINALCUT_ITEM_TIMEOUT_SECONDS: int = 600
+    # 一次生成几条候选文案（页面上可调，上限见下）。
+    FINALCUT_COPY_COUNT_DEFAULT: int = 5
+    FINALCUT_COPY_COUNT_MAX: int = 10
+    # 单个合成任务最多几条成片（每条候选文案 × 一个框 = 一条）。
+    FINALCUT_MAX_ITEMS: int = 10
+    # 喂给 AI 的字幕素材字数上限（超出截断并标注，防止长视频把上下文撑爆）。
+    FINALCUT_SRT_MAX_CHARS: int = 6000
+    # 用户补充提示（hint）的字数上限。
+    FINALCUT_HINT_MAX_CHARS: int = 500
+    # 烧字用的字体文件绝对路径，留空表示自动探测（见 services/finalcut_env.py）。
+    FINALCUT_FONT_FILE: str = ""
+    # 语速估算：每秒上屏字数，用于「视频时长 → 文案字数预算」的换算。
+    FINALCUT_CHARS_PER_SECOND: float = 4.5
+    # 烧字编码质量与速度档（与混剪同一套取值理由）。
+    FINALCUT_RENDER_CRF: int = 20
+    FINALCUT_RENDER_PRESET: str = "veryfast"
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

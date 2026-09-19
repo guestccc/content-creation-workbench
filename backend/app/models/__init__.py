@@ -14,6 +14,15 @@ from app.models.crawl_job import (
 )
 from app.models.creator import Creator
 from app.models.crawl_cookie import CrawlCookie
+from app.models.finalcut_job import (
+    FinalcutCopyJob,
+    FinalcutCopyJobStatus,
+    FinalcutCopyPhase,
+    FinalcutItemStatus,
+    FinalcutRenderItem,
+    FinalcutRenderJob,
+    FinalcutRenderJobStatus,
+)
 from app.models.publish_task import PublishTask, PublishTaskStatus
 from app.models.mix_job import (
     MixJob,
@@ -48,6 +57,13 @@ __all__ = [
     "CrawlerType",
     "Creator",
     "CrawlCookie",
+    "FinalcutCopyJob",
+    "FinalcutCopyJobStatus",
+    "FinalcutCopyPhase",
+    "FinalcutItemStatus",
+    "FinalcutRenderItem",
+    "FinalcutRenderJob",
+    "FinalcutRenderJobStatus",
     "MixJob",
     "MixJobItem",
     "MixJobStatus",

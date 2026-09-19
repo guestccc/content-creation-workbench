@@ -15,6 +15,8 @@ from app.services.creator_service import CreatorService
 from app.services.crawl_cookie_service import CrawlCookieService
 from app.services.content_service import ContentService
 from app.services.crawl_job_service import CrawlJobService
+from app.services.finalcut_copy_service import FinalcutCopyJobService
+from app.services.finalcut_render_service import FinalcutRenderJobService
 from app.services.mix_job_service import MixJobService
 from app.services.publish_task_service import PublishTaskService
 from app.services.scene_job_service import SceneJobService
@@ -97,6 +99,16 @@ def get_crawl_cookie_service(db: DbSession) -> CrawlCookieService:
     return CrawlCookieService(db)
 
 
+def get_finalcut_copy_job_service(db: DbSession) -> FinalcutCopyJobService:
+    """构造一键成品·文案任务服务实例。"""
+    return FinalcutCopyJobService(db)
+
+
+def get_finalcut_render_job_service(db: DbSession) -> FinalcutRenderJobService:
+    """构造一键成品·合成任务服务实例。"""
+    return FinalcutRenderJobService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
@@ -107,3 +119,5 @@ SubtitleJobServiceDep = Annotated[SubtitleJobService, Depends(get_subtitle_job_s
 CrawlJobServiceDep = Annotated[CrawlJobService, Depends(get_crawl_job_service)]
 CreatorServiceDep = Annotated[CreatorService, Depends(get_creator_service)]
 CrawlCookieServiceDep = Annotated[CrawlCookieService, Depends(get_crawl_cookie_service)]
+FinalcutCopyJobServiceDep = Annotated[FinalcutCopyJobService, Depends(get_finalcut_copy_job_service)]
+FinalcutRenderJobServiceDep = Annotated[FinalcutRenderJobService, Depends(get_finalcut_render_job_service)]

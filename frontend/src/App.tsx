@@ -4,6 +4,7 @@ import Layout from './components/Layout'
 import ContentList from './pages/ContentList'
 import CreatorLibrary from './pages/CreatorLibrary'
 import Dashboard from './pages/Dashboard'
+import FinalCut from './pages/FinalCut'
 import MaterialCrawl from './pages/MaterialCrawl'
 import MixCut from './pages/MixCut'
 import SceneSplit from './pages/SceneSplit'
@@ -24,6 +25,7 @@ export default function App() {
         {/* 必须在通配路由之前，否则会被重定向到首页 */}
         <Route path="/scene" element={<SceneSplit />} />
         <Route path="/mix" element={<MixCut />} />
+        <Route path="/finalcut" element={<FinalCut />} />
         <Route path="/subtitle" element={<SubtitleExtract />} />
         <Route path="/crawl" element={<MaterialCrawl />} />
         <Route path="/creators" element={<CreatorLibrary />} />

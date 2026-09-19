@@ -3,6 +3,7 @@ import {
   DashboardOutlined,
   FileTextOutlined,
   FontSizeOutlined,
+  RocketOutlined,
   ScissorOutlined,
   TeamOutlined,
   VideoCameraOutlined,
@@ -37,10 +38,18 @@ interface NavGroup {
 const NAV_ITEMS: (NavLeaf | NavGroup)[] = [
   { key: '/', label: '工作台概览', icon: <DashboardOutlined /> },
   { key: '/contents', label: '内容管理', icon: <FileTextOutlined /> },
-  // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），字幕用文字，素材抓取用云下载
-  { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
-  { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
-  { key: '/subtitle', label: '字幕提取', icon: <FontSizeOutlined /> },
+  {
+    type: 'group',
+    key: 'g-video',
+    label: '视频二创',
+    children: [
+      // 切分用剪刀（把镜头剪开），混剪用摄像机（把片段拼成片），一键成品用火箭（直接出片），字幕用文字
+      { key: '/scene', label: '智能镜头分割', icon: <ScissorOutlined /> },
+      { key: '/mix', label: '智能混剪', icon: <VideoCameraOutlined /> },
+      { key: '/finalcut', label: '一键成品', icon: <RocketOutlined /> },
+      { key: '/subtitle', label: '字幕提取', icon: <FontSizeOutlined /> },
+    ],
+  },
   {
     type: 'group',
     key: 'g-rewrite',
