@@ -80,7 +80,7 @@ class SceneEnvironmentResponse(BaseModel):
     vct_exists: bool = Field(description="该路径是否存在且可执行")
     materials_dir: str = Field(
         default="",
-        description="素材目录根（默认仓库根目录的 materials/），下有 source/clips/subtitle/output 四个分段",
+        description="素材目录根（默认仓库根目录的 materials/），下有 source/clips/subtitle/output 等分段",
     )
     default_input_dir: str = Field(
         default="", description="默认输入目录（materials/source），页面用它作为输入目录的初始值"
@@ -382,6 +382,12 @@ class SceneClipResponse(BaseModel):
     name: str = Field(description="片段文件名")
     source_name: str = Field(description="来源视频文件名")
     size_bytes: int = Field(description="文件大小（字节）")
+    width: Optional[int] = Field(
+        default=None, description="视频宽度（像素），与源视频一致；探测失败或旧任务为空"
+    )
+    height: Optional[int] = Field(
+        default=None, description="视频高度（像素），与源视频一致；探测失败或旧任务为空"
+    )
     thumb_url: str = Field(description="缩略图地址（首次访问时后端才抽帧生成）")
     video_url: str = Field(description="视频流地址（支持 Range，可拖动进度条播放）")
 
@@ -405,10 +411,32 @@ class FsListData(BaseModel):
     """列目录结果。"""
 
     path: str = Field(description="当前目录绝对路径")
+    canonical_path: str = Field(
+        description="当前目录 resolve 之后的规范化路径（消掉 .. 与符号链接、统一盘符大小写）。"
+        "收藏夹按规范化路径判重，前端判断「当前目录是否已收藏」用它而不是 path"
+    )
     parent: Optional[str] = Field(default=None, description="上级目录，已在根目录时为空")
     entries: List[FsEntry] = Field(description="目录内容，目录在前、同类按名称排序")
     truncated: bool = Field(description="条目是否因过多而被截断")
     video_count: int = Field(description="当前目录下（不含子目录）的视频文件数")
+
+
+class FsFavoriteItem(BaseModel):
+    """收藏的一个目录。"""
+
+    id: str = Field(description="收藏 id（sha1(绝对路径)[:16]，接口参数用它而不是路径）")
+    path: str = Field(description="目录绝对路径（已 resolve）")
+    name: str = Field(description="目录名（展示用；盘符根取不到名字时回退为完整路径）")
+    exists: bool = Field(description="目录当前是否还在（被删或盘没挂上时为 false）")
+    added_at: float = Field(default=0.0, description="收藏时间戳（秒）")
+
+
+class FsFavoriteCreate(BaseModel):
+    """收藏一个目录。"""
+
+    path: str = Field(
+        ..., min_length=1, max_length=2000, description="目录绝对路径（支持 ~ 开头）"
+    )
 
 
 class SceneJobScenesData(BaseModel):

@@ -25,10 +25,8 @@
 """
 
 import json
-import locale
 import os
 import platform
-import subprocess
 import sys
 import threading
 import time
@@ -39,7 +37,7 @@ from typing import List, Optional, Set, Tuple
 from app.core.config import repo_root, settings, toolbox_root
 from app.core.logging import get_logger
 from app.core.materials import SOURCE, SUBTITLE, materials_root, subdir
-from app.services.media_tools import child_env, find_tool
+from app.services.media_tools import find_tool, run_probe
 from app.services.subtitle_settings import shadowing_warning, vc_root_source
 
 logger = get_logger(__name__)
@@ -351,42 +349,15 @@ def _probe(launcher: List[str]) -> Optional[dict]:
         argv = [launcher[0], "--version"]
         parser = _parse_version_text
 
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
-            env=child_env(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.debug("探测 VideoCaptioner 失败 | %s | %s", launcher[0], exc)
+    result = run_probe(argv, timeout=PROBE_TIMEOUT_SECONDS)
+    if result is None:
+        logger.debug("探测 VideoCaptioner 失败 | %s", launcher[0])
         return None
-
     if result.returncode != 0:
         return None
-    return parser(_decode_probe_output(result.stdout or b""))
-
-
-def _decode_probe_output(data: bytes) -> str:
-    """探测子进程输出的解码：先 UTF-8 再本地代码页，都不行就替换坏字节。
-
-    按字节捕获、自己解码，而不是 text=True：子进程可能吐出与父进程代码页
-    不一致的字节（真实踩过：中文 Windows 上子进程写 GBK，父进程开着 UTF-8
-    模式，text=True 的解码在 subprocess 的读线程里抛 UnicodeDecodeError，
-    result.stdout 变成 None，后面 splitlines 直接 AttributeError）。探测
-    看不懂输出顶多是返回 None 换下一条候选，绝不该崩。
-    """
-    candidates = ["utf-8"]
-    preferred = locale.getpreferredencoding(False)
-    if preferred and preferred.lower() not in ("utf-8", "utf8"):
-        candidates.append(preferred)
-    for encoding in candidates:
-        try:
-            return data.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return data.decode("utf-8", errors="replace")
+    # run_probe 已经按字节捕获并解码（子进程可能吐与父进程代码页不一致的
+    # 字节，text=True 会在建读线程里炸）—— 探测看不懂输出顶多换下一条候选
+    return parser(result.stdout)
 
 
 def _parse_probe_json(stdout: str) -> Optional[dict]:

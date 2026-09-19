@@ -145,6 +145,9 @@ export interface SceneClip {
   name: string
   source_name: string
   size_bytes: number
+  /** 视频宽（像素），与源视频一致；探测失败或旧任务为空，卡片退默认比例 */
+  width: number | null
+  height: number | null
   thumb_url: string
   /** 视频流地址（后端支持 Range，可拖动进度条）；路径由后端给，前端不拼 */
   video_url: string
@@ -190,10 +193,26 @@ export interface FsEntry {
 /** 列目录结果 */
 export interface FsListData {
   path: string
+  /** resolve 后的规范化路径：判断「当前目录是否已收藏」用它，不要用 path 比字符串 */
+  canonical_path: string
   parent: string | null
   entries: FsEntry[]
   truncated: boolean
   video_count: number
+}
+
+/** 收藏的一个目录 */
+export interface FsFavorite {
+  /** 收藏 id（sha1(绝对路径)[:16]），接口参数用它而不是路径 */
+  id: string
+  /** 目录绝对路径（后端已 resolve） */
+  path: string
+  /** 目录名（展示用；盘符根取不到名字时回退为完整路径） */
+  name: string
+  /** 目录当前是否还在（被删或盘没挂上时为 false） */
+  exists: boolean
+  /** 收藏时间戳（秒） */
+  added_at: number
 }
 
 /** 检测器候选项（与后端 core/scene_templates.py 的 DETECTORS 对应） */

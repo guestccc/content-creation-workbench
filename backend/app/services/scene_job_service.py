@@ -14,9 +14,12 @@
        └──取消──> cancelled（running 中取消：当前条目标记后同样落到 cancelled）
 
 终态（success / partial / failed / cancelled）只能通过删除记录清理，
-不提供自动重试 —— 视频文件损坏是确定性错误，自动重跑只会再浪费几分钟。
+不自动重试 —— 视频文件损坏是确定性错误，自动重跑只会再浪费几分钟；
+但提供**单条视频的手动重试**（retry_item）：把 failed 条目重置回 pending、
+任务重新入队，由用户决定哪条值得再跑一次。
 """
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -32,6 +35,7 @@ from app.core import video_files
 from app.core.scene_templates import resolve_params
 from app.db.session import transaction
 from app.models.content import utcnow
+from app.services.fs_cleanup import remove_paths_best_effort
 from app.models.scene_job import (
     SceneJob,
     SceneJobItem,
@@ -123,6 +127,32 @@ def _allocate_output_dirs(
 # --------------------------------------------------------------------------
 # 服务
 # --------------------------------------------------------------------------
+
+
+def _product_paths(job: SceneJob) -> List[Path]:
+    """列出一条任务的产物路径（只从任务记录推导，不接受外部路径）。
+
+    - split：每条视频一个独立输出子目录（分配时同名加 -2/-3 后缀），整棵删，
+      缩略图缓存、vct.log、切点 CSV 一起清掉；
+    - preview：产物在临时目录 vct-preview/job-<id>，任务独占，整棵删。
+
+    已知边界：若任务 A 零片段失败、任务 B 之后复用了同一目录，再 purge A
+    会误删 B 的产物 —— 路径即归属，两个任务撞名时无从区分，接受这个角例。
+    """
+    if job.mode == SceneJobMode.PREVIEW:
+        return [Path(job.output_dir)]
+    return [Path(item.output_dir) for item in job.items]
+
+
+def _purge_products(products: List[Path], *, job_ids: List[int]) -> None:
+    """best-effort 清产物：有失败的记一条汇总日志，不向上抛。"""
+    if not products:
+        return
+    failed = remove_paths_best_effort(products)
+    if failed:
+        logger.warning(
+            "任务产物清理有残留 | jobs=%s | 失败=%s 个路径", job_ids, len(failed)
+        )
 
 
 class SceneJobService:
@@ -313,11 +343,13 @@ class SceneJobService:
             logger.exception("取消镜头分割任务失败 | id=%s", job_id)
             raise DatabaseError("取消镜头分割任务失败") from exc
 
-    def delete_job(self, job_id: int) -> None:
+    def delete_job(self, job_id: int, *, purge_files: bool = False) -> None:
         """删除任务记录（级联删除所有条目）。
 
-        仅允许删除终态任务；切割产出的文件留在磁盘上不动 —— 那是用户的素材，
-        删记录不应该顺手删文件。
+        仅允许删除终态任务。默认只删记录；purge_files=True 时把任务产物
+        （每条视频的输出目录 / 预览的临时目录）一并清掉 —— 用户明确勾选的
+        释放空间操作。产物清理在记录提交之后 best-effort 执行，个别文件
+        被占用不阻断删除。
 
         Raises:
             NotFoundError: 任务不存在。
@@ -333,14 +365,147 @@ class SceneJobService:
                         f"任务尚未结束（{job.status}），请先取消后再删除"
                     )
 
+                products = _product_paths(job) if purge_files else []
                 self.db.delete(job)
 
-            logger.info("镜头分割任务已删除 | id=%s", job_id)
+            logger.info("镜头分割任务已删除 | id=%s | 清产物=%s", job_id, purge_files)
         except (NotFoundError, ConflictError):
             raise
         except SQLAlchemyError as exc:
             logger.exception("删除镜头分割任务失败 | id=%s", job_id)
             raise DatabaseError("删除镜头分割任务失败") from exc
+
+        _purge_products(products, job_ids=[job_id])
+
+    def delete_jobs(self, job_ids: List[int], *, purge_files: bool = False) -> List[int]:
+        """批量删除任务记录：全部成功才提交，任何一个不可删则整批回滚。
+
+        与 delete_job 同一套边界：仅终态可删；purge_files=True 时产物一并清掉。
+        错误信息带出错位的任务 ID，前端能直接告诉用户卡在哪条。
+
+        Raises:
+            NotFoundError: 某个任务不存在（整批回滚）。
+            ConflictError: 某个任务尚未结束（整批回滚）。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                products: List[Path] = []
+                for job_id in job_ids:
+                    job = self._get_job_or_404(job_id)
+                    if job.status not in SceneJobStatus.TERMINAL:
+                        raise ConflictError(
+                            f"任务 #{job_id} 尚未结束（{job.status}），请先取消后再删除"
+                        )
+                    if purge_files:
+                        products.extend(_product_paths(job))
+                    self.db.delete(job)
+
+            logger.info("镜头分割任务批量删除 | ids=%s | 清产物=%s", job_ids, purge_files)
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量删除镜头分割任务失败 | ids=%s", job_ids)
+            raise DatabaseError("批量删除任务失败") from exc
+
+        _purge_products(products, job_ids=job_ids)
+        return job_ids
+
+    def retry_item(self, job_id: int, item_index: int) -> SceneJob:
+        """重试单条失败的视频：条目重置回 pending，任务重新入队。
+
+        前置条件：任务已终态、条目状态是 failed —— 正在跑的任务没法重试，
+        成功/跳过的条目也没有重跑的意义（要重跑就新建任务）。
+
+        条目的输出目录会先清空：进度按目录里片段文件数统计、结果按目录
+        里片段文件数收集（见 scene_runner），上次的残留会把重跑的进度和
+        产物数全部污染。目录本身归属该条目独占，清空不会误伤别的视频。
+
+        计数口径：completed_videos 重置为「除被重试条目外已终态的条目数」，
+        failed/skipped 清零 —— 它们会在重跑过程中由执行器按条目重新累计，
+        收尾时 _finalize 再按条目状态重算一遍。
+
+        Raises:
+            NotFoundError: 任务或条目不存在。
+            ConflictError: 任务未结束，或条目不是 failed 状态。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+
+                if job.status not in SceneJobStatus.TERMINAL:
+                    raise ConflictError(f"任务尚未结束（{job.status}），无法重试")
+
+                item = next(
+                    (entry for entry in job.items if entry.index == item_index), None
+                )
+                if item is None:
+                    raise NotFoundError(
+                        f"任务条目不存在：job={job_id}, index={item_index}"
+                    )
+                if item.status != SceneJobItemStatus.FAILED:
+                    raise ConflictError(
+                        f"只有失败的条目才能重试（当前状态：{item.status}）"
+                    )
+
+                out_dir = Path(item.output_dir)
+                if out_dir.is_dir():
+                    for stale in out_dir.iterdir():
+                        try:
+                            if stale.is_dir():
+                                shutil.rmtree(stale, ignore_errors=True)
+                            else:
+                                stale.unlink()
+                        except OSError as exc:
+                            logger.warning(
+                                "清理重试前的残留产物失败，跳过该文件 | %s | %s", stale, exc
+                            )
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+                item.status = SceneJobItemStatus.PENDING
+                item.error_message = ""
+                item.exit_code = None
+                item.started_at = None
+                item.finished_at = None
+                item.elapsed_seconds = 0
+                item.scene_count = 0
+                item.scenes = None
+                item.clip_count = 0
+                item.clip_names = []
+                item.failed_clip_count = 0
+                item.single_shot = False
+
+                job.status = SceneJobStatus.PENDING
+                job.error_message = ""
+                job.started_at = None
+                job.finished_at = None
+                job.child_pid = None
+                job.current_index = 0
+                job.current_video = ""
+                job.current_clips = 0
+                job.current_clip_names = []
+                job.current_phase = ""
+                job.current_total_clips = 0
+                job.completed_videos = sum(
+                    1
+                    for entry in job.items
+                    if entry.status == SceneJobItemStatus.SUCCESS
+                )
+                job.failed_videos = 0
+                job.skipped_videos = 0
+                self.db.flush()
+
+            logger.info(
+                "镜头分割条目已重试入队 | job=%s | item=%s | %s",
+                job_id, item_index, item.source_name,
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("重试镜头分割条目失败 | job=%s | item=%s", job_id, item_index)
+            raise DatabaseError("重试镜头分割条目失败") from exc
 
     # ------------------------------------------------------------------
     # 结果汇总
@@ -405,6 +570,9 @@ class SceneJobService:
                         "name": name,
                         "source_name": item.source_name,
                         "size_bytes": size,
+                        # 切分不改分辨率，片段与源视频同规格：卡片比例直接用源视频的宽高
+                        "width": item.width,
+                        "height": item.height,
                         "path": file_path,
                     }
                 )

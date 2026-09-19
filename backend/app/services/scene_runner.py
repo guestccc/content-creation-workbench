@@ -38,9 +38,11 @@ from app.services.media_tools import (  # noqa: F401  (重导出)
     CHILD_CREATION_FLAGS,
     child_env,
     command_line,
+    dependency_status,
     find_tool,
     generate_thumbnail,
     probe_duration,
+    probe_dimensions,
     read_log_tail,
     terminate_process_group,
 )
@@ -262,8 +264,6 @@ def probe_environment() -> dict:
     vct_exists = os.path.isfile(vct_path) and os.access(vct_path, os.X_OK)
 
     scenedetect = find_tool("scenedetect")
-    ffmpeg = find_tool("ffmpeg")
-    ffprobe = find_tool("ffprobe")
 
     dependencies = [
         {
@@ -280,23 +280,33 @@ def probe_environment() -> dict:
             "detail": "镜头检测引擎" if scenedetect else "未在 PATH 中找到",
             "fix_hint": "" if scenedetect else "pip install scenedetect 或放入 ~/.local/bin",
         },
-        {
-            "name": "ffmpeg",
-            "ok": ffmpeg is not None,
-            "path": ffmpeg or "",
-            "detail": "视频切割与缩略图抽帧" if ffmpeg else "未在 PATH 中找到",
-            "fix_hint": "" if ffmpeg else "brew install ffmpeg 或放入 ~/.local/bin",
-        },
-        {
-            "name": "ffprobe",
-            "ok": ffprobe is not None,
-            "path": ffprobe or "",
-            "detail": "视频时长探测" if ffprobe else "未找到（时长列将留空，不影响切割）",
-            "fix_hint": "" if ffprobe else "随 ffmpeg 一起安装",
-        },
+        dependency_status(
+            "ffmpeg",
+            purpose="视频切割与缩略图抽帧",
+            missing_detail="未在 PATH 中找到",
+            missing_hint="brew install ffmpeg 或放入 ~/.local/bin",
+            impostor_detail="找到的同名文件不是 ffmpeg（可能是别的工具的副本被改名）",
+            impostor_hint="从 ffmpeg 官网或包管理器装一份完整的 ffmpeg",
+        ),
+        dependency_status(
+            "ffprobe",
+            purpose="视频时长探测",
+            missing_detail="未找到（时长列将留空，不影响切割）",
+            missing_hint="随 ffmpeg 一起安装",
+            impostor_detail="找到的同名文件不是 ffprobe（时长列将留空，不影响切割）",
+            impostor_hint="把真正的 ffprobe 放进 PATH（它和 ffmpeg 一起发布）",
+        ),
     ]
+    # 关键依赖（vct / scenedetect / ffmpeg）都要自证过：只在 PATH 里找到同名
+    # 文件就报就绪，会把「跑起来才发现不能用」留给任务。ffprobe 只影响时长列，
+    # 依旧不进 ready。
+    key_ok = {
+        dependency["name"]: dependency["ok"]
+        for dependency in dependencies
+        if dependency["name"] in ("vct", "scenedetect", "ffmpeg")
+    }
     return {
-        "ready": vct_exists and scenedetect is not None and ffmpeg is not None,
+        "ready": all(key_ok.values()),
         "vct_path": vct_path,
         "vct_exists": vct_exists,
         # 素材目录不是「依赖」，但它得跟自检结果一起回给前端：
@@ -540,6 +550,8 @@ class SceneRunner:
         item.status = SceneJobItemStatus.RUNNING
         item.started_at = utcnow()
         item.duration_seconds = probe_duration(Path(item.source_path))
+        # 宽高跟着时长一起探：片段卡片要按它算画幅比例，探不到留空（前端退默认比例）
+        item.width, item.height = probe_dimensions(Path(item.source_path)) or (None, None)
         job.current_index = item.index
         job.current_video = item.source_name
         # 进度字段一律清零：这几列说的是「当前这条」的进度，换了视频就得

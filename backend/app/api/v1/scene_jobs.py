@@ -14,7 +14,9 @@
 - GET  /jobs/{id}/clips/{n}/thumb  片段缩略图（首次访问时抽帧生成）
 - GET  /jobs/{id}/clips/{n}/video  片段视频流（支持 Range，可拖动进度条）
 - POST /jobs/{id}/cancel    取消任务
-- DELETE /jobs/{id}         删除任务记录
+- POST /jobs/{id}/items/{n}/retry  重试单条失败的视频（条目重置回 pending，任务重新入队）
+- POST /jobs/batch-delete   批量删除任务记录（payload 带 purge_files 时产物一并清）
+- DELETE /jobs/{id}         删除任务记录（?purge_files=true 时产物一并清）
 """
 
 from pathlib import Path
@@ -34,7 +36,7 @@ from app.core.scene_templates import (
 from app.services.file_range import ranged_file_response
 from app.services.scene_runner import generate_thumbnail, probe_environment
 from app.models.scene_job import SceneJobMode, SceneJobStatus
-from app.schemas.common import ApiResponse
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest
 from app.schemas.scene_job import (
     SceneClipResponse,
     SceneEnvironmentResponse,
@@ -155,6 +157,21 @@ def list_jobs(
     )
 
 
+# 静态路径 /jobs/batch-delete 必须写在 /jobs/{job_id} 之前（见文件头说明）
+@router.post(
+    "/jobs/batch-delete",
+    response_model=ApiResponse[dict],
+    summary="批量删除镜头分割任务记录",
+)
+def batch_delete_jobs(
+    payload: JobBatchDeleteRequest,
+    service: SceneJobServiceDep,
+) -> ApiResponse[dict]:
+    """整批删除（全成功或全失败）；purge_files=true 时产物一并清掉。"""
+    ids = service.delete_jobs(payload.ids, purge_files=payload.purge_files)
+    return ApiResponse(data={"ids": ids, "count": len(ids)})
+
+
 @router.get(
     "/jobs/{job_id}",
     response_model=ApiResponse[SceneJobResponse],
@@ -213,6 +230,8 @@ def list_clips(
                 name=clip["name"],
                 source_name=clip["source_name"],
                 size_bytes=clip["size_bytes"],
+                width=clip.get("width"),
+                height=clip.get("height"),
                 thumb_url=f"/api/v1/scene/jobs/{job_id}/clips/{clip['index']}/thumb",
                 video_url=f"/api/v1/scene/jobs/{job_id}/clips/{clip['index']}/video",
             ).model_dump()
@@ -285,6 +304,21 @@ def cancel_job(
     return ApiResponse(data=SceneJobResponse.from_model(job))
 
 
+@router.post(
+    "/jobs/{job_id}/items/{item_index}/retry",
+    response_model=ApiResponse[SceneJobResponse],
+    summary="重试单条失败的视频",
+)
+def retry_job_item(
+    service: SceneJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    item_index: int = PathParam(..., ge=1, description="条目序号（任务内，从 1 开始）"),
+) -> ApiResponse[SceneJobResponse]:
+    """把失败的条目重置回 pending 并让任务重新入队，其余条目的结果保持不动。"""
+    job = service.retry_item(job_id, item_index)
+    return ApiResponse(data=SceneJobResponse.from_model(job))
+
+
 @router.delete(
     "/jobs/{job_id}",
     response_model=ApiResponse[dict],
@@ -293,7 +327,8 @@ def cancel_job(
 def delete_job(
     service: SceneJobServiceDep,
     job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    purge_files: bool = Query(default=False, description="是否连同磁盘上的任务产物一起删除"),
 ) -> ApiResponse[dict]:
-    """删除任务记录（级联删条目）；磁盘上已切出的片段文件保留不动。"""
-    service.delete_job(job_id)
+    """删除任务记录（级联删条目）；默认保留磁盘产物，purge_files=true 时一并清掉。"""
+    service.delete_job(job_id, purge_files=purge_files)
     return ApiResponse(data={"id": job_id})

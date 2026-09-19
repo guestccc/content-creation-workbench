@@ -48,7 +48,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
+import type { ColumnsType, TableProps } from 'antd/es/table'
 
 import DirectoryPicker from '../components/DirectoryPicker'
 import HistoryCard from '../components/HistoryCard'
@@ -69,11 +69,14 @@ import {
   useJobList,
   useJobPolling,
   useJobRunner,
+  usePurgeFiles,
   useSourceDir,
 } from '../hooks'
+import type { UsePurgeFilesResult } from '../hooks'
 import {
   cancelSceneJob,
   createSceneJob,
+  batchDeleteSceneJobs,
   deleteSceneJob,
   fetchSceneClips,
   fetchSceneEnvironment,
@@ -81,6 +84,7 @@ import {
   fetchSceneJobs,
   fetchSceneSummary,
   fetchSceneTemplates,
+  retrySceneItem,
 } from '../api/scene'
 import {
   DETECTOR_OPTIONS,
@@ -100,14 +104,14 @@ import { formatBytes, formatDuration } from '../utils/format'
 
 const { Text, Title, Paragraph } = Typography
 
-/** 片段封面上的播放角标：常驻的半透明三角，提示这一片是可以点的 */
+/** 片段封面上的播放角标：常驻的半透明三角，提示这一片是可以点的（卡片窄，图标跟着缩小） */
 const PLAY_BADGE: CSSProperties = {
   position: 'absolute',
   inset: 0,
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  fontSize: 22,
+  fontSize: 16,
   color: 'rgba(255, 255, 255, 0.85)',
   // 图标是 svg，textShadow 对它不生效，改用 filter 描一层暗边把底下的画面压住
   filter: 'drop-shadow(0 1px 6px rgba(0, 0, 0, 0.8))',
@@ -184,10 +188,15 @@ export default function SceneSplit() {
 
   const history = useJobList<SceneJob>({ fetchList: fetchSceneJobs })
 
+  // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
+  const purge = usePurgeFiles()
+
   const runner = useJobRunner<SceneJob, SceneJobPayload>({
     create: createSceneJob,
     cancel: cancelSceneJob,
-    remove: deleteSceneJob,
+    // take() 在这里调用：删除那一刻取值并重置，勾选只对这一次删除有效
+    remove: (jobId) => deleteSceneJob(jobId, purge.take()),
+    batchRemove: (ids) => batchDeleteSceneJobs(ids, purge.take()),
     fetchJob: fetchSceneJob,
     isTerminal: (job) => isTerminalStatus(job.status),
     fail,
@@ -289,11 +298,45 @@ export default function SceneSplit() {
     }
   }
 
-  /** 删除任务记录 */
+  /**
+   * 重试单条失败的视频：条目重置回 pending、任务重新入队。
+   *
+   * 返回的是整个任务的新状态，两处都要对上号地刷新：进度卡那条（页面的
+   * 当前任务）和历史弹窗里正在看的那条 —— 对不上号的保持原样，互不干扰。
+   */
+  const retryItem = async (target: SceneJob, item: SceneJobItem) => {
+    try {
+      const updated = await retrySceneItem(target.id, item.index)
+      runner.setJob((current) => (current?.id === updated.id ? updated : current))
+      setDetailJob((current) => (current?.id === updated.id ? updated : current))
+      history.reload()
+      message.success(`已重新入队：${item.source_name}`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
+  /** 删除任务记录（是否连片段文件一起删由确认框里的勾选决定） */
   const remove = async (jobId: number) => {
     if (await runner.remove(jobId)) {
-      message.success('已删除任务记录（磁盘上的片段文件保留）')
+      message.success('已删除任务记录')
     }
+  }
+
+  /** 批量删除历史记录（整批成功或整批失败） */
+  const batchRemove = async () => {
+    const ids = history.selectedRowKeys
+    if (await runner.removeMany(ids)) {
+      message.success(`已删除 ${ids.length} 条任务记录`)
+      history.clearSelection()
+    }
+  }
+
+  /** 历史表行多选：只终态任务可选（运行中的任务禁止勾选） */
+  const historyRowSelection: TableProps<SceneJob>['rowSelection'] = {
+    selectedRowKeys: history.selectedRowKeys,
+    onChange: (keys) => history.setSelectedRowKeys(keys.map(Number)),
+    getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
   /**
@@ -634,14 +677,18 @@ export default function SceneSplit() {
           outputDir={job.output_dir}
         >
           {/* 每个视频的处理明细；片段结果统一在这里/历史弹窗里下钻查看，
-              不再在页面上铺开一整个网格 */}
+              不再在页面上铺开一整个网格；失败的条目可单独重试 */}
           {job.items.length > 0 && (
             <Table
               style={{ marginTop: 12 }}
               rowKey="id"
               pagination={false}
               dataSource={job.items}
-              columns={buildItemColumns(job, (item) => void openItemDetail(job, item))}
+              columns={buildItemColumns(
+                job,
+                (item) => void openItemDetail(job, item),
+                (item) => void retryItem(job, item),
+              )}
             />
           )}
         </JobProgressCard>
@@ -729,10 +776,35 @@ export default function SceneSplit() {
           onView: (id) => void openJobDetail(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
+        rowSelection={historyRowSelection}
+        extra={
+          <Popconfirm
+            title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
+            description={
+              <div>
+                <div>删除后不可恢复。</div>
+                {purge.checkbox}
+              </div>
+            }
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => void batchRemove()}
+            onOpenChange={(open) => {
+              if (open) {
+                purge.reset()
+              }
+            }}
+          >
+            <Button danger disabled={history.selectedRowKeys.length === 0}>
+              批量删除{history.selectedRowKeys.length > 0 ? ` (${history.selectedRowKeys.length})` : ''}
+            </Button>
+          </Popconfirm>
+        }
       />
 
       {/* ---------- 第一层：某条任务切了哪些视频 ---------- */}
@@ -781,7 +853,11 @@ export default function SceneSplit() {
                 pagination={false}
                 dataSource={detailJob.items}
                 locale={{ emptyText: <Empty description="这条任务没有视频明细" /> }}
-                columns={buildItemColumns(detailJob, (item) => void openItemDetail(detailJob, item))}
+                columns={buildItemColumns(
+                detailJob,
+                (item) => void openItemDetail(detailJob, item),
+                (item) => void retryItem(detailJob, item),
+              )}
               />
             </Space>
           )
@@ -980,11 +1056,13 @@ function renderItemProgress(record: SceneJobItem, job: SceneJob | null): ReactNo
 /**
  * 视频清单的列定义：页面上的进度卡和「查看」弹窗共用一套。
  *
- * 传了 onView 才多一列「操作」—— 有结果（片段或切点）的行给下钻入口。
+ * 传了 onView / onRetry 才多一列「操作」—— 有结果（片段或切点）的行给
+ * 下钻入口；任务已终态且条目失败时给重试入口。
  */
 function buildItemColumns(
   job: SceneJob | null,
   onView?: (item: SceneJobItem) => void,
+  onRetry?: (item: SceneJobItem) => void,
 ): ColumnsType<SceneJobItem> {
   const columns: ColumnsType<SceneJobItem> = [
     { title: '#', dataIndex: 'index', width: 48 },
@@ -1043,19 +1121,34 @@ function buildItemColumns(
     },
   ]
 
-  if (onView) {
+  if (onView || onRetry) {
     columns.push({
       title: '操作',
-      width: 64,
-      render: (_: unknown, record: SceneJobItem) =>
-        // 没东西可看的（还没轮到、单镜头、失败）别给一个点了没反应的链接
-        record.clip_count > 0 || (record.scenes?.length ?? 0) > 0 ? (
-          <Button type="link" style={{ padding: 0 }} onClick={() => onView(record)}>
-            查看
-          </Button>
-        ) : (
-          <Text type="secondary">—</Text>
-        ),
+      width: 96,
+      render: (_: unknown, record: SceneJobItem) => {
+        // 任务还在跑时重跑没有意义（后端也会拒），只留查看
+        const retryable =
+          onRetry !== undefined && record.status === 'failed' && job !== null && isTerminalStatus(job.status)
+        const viewable = record.clip_count > 0 || (record.scenes?.length ?? 0) > 0
+        if (!retryable && !viewable) {
+          // 没东西可看的（还没轮到、单镜头）别给一排点了没反应的链接
+          return <Text type="secondary">—</Text>
+        }
+        return (
+          <Space size={12}>
+            {retryable && (
+              <Button type="link" style={{ padding: 0 }} onClick={() => onRetry?.(record)}>
+                重试
+              </Button>
+            )}
+            {viewable && onView && (
+              <Button type="link" style={{ padding: 0 }} onClick={() => onView(record)}>
+                查看
+              </Button>
+            )}
+          </Space>
+        )
+      },
     })
   }
 
@@ -1064,6 +1157,10 @@ function buildItemColumns(
 
 /**
  * 片段网格：每条视频的片段弹窗用。
+ *
+ * 卡片不写死列数也不写死高度：流式排布（flex-wrap 按容器宽度自动换行），
+ * 封面比例跟随视频宽高（后端 ffprobe 探测；旧任务没有就退 16:9），横屏竖屏
+ * 各按各的画幅渲染。
  *
  * onPlay 传的是「整组片段 + 点的是第几个」，播放器要靠这个组来决定
  * 上一个 / 下一个走到哪儿为止 —— 传进来的就是那条视频自己的片段。
@@ -1076,63 +1173,67 @@ function ClipGrid({
   onPlay: (clips: SceneClip[], index: number) => void
 }) {
   return (
-    <Row gutter={[12, 12]}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }}>
       {clips.map((clip, position) => (
-        // 固定 3 列：片段网格只出现在 880 宽的片段弹窗里，容器宽度恒定，
-        // 不需要按容器自适应；span 8 = 24 栅格的三分之一
-        <Col key={clip.index} span={8}>
-          <Card
-            hoverable
-            styles={{ body: { padding: 8 } }}
-            cover={
-              // 封面点击即播放：把 Image 的放大预览关掉（preview={false}），
-              // 缩略图对视频来说没什么可看的，用户要的是看它怎么切出来的。
-              <Tooltip title="点击播放这一片">
-                <div
-                  onClick={() => onPlay(clips, position)}
-                  style={{
-                    position: 'relative',
-                    background: '#000',
-                    height: 96,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    overflow: 'hidden',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <Image
-                    src={clip.thumb_url}
-                    alt={clip.name}
-                    preview={false}
-                    height={96}
-                    style={{ objectFit: 'cover' }}
-                    fallback={THUMB_FALLBACK}
-                  />
-                  <span style={PLAY_BADGE}>
-                    <PlayCircleOutlined />
-                  </span>
-                </div>
-              </Tooltip>
-            }
-          >
-            <Flex justify="space-between" align="center">
-              <Text style={{ fontSize: 12 }} ellipsis>
-                #{clip.index}
-              </Text>
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {formatBytes(clip.size_bytes)}
-              </Text>
-            </Flex>
-            <Tooltip title={`${clip.source_name} → ${clip.name}`}>
-              <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                {clip.name}
-              </Text>
+        // 一行固定 6 列：宽度 = (容器宽 - 5 个间距) / 6，flex 不伸不缩，
+        // 最后一行剩几个就是几个、不会被拉宽。
+        <Card
+          key={clip.index}
+          hoverable
+          styles={{ body: { padding: 6 } }}
+          style={{ flex: '0 0 calc((100% - 80px) / 6)' }}
+          cover={
+            // 封面点击即播放：把 Image 的放大预览关掉（preview={false}），
+            // 缩略图对视频来说没什么可看的，用户要的是看它怎么切出来的。
+            <Tooltip title="点击播放这一片">
+              <div
+                onClick={() => onPlay(clips, position)}
+                style={{
+                  position: 'relative',
+                  background: '#000',
+                  // 展示区高度完全由图片撑开：缩略图是后端按视频真实比例等比
+                  // 缩出来的（scale=320:-2），图片多宽高区域就多宽高 —— 没有
+                  // 宽高数据的旧任务也天然正确。后端给了 width/height 时先用
+                  // aspectRatio 占住位，图片加载前不塌陷。
+                  lineHeight: 0,
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  ...(clip.width && clip.height
+                    ? { aspectRatio: `${clip.width} / ${clip.height}` }
+                    : {}),
+                }}
+              >
+                <Image
+                  src={clip.thumb_url}
+                  alt={clip.name}
+                  preview={false}
+                  width="100%"
+                  style={{ display: 'block', objectFit: 'contain' }}
+                  fallback={THUMB_FALLBACK}
+                />
+                <span style={PLAY_BADGE}>
+                  <PlayCircleOutlined />
+                </span>
+              </div>
             </Tooltip>
-          </Card>
-        </Col>
+          }
+        >
+          <Flex justify="space-between" align="center" gap={4}>
+            <Text style={{ fontSize: 12 }}>#{clip.index}</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {formatBytes(clip.size_bytes)}
+            </Text>
+          </Flex>
+          {/* 片段名换行展示不省略：文件名没有空格，得 break-all 才断得开 */}
+          <Text
+            type="secondary"
+            style={{ fontSize: 11, display: 'block', wordBreak: 'break-all' }}
+          >
+            {clip.name}
+          </Text>
+        </Card>
       ))}
-    </Row>
+    </div>
   )
 }
 
@@ -1170,6 +1271,7 @@ function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  purge: UsePurgeFilesResult
 }): ColumnsType<SceneJob> {
   return [
     jobIdColumn<SceneJob>(),
@@ -1189,7 +1291,8 @@ function historyColumns(handlers: {
       onView: handlers.onView,
       onCancel: handlers.onCancel,
       onDelete: handlers.onDelete,
-      deleteDescription: '只删记录，已切出的片段文件会保留在磁盘上。',
+      deleteDescription: '删除后不可恢复。',
+      purge: handlers.purge,
     }),
   ]
 }

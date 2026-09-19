@@ -237,6 +237,12 @@ class SceneJobItem(Base):
     duration_seconds: Mapped[Optional[float]] = mapped_column(
         Float, nullable=True, comment="源视频时长（秒），ffprobe 探测失败时为空"
     )
+    width: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="源视频宽度（像素），ffprobe 探测失败时为空"
+    )
+    height: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="源视频高度（像素），ffprobe 探测失败时为空"
+    )
     exit_code: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True, comment="子进程退出码"
     )

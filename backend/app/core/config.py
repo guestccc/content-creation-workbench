@@ -60,7 +60,6 @@ def default_mc_root() -> str:
         return str(repo_root() / "MediaCrawler")
     return str(base / "MediaCrawler")
 
-
 class Settings(BaseSettings):
     """全局配置对象。
 
@@ -108,7 +107,8 @@ class Settings(BaseSettings):
     # 素材目录的**根**，默认是仓库根目录的 materials/。
     # 整个目录被 .gitignore 挡在 git 外面（原片与产物都太大），
     # 由后端启动时按 app/core/materials.py 里的规划建好 source / clips /
-    # subtitle / output 四个分段，新克隆的仓库因此也是规划好的样子。
+    # subtitle / output / crawl / finalcut / dubbing 几个分段，
+    # 新克隆的仓库因此也是规划好的样子。
     SCENE_MATERIALS_DIR: str = str(repo_root() / "materials")
     # 是否启用后台工作线程。测试环境置 False，避免 worker 与测试会话抢连接。
     SCENE_WORKER_ENABLED: bool = True
@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     SCENE_MAX_BATCH_FILES: int = 200
     # 列目录接口单次返回的最大条目数，超出截断并置 truncated 标记。
     SCENE_FS_LIST_LIMIT: int = 500
+
+    # ---------- 目录收藏（目录选择弹窗） ----------
+    # /fs 是跨功能的公共基础设施，不放镜头分割段。收藏清单落在素材根的
+    # .directory-favorites.json，全局一份（不区分页面/用途）。
+    FS_MAX_FAVORITES: int = 50
 
     # ---------- 智能混剪 ----------
     # 素材目录由用户在页面上自己添加（不限定在 materials/ 里），
@@ -224,6 +229,7 @@ class Settings(BaseSettings):
     CRAWL_MAX_CONCURRENCY_LIMIT: int = 3
     # MC 环境探测结果的缓存秒数（探测要起子进程 + 扫目录，不能每请求都做）。
     CRAWL_ENV_CACHE_SECONDS: float = 30.0
+
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

@@ -8,6 +8,8 @@
 
 import pytest
 
+from pathlib import Path
+
 from app.models.scene_job import SceneJob, SceneJobItemStatus, SceneJobStatus
 
 
@@ -301,6 +303,86 @@ class TestCancelAndDelete:
         assert db_session.get(SceneJob, created["id"]) is None
 
 
+class TestRetryItem:
+    """重试单条失败视频：状态机边界与输出目录清理。"""
+
+    @staticmethod
+    def _finish_with_one_failure(db_session, job_id: int) -> None:
+        """把任务手工推到 partial：第一条成功、第二条失败，并留残留产物。"""
+        job = db_session.get(SceneJob, job_id)
+        first, second = job.items[0], job.items[1]
+        first.status = SceneJobItemStatus.SUCCESS
+        first.clip_count = 2
+        first.clip_names = ["a_clip_001.mp4", "a_clip_002.mp4"]
+        second.status = SceneJobItemStatus.FAILED
+        second.error_message = "输入文件不存在"
+        # 失败条目的输出目录里塞一个残留片段 + 旧日志，重试时应当被清掉
+        stale_dir = Path(second.output_dir)
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        (stale_dir / "b_clip_001.mp4").write_bytes(b"stale")
+        (stale_dir / "vct.log").write_text("old log", encoding="utf-8")
+        job.status = SceneJobStatus.PARTIAL
+        job.completed_videos = 2
+        job.failed_videos = 1
+        job.error_message = "第二条失败"
+        db_session.commit()
+
+    def test_retry_failed_item_requeues_job(self, client, video_dir, tmp_path, db_session):
+        """失败的条目重置回 pending、任务重新入队，成功条目与计数口径正确。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        self._finish_with_one_failure(db_session, created["id"])
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+
+        assert data["status"] == "pending"
+        assert data["error_message"] == ""
+        # completed 只数成功的（重试的那条回到未完成）
+        assert data["completed_videos"] == 1
+        assert data["failed_videos"] == 0
+        items = {item["index"]: item for item in data["items"]}
+        assert items[1]["status"] == "success"  # 成功条目原样保留
+        assert items[2]["status"] == "pending"
+        assert items[2]["error_message"] == ""
+        assert items[2]["clip_count"] == 0
+
+        # 残留产物被清掉：进度与结果统计靠目录里的文件，不清就会污染重跑
+        stale_dir = Path(items[2]["output_dir"])
+        assert list(stale_dir.iterdir()) == []
+
+    def test_retry_rejects_non_failed_item(self, client, video_dir, tmp_path, db_session):
+        """成功条目不可重试。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        self._finish_with_one_failure(db_session, created["id"])
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/1/retry")
+        assert response.status_code == 409, response.text
+
+    def test_retry_rejects_running_job(self, client, video_dir, tmp_path, db_session):
+        """任务没结束（running）时不可重试。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        job = db_session.get(SceneJob, created["id"])
+        job.status = SceneJobStatus.RUNNING
+        job.items[1].status = SceneJobItemStatus.FAILED
+        db_session.commit()
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/2/retry")
+        assert response.status_code == 409, response.text
+
+    def test_retry_unknown_item_404(self, client, video_dir, tmp_path, db_session):
+        """条目序号越界 → 404。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        self._finish_with_one_failure(db_session, created["id"])
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/99/retry")
+        assert response.status_code == 404, response.text
+
+
 class TestTemplatesAndEnvironment:
     """模板与环境自检接口。"""
 
@@ -514,3 +596,130 @@ class TestClipVideo:
         assert response.status_code == 200, response.text
         clips = response.json()["data"]
         assert clips[0]["video_url"].endswith("/clips/1/video")
+
+
+class TestBatchDelete:
+    """批量删除：整批成功或整批失败（POST /jobs/batch-delete）。"""
+
+    def _create_terminal(self, client, video_dir, tmp_path, tag) -> int:
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / f"输出{tag}")
+        client.post(f"/api/v1/scene/jobs/{created['id']}/cancel")
+        return created["id"]
+
+    def test_batch_delete_success(self, client, video_dir, tmp_path, db_session):
+        ids = [self._create_terminal(client, video_dir, tmp_path, tag) for tag in "abc"]
+
+        response = client.post("/api/v1/scene/jobs/batch-delete", json={"ids": ids})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"] == {"ids": ids, "count": 3}
+        for job_id in ids:
+            assert db_session.get(SceneJob, job_id) is None
+
+    def test_batch_delete_non_terminal_conflict_rolls_back(
+        self, client, video_dir, tmp_path, db_session
+    ):
+        """批里混着一条未结束的：整批 409，已勾选的终态任务一条也不能被删。"""
+        ids = [self._create_terminal(client, video_dir, tmp_path, tag) for tag in "ab"]
+        source, _ = video_dir
+        pending = _create_split_job(client, source, tmp_path / "输出c")["id"]
+
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete", json={"ids": [*ids, pending]}
+        )
+        assert response.status_code == 409, response.text
+        assert f"#{pending}" in response.json()["error"]["message"]
+        for job_id in [*ids, pending]:
+            assert db_session.get(SceneJob, job_id) is not None
+
+    def test_batch_delete_missing_id_rolls_back(
+        self, client, video_dir, tmp_path, db_session
+    ):
+        job_id = self._create_terminal(client, video_dir, tmp_path, "a")
+
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete", json={"ids": [job_id, 99999]}
+        )
+        assert response.status_code == 404, response.text
+        assert db_session.get(SceneJob, job_id) is not None
+
+    def test_batch_delete_empty_ids_422(self, client):
+        response = client.post("/api/v1/scene/jobs/batch-delete", json={"ids": []})
+        assert response.status_code == 422, response.text
+
+    def test_batch_delete_over_limit_422(self, client):
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete", json={"ids": list(range(1, 102))}
+        )
+        assert response.status_code == 422, response.text
+
+    def test_batch_delete_dedupes_ids(self, client, video_dir, tmp_path):
+        ids = [self._create_terminal(client, video_dir, tmp_path, tag) for tag in "ab"]
+
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete", json={"ids": [ids[0], ids[0], ids[1]]}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"] == {"ids": ids, "count": 2}
+
+
+class TestDeletePurge:
+    """删除任务时可选连产物一起清（purge_files）。"""
+
+    def _terminal_with_products(self, client, video_dir, tmp_path, tag) -> tuple[int, list[Path]]:
+        """造一条终态任务，并在每条视频的输出目录里放一个假片段。
+
+        Returns:
+            (任务 ID, 产物目录清单)
+        """
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / f"输出{tag}")
+        dirs = []
+        for item in created["items"]:
+            out_dir = Path(item["output_dir"])
+            (out_dir / "口播A_scene-1_clip_001.mp4").write_bytes(b"fake-clip")
+            dirs.append(out_dir)
+        client.post(f"/api/v1/scene/jobs/{created['id']}/cancel")
+        return created["id"], dirs
+
+    def test_delete_without_purge_keeps_products(self, client, video_dir, tmp_path):
+        """默认只删记录：磁盘上的片段文件原样保留。"""
+        job_id, dirs = self._terminal_with_products(client, video_dir, tmp_path, "a")
+
+        response = client.delete(f"/api/v1/scene/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        for out_dir in dirs:
+            assert list(out_dir.glob("*_clip_*.mp4")), f"产物被误删：{out_dir}"
+
+    def test_delete_with_purge_removes_products(self, client, video_dir, tmp_path):
+        """purge_files=true：输出目录整棵删掉。"""
+        job_id, dirs = self._terminal_with_products(client, video_dir, tmp_path, "b")
+
+        response = client.delete(f"/api/v1/scene/jobs/{job_id}?purge_files=true")
+        assert response.status_code == 200, response.text
+        for out_dir in dirs:
+            assert not out_dir.exists(), f"产物目录没清掉：{out_dir}"
+
+    def test_batch_delete_with_purge_removes_products(self, client, video_dir, tmp_path):
+        """批量删除同样吃 purge_files：两条任务的产物都要清掉。"""
+        first_id, first_dirs = self._terminal_with_products(client, video_dir, tmp_path, "c")
+        second_id, second_dirs = self._terminal_with_products(client, video_dir, tmp_path, "d")
+
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete",
+            json={"ids": [first_id, second_id], "purge_files": True},
+        )
+        assert response.status_code == 200, response.text
+        for out_dir in [*first_dirs, *second_dirs]:
+            assert not out_dir.exists(), f"产物目录没清掉：{out_dir}"
+
+    def test_batch_delete_without_purge_keeps_products(self, client, video_dir, tmp_path):
+        """批量删除不勾选时，产物一条都不许动。"""
+        job_id, dirs = self._terminal_with_products(client, video_dir, tmp_path, "e")
+
+        response = client.post(
+            "/api/v1/scene/jobs/batch-delete", json={"ids": [job_id]}
+        )
+        assert response.status_code == 200, response.text
+        for out_dir in dirs:
+            assert out_dir.is_dir(), f"产物被误删：{out_dir}"

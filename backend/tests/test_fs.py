@@ -78,10 +78,12 @@ def test_default_path_is_materials_dir(client, tmp_path, monkeypatch):
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["path"] == str(materials)
-    # 列默认目录时会顺路把五个分段补齐，所以根下既有素材也有分段目录（目录在前）
+    # 列默认目录时会顺路把七个分段补齐，所以根下既有素材也有分段目录（目录在前）
     assert [entry["name"] for entry in data["entries"]] == [
         "clips",
         "crawl",
+        "dubbing",
+        "finalcut",
         "output",
         "source",
         "subtitle",
@@ -99,7 +101,7 @@ def test_default_materials_dir_created_when_missing(client, tmp_path, monkeypatc
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert materials.is_dir()
-    # 建出来的是完整的四段骨架，不是一个光秃秃的空目录
+    # 建出来的是完整的分段骨架，不是一个光秃秃的空目录
     assert sorted(entry["name"] for entry in data["entries"]) == sorted(SUBDIRS)
     assert all(entry["is_dir"] for entry in data["entries"])
 
@@ -124,3 +126,137 @@ def test_ensure_materials_dir_falls_back_to_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "mkdir", _boom)
     assert ensure_materials_layout() == Path.home()
+
+
+# --------------------------------------------------------------------------
+# 目录收藏
+# --------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from app.services.fs_favorites import FAVORITES_FILENAME  # noqa: E402
+
+
+@pytest.fixture()
+def isolated_materials(tmp_path, monkeypatch):
+    """收藏文件落在素材根：指到临时目录，别碰真实 materials/。"""
+    monkeypatch.setattr(settings, "SCENE_MATERIALS_DIR", str(tmp_path / "materials"))
+    return tmp_path / "materials"
+
+
+def test_favorites_empty_on_first_run(client, isolated_materials):
+    """首次打开：收藏为空，且不落盘（打开弹窗看一眼不该留文件）。"""
+    response = client.get("/api/v1/fs/favorites")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == []
+    assert not (isolated_materials / FAVORITES_FILENAME).exists()
+
+
+def test_add_and_list_favorite(client, isolated_materials, tmp_path):
+    """收藏 → 列表里出现；路径是 resolve 后的绝对路径，字段齐全。"""
+    target = tmp_path / "常用素材"
+    target.mkdir()
+
+    response = client.post("/api/v1/fs/favorites", json={"path": str(target)})
+    assert response.status_code == 201, response.text
+    item = response.json()["data"]
+    assert item["path"] == str(target.resolve())
+    assert item["name"] == "常用素材"
+    assert item["exists"] is True
+    assert item["added_at"] > 0
+    assert len(item["id"]) == 16
+
+    listing = client.get("/api/v1/fs/favorites")
+    assert [f["id"] for f in listing.json()["data"]] == [item["id"]]
+
+
+def test_add_favorite_is_idempotent(client, isolated_materials, tmp_path):
+    """重复收藏同一个目录（含 .. 的不同写法）不产生第二条。"""
+    target = tmp_path / "常用素材"
+    target.mkdir()
+
+    first = client.post("/api/v1/fs/favorites", json={"path": str(target)}).json()["data"]
+    second = client.post(
+        "/api/v1/fs/favorites", json={"path": str(target / ".." / target.name)}
+    ).json()["data"]
+    assert second["id"] == first["id"]
+    assert len(client.get("/api/v1/fs/favorites").json()["data"]) == 1
+
+
+def test_add_favorite_rejects_relative_path(client, isolated_materials):
+    response = client.post("/api/v1/fs/favorites", json={"path": "relative/path"})
+    assert response.status_code == 400, response.text
+    assert "绝对路径" in response.json()["error"]["message"]
+
+
+def test_add_favorite_rejects_missing_and_file(client, isolated_materials, tmp_path):
+    """不存在 → 400；指向文件 → 400。"""
+    response = client.post("/api/v1/fs/favorites", json={"path": str(tmp_path / "没有")})
+    assert response.status_code == 400, response.text
+    assert "不存在" in response.json()["error"]["message"]
+
+    file = tmp_path / "文件.mp4"
+    file.write_bytes(b"v")
+    response = client.post("/api/v1/fs/favorites", json={"path": str(file)})
+    assert response.status_code == 400, response.text
+    assert "不是一个目录" in response.json()["error"]["message"]
+
+
+def test_add_favorite_rejects_empty_path(client, isolated_materials):
+    """空串被 schema 的 min_length 拦在 422。"""
+    response = client.post("/api/v1/fs/favorites", json={"path": ""})
+    assert response.status_code == 422, response.text
+
+
+def test_delete_favorite(client, isolated_materials, tmp_path):
+    """取消收藏 → 列表清空；未知 id → 404。"""
+    target = tmp_path / "常用素材"
+    target.mkdir()
+    item = client.post("/api/v1/fs/favorites", json={"path": str(target)}).json()["data"]
+
+    response = client.delete(f"/api/v1/fs/favorites/{item['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == {"id": item["id"]}
+    assert client.get("/api/v1/fs/favorites").json()["data"] == []
+
+    response = client.delete(f"/api/v1/fs/favorites/{item['id']}")
+    assert response.status_code == 404, response.text
+
+
+def test_delete_favorite_keeps_directory(client, isolated_materials, tmp_path):
+    """取消收藏不动磁盘：目录与其内容原样保留。"""
+    target = tmp_path / "常用素材"
+    target.mkdir()
+    (target / "视频.mp4").write_bytes(b"v")
+    item = client.post("/api/v1/fs/favorites", json={"path": str(target)}).json()["data"]
+
+    client.delete(f"/api/v1/fs/favorites/{item['id']}")
+    assert (target / "视频.mp4").exists()
+
+
+def test_favorites_do_not_affect_listing(client, isolated_materials, tmp_path):
+    """收藏行为不影响列目录（回归）。"""
+    target = tmp_path / "常用素材"
+    target.mkdir()
+    (target / "子目录").mkdir()
+    client.post("/api/v1/fs/favorites", json={"path": str(target)})
+
+    response = client.get("/api/v1/fs/list", params={"path": str(target)})
+    assert response.status_code == 200, response.text
+    assert [e["name"] for e in response.json()["data"]["entries"]] == ["子目录"]
+
+
+def test_list_returns_canonical_path(client, tmp_path):
+    """/fs/list 返回 canonical_path（resolve 后），path 保持用户写法。
+
+    两侧都用 resolve 计算，macOS 上 /tmp 是符号链接也能过。
+    """
+    inner = tmp_path / "内层"
+    inner.mkdir()
+    messy = str(tmp_path / "内层" / ".." / "内层")
+
+    response = client.get("/api/v1/fs/list", params={"path": messy})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["canonical_path"] == str(inner.resolve())
+    assert data["path"] == messy

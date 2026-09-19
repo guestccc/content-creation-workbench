@@ -7,7 +7,6 @@
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ import pytest
 
 from app.core.config import settings
 from app.services import subtitle_env
+from app.services.media_tools import ProbedOutput, decode_output
 from app.services.subtitle_env import (
     VcInstall,
     detect,
@@ -233,13 +233,20 @@ class TestProbe:
     """单次探测：命令形态、解析、各种失败都不抛异常。"""
 
     def _patch_run(self, monkeypatch, recorder, *, returncode=0, stdout=""):
+        """把替身接在 run_probe 上（而不是 subprocess.run）。
+
+        探测子进程的字节解码由 media_tools.run_probe 负责，是**共用**的一层，
+        替身若抢在它下面，就绕过了真正要验的解码。这里替身和真实实现一样交回
+        已解码的文本 —— 用同一个 decode_output，GBK 那两条用例才有意义。
+        """
         def fake_run(argv, **kwargs):
             recorder.append(argv)
-            # 探测按字节捕获（不 text=True），替身也交 bytes
             raw = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
-            return SimpleNamespace(returncode=returncode, stdout=raw)
+            return ProbedOutput(
+                returncode=returncode, stdout=decode_output(raw), stderr=""
+            )
 
-        monkeypatch.setattr(subtitle_env.subprocess, "run", fake_run)
+        monkeypatch.setattr(subtitle_env, "run_probe", fake_run)
 
     def test_module_form_probes_interpreter_with_dash_c(self, monkeypatch):
         """[python, -m, videocaptioner] 形态：探测问的是解释器（-c 小脚本）。"""
@@ -274,18 +281,13 @@ class TestProbe:
         self._patch_run(monkeypatch, calls, returncode=3, stdout="")
         assert subtitle_env._probe(["/py", "-m", "videocaptioner"]) is None
 
-    def test_oserror_returns_none(self, monkeypatch):
-        def fake_run(argv, **kwargs):
-            raise OSError("没有那个文件")
+    def test_probe_layer_failure_degrades_to_none(self, monkeypatch):
+        """起不来 / 超时 / 解码不了都在 run_probe 那层降级成 None，探测跟着返回 None。
 
-        monkeypatch.setattr(subtitle_env.subprocess, "run", fake_run)
-        assert subtitle_env._probe(["/py", "-m", "videocaptioner"]) is None
-
-    def test_timeout_returns_none(self, monkeypatch):
-        def fake_run(argv, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
-
-        monkeypatch.setattr(subtitle_env.subprocess, "run", fake_run)
+        真实的那几种失败（不存在的可执行文件、超时）在 test_media_tools 里
+        直接对着 run_probe 测，这里钉的是「上层见到 None 不会炸」。
+        """
+        monkeypatch.setattr(subtitle_env, "run_probe", lambda argv, **kwargs: None)
         assert subtitle_env._probe(["/py", "-m", "videocaptioner"]) is None
 
     def test_unparseable_output_returns_none(self, monkeypatch):

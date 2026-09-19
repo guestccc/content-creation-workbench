@@ -1,12 +1,22 @@
-"""本地文件系统浏览接口。
+"""本地文件系统浏览与目录收藏接口。
 
 存在的理由：浏览器拿不到本地绝对路径（<input type="file"> 只给文件名），
 所以「选输入/输出目录」必须由后端列目录。
 
+接口一览：
+
+- ``GET    /fs/list``                        列目录
+- ``GET    /fs/favorites``                   收藏的目录
+- ``POST   /fs/favorites``                   收藏目录（幂等）
+- ``DELETE /fs/favorites/{favorite_id}``     取消收藏
+
+静态路径要写在动态路径之前（``/favorites`` 在 ``/favorites/{favorite_id}`` 前面）。
+
 安全边界（按需求有意放开根目录限制后，仍保留的底线）：
 - 只读：只返回名称/类型/大小，绝不返回任何文件内容；
 - 路径必须真实存在且是目录，否则 400；
-- 单次最多返回 SCENE_FS_LIST_LIMIT 条，超出截断并置 truncated 标记。
+- 单次最多返回 SCENE_FS_LIST_LIMIT 条，超出截断并置 truncated 标记；
+- 收藏只登记路径，不读取、不移动、不复制任何文件；取消收藏不动磁盘。
 
 ⚠️ 若日后把 HOST 改成 0.0.0.0 暴露到局域网，本接口必须先加鉴权
 或恢复根目录白名单 —— 现在它依赖「仅监听 127.0.0.1 的单机工具」这个前提。
@@ -16,13 +26,15 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Query
+from fastapi import Path as PathParam
 
 from app.core.config import settings
-from app.core.materials import ensure_materials_layout
-from app.core.exceptions import BadRequestError
+from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.logging import get_logger
+from app.core.materials import ensure_materials_layout
 from app.schemas.common import ApiResponse
-from app.schemas.scene_job import FsEntry, FsListData
+from app.schemas.scene_job import FsEntry, FsFavoriteCreate, FsFavoriteItem, FsListData
+from app.services import fs_favorites
 from app.services.scene_job_service import is_video_file
 
 router = APIRouter(prefix="/fs", tags=["文件系统"])
@@ -35,7 +47,8 @@ def _resolve_target(path: Optional[str]) -> Path:
     显式传入的路径原样用（支持 ~ 开头）；不传则落到**素材目录**。
 
     不传 path 时列的是素材目录**根**（列出来就是 source / clips / subtitle /
-    output 四个分段，一眼能看出素材该怎么放）。整个 materials/ 不在 git 里，
+    output / crawl / finalcut / dubbing 几个分段，一眼能看出素材该怎么放）。
+    整个 materials/ 不在 git 里，
     新克隆的仓库上压根不存在，所以这里顺手把骨架建出来 —— 对着一个
     「路径不存在」的 400 只会让第一次用的人摸不着头脑。
     显式传进来的路径不做任何创建，保持「路径必须真实存在」的严格语义。
@@ -98,12 +111,60 @@ def list_directory(
 
     parent = str(target.parent) if target.parent != target else None
 
+    try:
+        # 收藏夹按 resolve 后的路径判重，前端判断「当前目录已收藏」要用它；
+        # path 本身保留用户写法不动（junction/符号链接折叠会改变已保存路径的含义）
+        canonical = str(target.resolve())
+    except OSError:
+        # 解析失败（网络盘掉线等）不阻断列目录：退回原样路径
+        canonical = str(target)
+
     return ApiResponse(
         data=FsListData(
             path=str(target),
+            canonical_path=canonical,
             parent=parent,
             entries=entries,
             truncated=truncated,
             video_count=video_count,
         )
     )
+
+
+# 静态路径写在动态路径之前（/favorites 先于 /favorites/{favorite_id}）
+
+
+@router.get("/favorites", response_model=ApiResponse[list[FsFavoriteItem]], summary="收藏的目录")
+def list_favorites() -> ApiResponse[list[FsFavoriteItem]]:
+    """目录选择弹窗左侧的收藏列表（按收藏顺序）。"""
+    return ApiResponse(data=fs_favorites.list_favorites())
+
+
+@router.post(
+    "/favorites",
+    response_model=ApiResponse[FsFavoriteItem],
+    status_code=201,
+    summary="收藏目录",
+)
+def create_favorite(payload: FsFavoriteCreate) -> ApiResponse[FsFavoriteItem]:
+    """把目录加进收藏夹；重复收藏同一个目录是幂等的（返回已有条目）。
+
+    Raises:
+        BadRequestError(400): 路径为空/非绝对/不存在/不是目录/数量超限/写盘失败。
+    """
+    item, _created = fs_favorites.add_favorite(payload.path)
+    return ApiResponse(data=item)
+
+
+@router.delete("/favorites/{favorite_id}", response_model=ApiResponse[dict], summary="取消收藏")
+def delete_favorite(
+    favorite_id: str = PathParam(..., description="收藏 id"),
+) -> ApiResponse[dict]:
+    """取消收藏 —— **磁盘上的目录一个都不动**。
+
+    Raises:
+        NotFoundError(404): id 不存在；BadRequestError(400): 写盘失败。
+    """
+    if not fs_favorites.remove_favorite(favorite_id):
+        raise NotFoundError(f"收藏不存在：{favorite_id}")
+    return ApiResponse(data={"id": favorite_id})

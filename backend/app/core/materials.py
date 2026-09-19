@@ -2,7 +2,7 @@
 
 `materials/` 里的东西一律不入 git（见根目录 `.gitignore`）：原片动辄几百 MB
 到几 GB，切分产物更是成倍增长，提交上去会让仓库没法用。但**目录骨架入库** ——
-四个分段各带一个 `.gitkeep` 占位，新克隆下来就是规划好的样子。后端启动时再按
+每个分段各带一个 `.gitkeep` 占位，新克隆下来就是规划好的样子。后端启动时再按
 这里的定义补建一遍（`ensure_materials_layout()`）：有人删了目录、或者把
 `SCENE_MATERIALS_DIR` 指到别处，都不会退化成「啥都往根上堆」的一层。
 
@@ -13,7 +13,9 @@
     ├── clips/      镜头分割产物：每条原片一个 <视频名>_scenes/ 子目录（默认输出目录）
     ├── subtitle/   字幕提取产物：每条视频一个 <视频名>.srt（字幕提取页的默认输出目录）
     ├── output/     成片，待发布
-    └── crawl/      素材抓取产物：每个任务一个 job_<id>/ 子目录（jsonl + 媒体文件）
+    ├── crawl/      素材抓取产物：每个任务一个 job_<id>/ 子目录（jsonl + 媒体文件）
+    ├── finalcut/   一键成品产物：每个合成任务一个 finalcut-<时间戳>/ 子目录
+    └── dubbing/    智能配音产物：每次生成一份 <名字>.wav（配音页的默认输出目录）
 
 根目录本身不鼓励放东西：原片进 source/，产物进各自的分段目录，
 这样「哪些是素材、哪些是产物」一眼可辨，也不会几百个文件糊在一层。
@@ -36,6 +38,8 @@ CLIPS = "clips"
 SUBTITLE = "subtitle"
 OUTPUT = "output"
 CRAWL = "crawl"
+FINALCUT = "finalcut"
+DUBBING = "dubbing"
 
 #: 子目录 → 用途说明。顺序即建目录的顺序，也是日志与文档里的顺序。
 SUBDIRS: Dict[str, str] = {
@@ -44,6 +48,8 @@ SUBDIRS: Dict[str, str] = {
     SUBTITLE: "字幕提取产物：每条视频一个 <视频名>.srt",
     OUTPUT: "成片，待发布",
     CRAWL: "素材抓取产物：每个任务一个 job_<id>/ 子目录（MC 的 --save_data_path）",
+    FINALCUT: "一键成品产物：每个合成任务一个 finalcut-<时间戳>/ 子目录",
+    DUBBING: "智能配音产物：每次生成一份 <名字>.wav（Voicebox 的外部产物落到这里）",
 }
 
 
@@ -70,7 +76,7 @@ def subdir(name: str) -> Path:
 
 
 def ensure_materials_layout() -> Path:
-    """建好素材目录骨架（根目录 + 四个分段），返回可用的根路径。
+    """建好素材目录骨架（根目录 + 七个分段），返回可用的根路径。
 
     应用启动与列目录接口都走这个函数，保证新克隆的仓库一打开就是规划好的样子。
 

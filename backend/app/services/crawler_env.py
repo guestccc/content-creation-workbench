@@ -21,7 +21,6 @@ browser_data 扫目录一次 —— 都不算贵但也没必要每请求都做�
 
 import os
 import re
-import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,7 +32,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.materials import CRAWL, subdir
 from app.models.crawl_job import CrawlPlatform
-from app.services.media_tools import child_env, find_tool
+from app.services.media_tools import find_tool, run_probe
 
 logger = get_logger(__name__)
 
@@ -90,20 +89,15 @@ def _probe_python(launcher: List[str]) -> Optional[str]:
     `--version` 会被传给 python 而不是 uv，两种形态可以用同一套探测。
     """
     argv = list(launcher) + ["--version"]
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
-            cwd=str(Path(settings.CRAWL_MC_ROOT).expanduser())
-            if Path(settings.CRAWL_MC_ROOT).expanduser().is_dir()
-            else None,
-            env=child_env(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.debug("探测 MediaCrawler 解释器失败 | %s | %s", launcher, exc)
+    result = run_probe(
+        argv,
+        timeout=PROBE_TIMEOUT_SECONDS,
+        cwd=str(Path(settings.CRAWL_MC_ROOT).expanduser())
+        if Path(settings.CRAWL_MC_ROOT).expanduser().is_dir()
+        else None,
+    )
+    if result is None:
+        logger.debug("探测 MediaCrawler 解释器失败 | %s", launcher)
         return None
 
     if result.returncode != 0:
@@ -248,18 +242,10 @@ def _detect_node() -> str:
     node = find_tool("node")
     if not node:
         return ""
-    try:
-        result = subprocess.run(
-            [node, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
-            env=child_env(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if result.returncode != 0:
+    # 按字节捕获再自己解码：node 的输出通常干净，但探测绝不能因为代码页
+    # 不一致就崩（同一坑在 media_tools.decode_output 里写清楚了）
+    result = run_probe([node, "--version"], timeout=PROBE_TIMEOUT_SECONDS)
+    if result is None or result.returncode != 0:
         return ""
     # `v18.20.4` —— 去掉 v 前缀
     return result.stdout.strip().lstrip("v")
