@@ -40,11 +40,32 @@ from app.models.crawl_job import (
 from app.schemas.crawl_job import CrawlJobCreate
 from app.services import crawl_results
 from app.services.crawler_env import probe_environment
+from app.services.fs_cleanup import remove_paths_best_effort
 
 logger = get_logger(__name__)
 
 #: runner 侧的日志文件名（路径在创建任务时就定死，收尾读它做失败摘要）。
 MC_LOG_NAME = "mc.log"
+
+
+def _product_paths(job: CrawlJob) -> List[Path]:
+    """列出一条任务的产物路径（只从任务记录推导，不接受外部路径）。
+
+    输出目录是 subdir(CRAWL)/job_<id>，任务独占、jsonl/媒体文件/mc.log
+    全在里面，整棵删。
+    """
+    return [Path(job.output_dir)]
+
+
+def _purge_products(products: List[Path], *, job_ids: List[int]) -> None:
+    """best-effort 清产物：有失败的记一条汇总日志，不向上抛。"""
+    if not products:
+        return
+    failed = remove_paths_best_effort(products)
+    if failed:
+        logger.warning(
+            "任务产物清理有残留 | jobs=%s | 失败=%s 个路径", job_ids, len(failed)
+        )
 
 
 def estimate_expected_count(crawler_type: str, params: dict) -> int:
@@ -187,8 +208,10 @@ class CrawlJobService:
             "get_comments": payload.get_comments,
             "get_sub_comments": payload.get_sub_comments,
             "max_comments": payload.max_comments,
-            # 扫码登录必须有界面，headless 在这时没有意义还容易造成「卡住」错觉
-            "headless": False if payload.login_type == CrawlLoginType.QRCODE else payload.headless,
+            # 无头与扫码登录并不冲突：MC 扫码时把页面二维码抓出来用系统看图软件
+            # 弹出来（tools/crawler_util.show_qrcode），不依赖浏览器窗口。
+            # 真正的风险是滑块/风控验证需要可见窗口 —— 那是用户的可选项，不硬压。
+            "headless": payload.headless,
             "max_concurrency": min(
                 payload.max_concurrency, settings.CRAWL_MAX_CONCURRENCY_LIMIT
             ),
@@ -259,11 +282,14 @@ class CrawlJobService:
             logger.exception("取消抓取任务失败 | id=%s", job_id)
             raise DatabaseError("取消抓取任务失败") from exc
 
-    def delete_job(self, job_id: int) -> None:
+    def delete_job(self, job_id: int, *, purge_files: bool = False) -> None:
         """删除任务记录。
 
-        仅允许删除终态任务；输出目录里的 jsonl 与媒体文件保留 ——
-        那是用户的产物（图文二创的素材就来自这里），删记录不删文件。
+        仅允许删除终态任务。默认只删记录，输出目录里的 jsonl 与媒体文件
+        保留 —— 那是用户的产物（图文二创的素材就来自这里），删记录不删文件。
+        purge_files=True 时把任务输出目录整棵删掉（释放空间是用户明确勾选的
+        操作）。产物清理在记录提交之后 best-effort 执行，个别文件被占用不阻断
+        删除。
 
         Raises:
             NotFoundError: 任务不存在。
@@ -277,14 +303,51 @@ class CrawlJobService:
                 if job.status not in CrawlJobStatus.TERMINAL:
                     raise ConflictError(f"任务尚未结束（{job.status}），请先取消后再删除")
 
+                products = _product_paths(job) if purge_files else []
                 self.db.delete(job)
 
-            logger.info("素材抓取任务已删除 | id=%s", job_id)
+            logger.info("素材抓取任务已删除 | id=%s | 清产物=%s", job_id, purge_files)
         except (NotFoundError, ConflictError):
             raise
         except SQLAlchemyError as exc:
             logger.exception("删除抓取任务失败 | id=%s", job_id)
             raise DatabaseError("删除抓取任务失败") from exc
+
+        _purge_products(products, job_ids=[job_id])
+
+    def delete_jobs(self, job_ids: List[int], *, purge_files: bool = False) -> List[int]:
+        """批量删除任务记录：全部成功才提交，任何一个不可删则整批回滚。
+
+        与 delete_job 同一套边界：仅终态可删；purge_files=True 时输出目录
+        一并清掉。错误信息带出错位的任务 ID，前端能直接告诉用户卡在哪条。
+
+        Raises:
+            NotFoundError: 某个任务不存在（整批回滚）。
+            ConflictError: 某个任务尚未结束（整批回滚）。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                products: List[Path] = []
+                for job_id in job_ids:
+                    job = self._get_job_or_404(job_id)
+                    if job.status not in CrawlJobStatus.TERMINAL:
+                        raise ConflictError(
+                            f"任务 #{job_id} 尚未结束（{job.status}），请先取消后再删除"
+                        )
+                    if purge_files:
+                        products.extend(_product_paths(job))
+                    self.db.delete(job)
+
+            logger.info("素材抓取任务批量删除 | ids=%s | 清产物=%s", job_ids, purge_files)
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量删除抓取任务失败 | ids=%s", job_ids)
+            raise DatabaseError("批量删除任务失败") from exc
+
+        _purge_products(products, job_ids=job_ids)
+        return job_ids
 
     # ------------------------------------------------------------------
     # 产物
@@ -309,6 +372,16 @@ class CrawlJobService:
 
         job = self.get_job(job_id)
         return read_log_tail(Path(job.log_path), limit=limit)
+
+    def get_job_phase(self, job: CrawlJob) -> str:
+        """从日志尾部推断 running 任务的当前阶段（非 running 返回空串）。"""
+        if job.status != CrawlJobStatus.RUNNING:
+            return ""
+        from app.services.crawl_runner import detect_phase
+        from app.services.media_tools import read_log_tail
+
+        tail = read_log_tail(Path(job.log_path), limit=4000)
+        return detect_phase(tail, login_type=job.login_type, crawled_count=job.crawled_count)
 
     def resolve_media_path(self, job_id: int, relative: str) -> Path:
         """把前端请求的相对路径解析成任务输出目录内的文件绝对路径。

@@ -8,6 +8,8 @@
 import { Button, Popconfirm, Space, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnType } from 'antd/es/table'
 
+import type { UsePurgeFilesResult } from '../hooks'
+
 const { Text } = Typography
 
 /** 状态展示配置（三个域的 JOB_STATUS_META 形状一致，文案各自定义） */
@@ -92,13 +94,16 @@ export function jobActionsColumn<T extends JobRowIdent>({
   onCancel,
   onDelete,
   deleteDescription,
+  purge,
 }: {
   isTerminal: (job: T) => boolean
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
-  /** 删除确认框里的说明（各页面产物不同，说清「删的是什么、留的是什么」） */
+  /** 删除确认框里的说明（各页面产物不同，一句话说清删的是什么） */
   deleteDescription: string
+  /** 「连同磁盘产物一起删」的勾选状态（页面的 usePurgeFiles()） */
+  purge: UsePurgeFilesResult
 }): ColumnType<T> {
   return {
     title: '操作',
@@ -116,10 +121,21 @@ export function jobActionsColumn<T extends JobRowIdent>({
         ) : (
           <Popconfirm
             title="删除这条任务记录？"
-            description={deleteDescription}
+            description={
+              <div>
+                <div>{deleteDescription}</div>
+                {purge.checkbox}
+              </div>
+            }
             okText="删除"
             cancelText="取消"
             onConfirm={() => onDelete(record.id)}
+            // 打开即重置：「勾了又取消」的勾选不许残留到下一次确认
+            onOpenChange={(open) => {
+              if (open) {
+                purge.reset()
+              }
+            }}
           >
             <Button type="link" danger style={{ padding: 0 }}>
               删除

@@ -38,7 +38,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
+import type { ColumnsType, TableProps } from 'antd/es/table'
 
 import DirectoryPicker from '../../components/DirectoryPicker'
 import HistoryCard from '../../components/HistoryCard'
@@ -57,11 +57,14 @@ import {
   useJobList,
   useJobPolling,
   useJobRunner,
+  usePurgeFiles,
   useSourceDir,
 } from '../../hooks'
+import type { UsePurgeFilesResult } from '../../hooks'
 import {
   cancelSubtitleJob,
   createSubtitleJob,
+  batchDeleteSubtitleJobs,
   deleteSubtitleJob,
   fetchSubtitleFiles,
   fetchSubtitleJob,
@@ -143,10 +146,15 @@ export default function SubtitleExtract() {
 
   const history = useJobList<SubtitleJob>({ fetchList: fetchSubtitleJobs })
 
+  // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
+  const purge = usePurgeFiles()
+
   const runner = useJobRunner<SubtitleJob, SubtitleJobPayload>({
     create: createSubtitleJob,
     cancel: cancelSubtitleJob,
-    remove: deleteSubtitleJob,
+    // take() 在这里调用：删除那一刻取值并重置，勾选只对这一次删除有效
+    remove: (jobId) => deleteSubtitleJob(jobId, purge.take()),
+    batchRemove: (ids) => batchDeleteSubtitleJobs(ids, purge.take()),
     fetchJob: fetchSubtitleJob,
     isTerminal: (job) => isTerminalStatus(job.status),
     fail,
@@ -226,11 +234,27 @@ export default function SubtitleExtract() {
     }
   }
 
-  /** 删除任务记录 */
+  /** 删除任务记录（是否连字幕文件一起删由确认框里的勾选决定） */
   const remove = async (jobId: number) => {
     if (await runner.remove(jobId)) {
-      message.success('已删除任务记录（磁盘上的字幕文件保留）')
+      message.success('已删除任务记录')
     }
+  }
+
+  /** 批量删除历史记录（整批成功或整批失败） */
+  const batchRemove = async () => {
+    const ids = history.selectedRowKeys
+    if (await runner.removeMany(ids)) {
+      message.success(`已删除 ${ids.length} 条任务记录`)
+      history.clearSelection()
+    }
+  }
+
+  /** 历史表行多选：只终态任务可选（运行中的任务禁止勾选） */
+  const historyRowSelection: TableProps<SubtitleJob>['rowSelection'] = {
+    selectedRowKeys: history.selectedRowKeys,
+    onChange: (keys) => history.setSelectedRowKeys(keys.map(Number)),
+    getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
   /** 打开字幕预览 */
@@ -625,10 +649,35 @@ export default function SubtitleExtract() {
           onView: (id) => void openJobDetail(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
+        rowSelection={historyRowSelection}
+        extra={
+          <Popconfirm
+            title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
+            description={
+              <div>
+                <div>删除后不可恢复。</div>
+                {purge.checkbox}
+              </div>
+            }
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => void batchRemove()}
+            onOpenChange={(open) => {
+              if (open) {
+                purge.reset()
+              }
+            }}
+          >
+            <Button danger disabled={history.selectedRowKeys.length === 0}>
+              批量删除{history.selectedRowKeys.length > 0 ? ` (${history.selectedRowKeys.length})` : ''}
+            </Button>
+          </Popconfirm>
+        }
       />
 
       {/* ---------- 历史任务详情：这条任务转了哪些视频 ---------- */}
@@ -884,6 +933,7 @@ function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  purge: UsePurgeFilesResult
 }): ColumnsType<SubtitleJob> {
   return [
     jobIdColumn<SubtitleJob>(),
@@ -897,7 +947,8 @@ function historyColumns(handlers: {
       onView: handlers.onView,
       onCancel: handlers.onCancel,
       onDelete: handlers.onDelete,
-      deleteDescription: '只删记录，已生成的字幕文件会保留在磁盘上。',
+      deleteDescription: '删除后不可恢复。',
+      purge: handlers.purge,
     }),
   ]
 }

@@ -60,7 +60,23 @@ export function cancelSceneJob(jobId: number): Promise<SceneJob> {
   return post<SceneJob>(`/scene/jobs/${jobId}/cancel`)
 }
 
-/** 删除任务记录（磁盘上已切出的片段文件保留） */
-export function deleteSceneJob(jobId: number): Promise<{ id: number }> {
-  return del<{ id: number }>(`/scene/jobs/${jobId}`)
+/** 重试单条失败的视频：条目重置回 pending，任务重新入队（其余条目结果不动） */
+export function retrySceneItem(jobId: number, itemIndex: number): Promise<SceneJob> {
+  return post<SceneJob>(`/scene/jobs/${jobId}/items/${itemIndex}/retry`)
+}
+
+/** 删除任务记录；purgeFiles=true 时连同磁盘上的切片产物一起删除 */
+export function deleteSceneJob(jobId: number, purgeFiles = false): Promise<{ id: number }> {
+  return del<{ id: number }>(`/scene/jobs/${jobId}`, { purge_files: purgeFiles })
+}
+
+/** 批量删除任务记录（整批成功或整批失败）；purgeFiles=true 时产物一并清掉 */
+export function batchDeleteSceneJobs(
+  ids: number[],
+  purgeFiles = false,
+): Promise<{ ids: number[]; count: number }> {
+  return post<{ ids: number[]; count: number }>('/scene/jobs/batch-delete', {
+    ids,
+    purge_files: purgeFiles,
+  })
 }

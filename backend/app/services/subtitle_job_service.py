@@ -33,6 +33,7 @@ from app.core.materials import SUBTITLE, subdir
 from app.core.subtitle_asr import resolve_engine
 from app.db.session import transaction
 from app.models.content import utcnow
+from app.services.fs_cleanup import remove_paths_best_effort
 from app.models.subtitle_job import (
     SubtitleJob,
     SubtitleJobItem,
@@ -110,6 +111,26 @@ def allocate_output_paths(
         allocation[video] = candidate
 
     return allocation
+
+
+def _product_paths(job: SubtitleJob) -> List[Path]:
+    """列出一条任务的产物路径（只从任务记录推导，不接受外部路径）。
+
+    各条目的字幕文件（.srt）。文件没产出的条目（失败/跳过）路径仍在记录里，
+    不存在时清理函数会静默跳过。
+    """
+    return [Path(item.output_path) for item in job.items if item.output_path]
+
+
+def _purge_products(products: List[Path], *, job_ids: List[int]) -> None:
+    """best-effort 清产物：有失败的记一条汇总日志，不向上抛。"""
+    if not products:
+        return
+    failed = remove_paths_best_effort(products)
+    if failed:
+        logger.warning(
+            "任务产物清理有残留 | jobs=%s | 失败=%s 个路径", job_ids, len(failed)
+        )
 
 
 class SubtitleJobService:
@@ -289,11 +310,12 @@ class SubtitleJobService:
             logger.exception("取消字幕提取任务失败 | id=%s", job_id)
             raise DatabaseError("取消字幕提取任务失败") from exc
 
-    def delete_job(self, job_id: int) -> None:
+    def delete_job(self, job_id: int, *, purge_files: bool = False) -> None:
         """删除任务记录（级联删除所有条目）。
 
-        仅允许删除终态任务；已经导出的 .srt 留在磁盘上不动 —— 那是用户的产物，
-        删记录不应该顺手删文件。
+        仅允许删除终态任务。默认只删记录；purge_files=True 时把各条目登记的
+        字幕文件一并删掉（释放空间是用户明确勾选的操作）。产物清理在记录
+        提交之后 best-effort 执行，个别文件被占用不阻断删除。
 
         Raises:
             NotFoundError: 任务不存在。
@@ -307,14 +329,51 @@ class SubtitleJobService:
                 if job.status not in SubtitleJobStatus.TERMINAL:
                     raise ConflictError(f"任务尚未结束（{job.status}），请先取消后再删除")
 
+                products = _product_paths(job) if purge_files else []
                 self.db.delete(job)
 
-            logger.info("字幕提取任务已删除 | id=%s", job_id)
+            logger.info("字幕提取任务已删除 | id=%s | 清产物=%s", job_id, purge_files)
         except (NotFoundError, ConflictError):
             raise
         except SQLAlchemyError as exc:
             logger.exception("删除字幕提取任务失败 | id=%s", job_id)
             raise DatabaseError("删除字幕提取任务失败") from exc
+
+        _purge_products(products, job_ids=[job_id])
+
+    def delete_jobs(self, job_ids: List[int], *, purge_files: bool = False) -> List[int]:
+        """批量删除任务记录：全部成功才提交，任何一个不可删则整批回滚。
+
+        与 delete_job 同一套边界：仅终态可删；purge_files=True 时产物一并清掉。
+        错误信息带出错位的任务 ID，前端能直接告诉用户卡在哪条。
+
+        Raises:
+            NotFoundError: 某个任务不存在（整批回滚）。
+            ConflictError: 某个任务尚未结束（整批回滚）。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                products: List[Path] = []
+                for job_id in job_ids:
+                    job = self._get_job_or_404(job_id)
+                    if job.status not in SubtitleJobStatus.TERMINAL:
+                        raise ConflictError(
+                            f"任务 #{job_id} 尚未结束（{job.status}），请先取消后再删除"
+                        )
+                    if purge_files:
+                        products.extend(_product_paths(job))
+                    self.db.delete(job)
+
+            logger.info("字幕提取任务批量删除 | ids=%s | 清产物=%s", job_ids, purge_files)
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量删除字幕提取任务失败 | ids=%s", job_ids)
+            raise DatabaseError("批量删除任务失败") from exc
+
+        _purge_products(products, job_ids=job_ids)
+        return job_ids
 
     # ------------------------------------------------------------------
     # 产物

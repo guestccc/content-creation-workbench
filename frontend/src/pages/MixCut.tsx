@@ -52,12 +52,13 @@ import {
   Tooltip,
   Typography,
 } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
+import type { ColumnsType, TableProps } from 'antd/es/table'
 
 import {
   addMixSource,
   cancelMixJob,
   createMixJob,
+  batchDeleteMixJobs,
   deleteMixJob,
   fetchMixEnvironment,
   fetchMixJob,
@@ -75,6 +76,7 @@ import {
   useDirectoryPicker,
   useJobList,
   useJobRunner,
+  usePurgeFiles,
 } from '../hooks'
 import {
   JOB_STATUS_META,
@@ -376,10 +378,15 @@ export default function MixCut() {
 
   const history = useJobList<MixJob>({ fetchList: fetchMixJobs })
 
+  // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
+  const purge = usePurgeFiles()
+
   const runner = useJobRunner<MixJob, MixJobPayload>({
     create: createMixJob,
     cancel: cancelMixJob,
-    remove: deleteMixJob,
+    // take() 在这里调用：删除那一刻取值并重置，勾选只对这一次删除有效
+    remove: (jobId) => deleteMixJob(jobId, purge.take()),
+    batchRemove: (ids) => batchDeleteMixJobs(ids, purge.take()),
     fetchJob: fetchMixJob,
     isTerminal: (job) => isTerminalStatus(job.status),
     fail,
@@ -561,10 +568,27 @@ export default function MixCut() {
     }
   }
 
+  /** 删除任务记录（是否连成片与输出目录一起删由确认框里的勾选决定） */
   const removeJob = async (jobId: number) => {
     if (await runner.remove(jobId)) {
-      message.success('记录已删除（成片文件保留在磁盘上）')
+      message.success('已删除任务记录')
     }
+  }
+
+  /** 批量删除历史记录（整批成功或整批失败） */
+  const batchRemoveJobs = async () => {
+    const ids = history.selectedRowKeys
+    if (await runner.removeMany(ids)) {
+      message.success(`已删除 ${ids.length} 条任务记录`)
+      history.clearSelection()
+    }
+  }
+
+  /** 历史表行多选：只终态任务可选（运行中的任务禁止勾选；翻页自动清空） */
+  const historyRowSelection: TableProps<MixJob>['rowSelection'] = {
+    selectedRowKeys: history.selectedRowKeys,
+    onChange: (keys) => history.setSelectedRowKeys(keys.map(Number)),
+    getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
   const openHistoryDetail = async (jobId: number) => {
@@ -1213,8 +1237,22 @@ export default function MixCut() {
           )}
           {isTerminalStatus(record.status) && (
             <Popconfirm
-              title="删除任务记录？成片文件会保留在磁盘上。"
+              title="删除这条任务记录？"
+              description={
+                <div>
+                  <div>删除后不可恢复。</div>
+                  {purge.checkbox}
+                </div>
+              }
+              okText="删除"
+              cancelText="取消"
               onConfirm={() => void removeJob(record.id)}
+              // 打开即重置：「勾了又取消」的勾选不许残留到下一次确认
+              onOpenChange={(open) => {
+                if (open) {
+                  purge.reset()
+                }
+              }}
             >
               <Button type="link" danger>
                 删除
@@ -1349,6 +1387,30 @@ export default function MixCut() {
           current: history.page,
           onChange: history.setPage,
         }}
+        rowSelection={historyRowSelection}
+        extra={
+          <Popconfirm
+            title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
+            description={
+              <div>
+                <div>删除后不可恢复。</div>
+                {purge.checkbox}
+              </div>
+            }
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => void batchRemoveJobs()}
+            onOpenChange={(open) => {
+              if (open) {
+                purge.reset()
+              }
+            }}
+          >
+            <Button danger disabled={history.selectedRowKeys.length === 0}>
+              批量删除{history.selectedRowKeys.length > 0 ? ` (${history.selectedRowKeys.length})` : ''}
+            </Button>
+          </Popconfirm>
+        }
       />
 
       {/* ---------- 选片弹窗（哪一段的素材、从哪个目录挑，都在这里面） ---------- */}

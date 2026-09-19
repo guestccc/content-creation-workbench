@@ -7,6 +7,8 @@ clip id 通过真实扫描临时素材库获得 —— 这样「不存在的 id 
 
 import pytest
 
+from pathlib import Path
+
 from app.core.config import settings
 
 
@@ -321,3 +323,73 @@ class TestJobLifecycle:
         job = self._create(client, materials)
         resp = client.get(f"/api/v1/mix/jobs/{job['id']}/outputs/1/video")
         assert resp.status_code == 404
+
+
+class TestBatchDelete:
+    """批量删除：整批成功或整批失败（POST /jobs/batch-delete）。"""
+
+    def _create(self, client, materials) -> dict:
+        ids = _library_ids(client)
+        resp = client.post("/api/v1/mix/jobs", json=_create_payload(ids, materials))
+        assert resp.status_code == 201
+        return resp.json()["data"]
+
+    def _create_terminal(self, client, materials) -> int:
+        job = self._create(client, materials)
+        client.post(f"/api/v1/mix/jobs/{job['id']}/cancel")
+        return job["id"]
+
+    def test_batch_delete_success(self, client, materials):
+        ids = [self._create_terminal(client, materials) for _ in range(2)]
+
+        response = client.post("/api/v1/mix/jobs/batch-delete", json={"ids": ids})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"] == {"ids": ids, "count": 2}
+        for job_id in ids:
+            assert client.get(f"/api/v1/mix/jobs/{job_id}").status_code == 404
+
+    def test_batch_delete_non_terminal_conflict_rolls_back(self, client, materials):
+        terminal_id = self._create_terminal(client, materials)
+        pending = self._create(client, materials)["id"]
+
+        response = client.post(
+            "/api/v1/mix/jobs/batch-delete", json={"ids": [terminal_id, pending]}
+        )
+        assert response.status_code == 409, response.text
+        assert client.get(f"/api/v1/mix/jobs/{terminal_id}").status_code == 200
+
+    def test_batch_delete_empty_ids_422(self, client):
+        response = client.post("/api/v1/mix/jobs/batch-delete", json={"ids": []})
+        assert response.status_code == 422, response.text
+
+
+class TestDeletePurge:
+    """删除任务时可选连产物一起清（purge_files）—— 混剪的产物是整个输出目录。"""
+
+    def _terminal_with_products(self, client, materials) -> tuple[int, Path]:
+        """造一条终态任务，并在输出目录里留下一条假成片。"""
+        ids = _library_ids(client)
+        resp = client.post("/api/v1/mix/jobs", json=_create_payload(ids, materials))
+        assert resp.status_code == 201, resp.text
+        job = resp.json()["data"]
+        out_dir = Path(job["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "mix-001.mp4").write_bytes(b"fake-output")
+        client.post(f"/api/v1/mix/jobs/{job['id']}/cancel")
+        return job["id"], out_dir
+
+    def test_delete_without_purge_keeps_products(self, client, materials):
+        """默认只删记录：成片文件原样保留。"""
+        job_id, out_dir = self._terminal_with_products(client, materials)
+
+        response = client.delete(f"/api/v1/mix/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        assert (out_dir / "mix-001.mp4").is_file()
+
+    def test_delete_with_purge_removes_products(self, client, materials):
+        """purge_files=true：输出目录整棵删掉。"""
+        job_id, out_dir = self._terminal_with_products(client, materials)
+
+        response = client.delete(f"/api/v1/mix/jobs/{job_id}?purge_files=true")
+        assert response.status_code == 200, response.text
+        assert not out_dir.exists(), f"输出目录没清掉：{out_dir}"

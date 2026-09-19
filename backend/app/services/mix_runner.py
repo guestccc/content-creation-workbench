@@ -42,10 +42,13 @@ from app.services.media_tools import (
     CHILD_CREATION_FLAGS,
     child_env,
     command_line,
+    dependency_status,
     find_tool,
     probe_duration,
     read_log_tail,
+    run_probe,
     terminate_process_group,
+    verify_tool,
 )
 
 logger = get_logger(__name__)
@@ -140,29 +143,36 @@ def probe_video_spec(video: Path) -> Optional[dict]:
     ffprobe = find_tool("ffprobe")
     if not ffprobe:
         return None
+    # 输出按字节捕获再自己解码（run_probe）：ffprobe 的 JSON 会原样回显素材
+    # 路径，中文 Windows 上传 text=True 会在读线程里 UnicodeDecodeError，
+    # stdout 变 None，整条任务以「读不出规格」收场。
+    result = run_probe(
+        [
+            ffprobe, "-v", "error",
+            "-show_streams", "-show_format",
+            "-of", "json",
+            str(video),
+        ]
+    )
+    if result is None:
+        return None
     try:
-        result = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-show_streams", "-show_format",
-                "-of", "json",
-                str(video),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env=child_env(),
-        )
         data = json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except ValueError:
         return None
 
     streams = data.get("streams") or []
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
     if video_stream is None:
         return None
-    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    has_audio = audio_stream is not None
+    # 音轨编码（aac/mp3/pcm/vorbis...）：一键成品的烧字成片要据此决定
+    # 音频是流复制还是转码 —— 非 aac/mp3 的音轨塞进 mp4 会让 muxer 报错或产废片。
+    # 混剪自身不用这个键（消费方一律 .get() 读取）。
+    audio_codec = (
+        str(audio_stream.get("codec_name") or "") if audio_stream is not None else ""
+    )
 
     width = int(video_stream.get("width") or 0)
     height = int(video_stream.get("height") or 0)
@@ -204,6 +214,7 @@ def probe_video_spec(video: Path) -> Optional[dict]:
         "fps_den": fps_den,
         "rotation": rotation,
         "has_audio": has_audio,
+        "audio_codec": audio_codec,
         "duration": duration,
     }
 
@@ -316,27 +327,30 @@ def probe_environment() -> dict:
     混剪只需要 ffmpeg 与 ffprobe（不需要 vct / scenedetect），
     但要把素材目录与默认输出目录一起带回，供页面初始化。
     """
-    ffmpeg = find_tool("ffmpeg")
-    ffprobe = find_tool("ffprobe")
     dependencies = [
-        {
-            "name": "ffmpeg",
-            "ok": ffmpeg is not None,
-            "path": ffmpeg or "",
-            "detail": "片段归一化与成片拼接" if ffmpeg else "未在 PATH 中找到",
-            "fix_hint": "" if ffmpeg else "brew install ffmpeg 或放入 ~/.local/bin",
-        },
-        {
-            "name": "ffprobe",
-            "ok": ffprobe is not None,
-            "path": ffprobe or "",
-            "detail": "素材规格与时长探测" if ffprobe else "未找到（无法确定成片规格）",
-            "fix_hint": "" if ffprobe else "随 ffmpeg 一起安装",
-        },
+        dependency_status(
+            "ffmpeg",
+            purpose="片段归一化与成片拼接",
+            missing_detail="未在 PATH 中找到",
+            missing_hint="brew install ffmpeg 或放入 ~/.local/bin",
+            impostor_detail="找到的同名文件不是 ffmpeg（可能是别的工具的副本被改名）",
+            impostor_hint="从 ffmpeg 官网或包管理器装一份完整的 ffmpeg",
+        ),
+        dependency_status(
+            "ffprobe",
+            purpose="素材规格与时长探测",
+            missing_detail="未找到（无法确定成片规格）",
+            missing_hint="随 ffmpeg 一起安装",
+            impostor_detail="找到的同名文件不是 ffprobe（常见是 ffmpeg 的副本被改名），读不出素材规格",
+            impostor_hint="把真正的 ffprobe 放进 PATH（它和 ffmpeg 一起发布）",
+        ),
     ]
+    # 每一个都得自证过（dependency_status 里跑过 -version）：只在 PATH 里
+    # 找到同名文件就报 ready，等于把「假的 ffprobe」留到任务里才爆。
+    ready = all(dependency["ok"] for dependency in dependencies)
     clips_dir = subdir(CLIPS)
     return {
-        "ready": ffmpeg is not None and ffprobe is not None,
+        "ready": ready,
         "materials_dir": str(materials_root()),
         # 「添加素材目录」选择器的默认起点：镜头切片目录还在就落在那儿，
         # 否则退到素材根，别给一个不存在的路径
@@ -516,6 +530,18 @@ class MixRunner:
         """两遍编码主体：Pass 1 归一化去重并集，Pass 2 逐条流复制拼接。"""
         norm_dir.mkdir(parents=True, exist_ok=True)
         list_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---- 准备：确认 ffprobe 真的是 ffprobe，再开始探测 ----
+        # 没有这一关，一个「名字叫 ffprobe 的别的东西」（真实踩过：ffmpeg 的
+        # 副本被改名）会让每条素材都读不出规格，报出来的却是素材的问题。
+        ffprobe = find_tool("ffprobe")
+        if not verify_tool("ffprobe", ffprobe):
+            self._fail_whole_job(
+                db, job,
+                "ffprobe 不可用（未安装，或同名的文件并不是真正的 ffprobe），"
+                "无法探测素材规格；请到页面上方的依赖自检查看修复建议",
+            )
+            return
 
         # ---- 准备：还原素材路径，探测第一条素材的规格 ----
         unique_clips = list(dict.fromkeys(job.opening + job.middle + job.ending))

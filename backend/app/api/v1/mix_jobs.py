@@ -16,7 +16,8 @@
 - GET  /jobs/{id}/outputs/{n}/video  成片视频流（支持 Range）
 - GET  /jobs/{id}/outputs/{n}/thumb  成片封面
 - POST /jobs/{id}/cancel         取消任务
-- DELETE /jobs/{id}              删除任务记录（成片文件保留）
+- POST /jobs/batch-delete        批量删除任务记录（payload 带 purge_files 时产物一并清）
+- DELETE /jobs/{id}              删除任务记录（默认成片文件保留，?purge_files=true 一并清）
 """
 
 from fastapi import APIRouter, Path as PathParam, Query, Request
@@ -29,7 +30,7 @@ from app.services.file_range import ranged_file_response
 from app.services.media_tools import generate_thumbnail
 from app.services.mix_library import list_sources, resolve_clip, thumb_path_for
 from app.services.mix_runner import probe_environment
-from app.schemas.common import ApiResponse
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest
 from app.schemas.mix_job import (
     MixEnvironmentResponse,
     MixJobCreate,
@@ -205,6 +206,21 @@ def list_jobs(
     )
 
 
+# 静态路径 /jobs/batch-delete 必须写在 /jobs/{job_id} 之前（见文件头说明）
+@router.post(
+    "/jobs/batch-delete",
+    response_model=ApiResponse[dict],
+    summary="批量删除混剪任务记录",
+)
+def batch_delete_jobs(
+    payload: JobBatchDeleteRequest,
+    service: MixJobServiceDep,
+) -> ApiResponse[dict]:
+    """整批删除（全成功或全失败）；purge_files=true 时输出目录一并清掉。"""
+    ids = service.delete_jobs(payload.ids, purge_files=payload.purge_files)
+    return ApiResponse(data={"ids": ids, "count": len(ids)})
+
+
 @router.get(
     "/jobs/{job_id}",
     response_model=ApiResponse[MixJobResponse],
@@ -283,7 +299,8 @@ def cancel_job(
 def delete_job(
     service: MixJobServiceDep,
     job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    purge_files: bool = Query(default=False, description="是否连同磁盘上的任务产物一起删除"),
 ) -> ApiResponse[dict]:
-    """删除任务记录（级联删成片条目）；磁盘上已拼出的成片文件保留不动。"""
-    service.delete_job(job_id)
+    """删除任务记录（级联删成片条目）；默认保留磁盘产物，purge_files=true 时一并清掉。"""
+    service.delete_job(job_id, purge_files=purge_files)
     return ApiResponse(data={"id": job_id})

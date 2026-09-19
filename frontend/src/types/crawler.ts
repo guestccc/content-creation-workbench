@@ -16,6 +16,36 @@ export type CrawlLoginType = 'qrcode' | 'cookie'
 /** 任务状态（抓取一次成败分明，没有「部分成功」；取消/失败时已抓内容保留） */
 export type CrawlJobStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 
+/** running 任务的当前阶段（与后端 detect_phase 返回值对应） */
+export type CrawlPhase =
+  | 'starting'
+  | 'login_cookie'
+  | 'login_scan'
+  | 'login_redirect'
+  | 'crawling'
+  | 'finishing'
+
+/** 阶段展示配置：label 用于 Steps 步骤名，hint 告诉用户当前该做什么 */
+export const PHASE_META: Record<CrawlPhase, { label: string; hint: string }> = {
+  starting: { label: '启动浏览器', hint: '正在初始化浏览器环境' },
+  login_cookie: { label: 'Cookie 登录', hint: '正在用 Cookie 验证登录态' },
+  login_scan: {
+    label: '等待扫码',
+    hint: '二维码已在系统看图软件弹出，用手机扫码后在 120 秒内确认',
+  },
+  login_redirect: { label: '登录成功', hint: '登录成功，等待页面跳转' },
+  crawling: { label: '抓取数据', hint: '正在抓取笔记数据' },
+  finishing: { label: '收尾', hint: '正在关闭浏览器并保存数据' },
+}
+
+/** 按登录方式返回阶段序列（Steps 展示用，cookie 没有扫码/跳转环节） */
+export function phaseSteps(loginType: CrawlLoginType): CrawlPhase[] {
+  if (loginType === 'cookie') {
+    return ['starting', 'login_cookie', 'crawling', 'finishing']
+  }
+  return ['starting', 'login_scan', 'login_redirect', 'crawling', 'finishing']
+}
+
 /** 抓取任务 */
 export interface CrawlJob {
   id: number
@@ -43,6 +73,8 @@ export interface CrawlJob {
   started_at: string | null
   finished_at: string | null
   error_message: string
+  /** running 任务的当前阶段（starting、login_前缀、crawling、finishing），非 running 为空串 */
+  phase: string
   created_at: string
   updated_at: string
 }
@@ -55,8 +87,9 @@ export interface CrawlNote {
   title: string
   desc: string
   nickname: string
-  /** MC 落盘为字符串（如 "6.6万"），原样透传 */
+  /** MC 落盘为字符串（如 "6.6万"），原样透传；排序用 parseCountValue 转数值 */
   liked_count: string
+  collected_count: string
   comment_count: string
   share_count: string
   publish_time: string
@@ -202,6 +235,32 @@ export function noteDisplayTitle(note: Pick<CrawlNote, 'title' | 'desc'>): strin
     return desc.length > 50 ? `${desc.slice(0, 50)}…` : desc
   }
   return '（无标题）'
+}
+
+/**
+ * 互动数转数值（结果列表排序用）："6.6万" → 66000、"1.2亿" → 1.2e8、
+ * "3.5w"/"2k" 与纯数字也认；空值和认不出的给 0，排序时沉底。
+ */
+export function parseCountValue(text: string): number {
+  const match = text.trim().match(/^([\d.,]+)\s*(万|亿|w|k|千)?$/i)
+  if (!match) {
+    return 0
+  }
+  const number = Number.parseFloat(match[1].replace(/,/g, ''))
+  if (!Number.isFinite(number)) {
+    return 0
+  }
+  const unit = match[2]?.toLowerCase()
+  if (unit === '万' || unit === 'w') {
+    return number * 1e4
+  }
+  if (unit === '亿') {
+    return number * 1e8
+  }
+  if (unit === 'k' || unit === '千') {
+    return number * 1e3
+  }
+  return number
 }
 
 // ---------------------------------------------------------------------------

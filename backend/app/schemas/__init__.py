@@ -6,7 +6,7 @@ from app.schemas.account import (
     AccountResponse,
     AccountUpdate,
 )
-from app.schemas.common import ApiResponse, HealthData
+from app.schemas.common import ApiResponse, HealthData, JobBatchDeleteRequest
 from app.schemas.content import (
     ContentCreate,
     ContentListData,
@@ -27,6 +27,7 @@ from app.schemas.publish_task import (
 __all__ = [
     "ApiResponse",
     "HealthData",
+    "JobBatchDeleteRequest",
     "ContentCreate",
     "ContentUpdate",
     "ContentResponse",

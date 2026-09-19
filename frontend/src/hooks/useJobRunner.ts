@@ -22,8 +22,10 @@ export interface UseJobRunnerOptions<J extends { id: number }, P> {
   create: (payload: P) => Promise<J>
   /** 取消任务，返回更新后的任务 */
   cancel: (jobId: number) => Promise<J>
-  /** 删除任务记录（磁盘上的产物保留） */
+  /** 删除任务记录（是否连磁盘产物一起删，由页面在这个闭包里拼参数） */
   remove: (jobId: number) => Promise<unknown>
+  /** 批量删除任务记录（整批成功或整批失败）；不传则 removeMany 不可用 */
+  batchRemove?: (jobIds: number[]) => Promise<unknown>
   /** 拉任务详情（轮询与「从历史点开」都用它） */
   fetchJob: (jobId: number) => Promise<J>
   /** 什么算跑完（各域自己的 isTerminalStatus） */
@@ -52,6 +54,8 @@ export interface UseJobRunnerResult<J, P> {
   cancel: (jobId: number) => Promise<J | null>
   /** 删除任务记录；是否成功 */
   remove: (jobId: number) => Promise<boolean>
+  /** 批量删除；成功后逐条触发 onRemoved、整体触发一次 onChanged */
+  removeMany: (jobIds: number[]) => Promise<boolean>
   /** 读一条任务的详情；失败时返回 null（failMessage 可覆盖兜底文案） */
   read: (jobId: number, failMessage?: string) => Promise<J | null>
 }
@@ -60,6 +64,7 @@ export function useJobRunner<J extends { id: number }, P>({
   create,
   cancel: cancelJob,
   remove: removeJob,
+  batchRemove,
   fetchJob,
   isTerminal,
   fail,
@@ -70,9 +75,9 @@ export function useJobRunner<J extends { id: number }, P>({
   const [job, setJob] = useState<J | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
-  const latest = useRef({ create, cancelJob, removeJob, fetchJob, fail, onChanged, onRemoved, onFinished })
+  const latest = useRef({ create, cancelJob, removeJob, batchRemove, fetchJob, fail, onChanged, onRemoved, onFinished })
   useEffect(() => {
-    latest.current = { create, cancelJob, removeJob, fetchJob, fail, onChanged, onRemoved, onFinished }
+    latest.current = { create, cancelJob, removeJob, batchRemove, fetchJob, fail, onChanged, onRemoved, onFinished }
   })
 
   // 删除时要判断删的是不是页面上这条：用 ref 读当前值，免得回调把 job 写进依赖
@@ -135,6 +140,29 @@ export function useJobRunner<J extends { id: number }, P>({
     }
   }, [])
 
+  const removeMany = useCallback(async (jobIds: number[]): Promise<boolean> => {
+    const batchRemoveJob = latest.current.batchRemove
+    if (!batchRemoveJob || jobIds.length === 0) {
+      return false
+    }
+    try {
+      await batchRemoveJob(jobIds)
+      const currentId = jobRef.current?.id
+      if (currentId !== undefined && jobIds.includes(currentId)) {
+        setJob(null)
+      }
+      // 逐条触发 onRemoved：各页面挂的弹窗清理（详情/产物弹窗）原样复用
+      for (const jobId of jobIds) {
+        latest.current.onRemoved?.(jobId, jobId === currentId)
+      }
+      latest.current.onChanged?.()
+      return true
+    } catch (error) {
+      latest.current.fail(error, '批量删除失败')
+      return false
+    }
+  }, [])
+
   const read = useCallback(
     async (jobId: number, failMessage = '读取任务失败'): Promise<J | null> => {
       try {
@@ -155,6 +183,7 @@ export function useJobRunner<J extends { id: number }, P>({
     submit,
     cancel,
     remove,
+    removeMany,
     read,
   }
 }

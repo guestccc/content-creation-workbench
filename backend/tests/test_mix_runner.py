@@ -24,7 +24,7 @@ from app.models.mix_job import (
     MixPhase,
 )
 from app.core.materials import CLIPS, subdir
-from app.services import mix_runner
+from app.services import media_tools, mix_runner
 from app.services.mix_runner import (
     MixRunner,
     build_concat_argv,
@@ -39,49 +39,7 @@ from app.services.mix_runner import (
     write_concat_list,
 )
 from tests.conftest import TestingSessionLocal
-
-
-# --------------------------------------------------------------------------
-# 测试替身：模拟 ffmpeg 子进程
-# --------------------------------------------------------------------------
-
-
-class FakeFfmpeg:
-    """模拟 ffmpeg 子进程：退出时在 argv 最后一个参数的位置「产出」文件。"""
-
-    instances: List["FakeFfmpeg"] = []
-
-    @classmethod
-    def reset(cls) -> None:
-        cls.instances = []
-
-    def __init__(self, argv, stdout=None, stderr=None, stdin=None,
-                 start_new_session=False, creationflags=0, cwd=None, env=None, script=None):
-        self.argv = list(argv)
-        self.script = dict(script or {})
-        self.stdout = stdout
-        self.pid = 50000 + len(FakeFfmpeg.instances)
-        self.poll_count = 0
-        self._produced = False
-        FakeFfmpeg.instances.append(self)
-
-    def poll(self) -> Optional[int]:
-        self.poll_count += 1
-        on_poll = self.script.get("on_poll")
-        if on_poll is not None:
-            on_poll(self, self.poll_count)
-        if self.script.get("hang"):
-            return None
-        if self.poll_count <= int(self.script.get("polls_before_exit", 0)):
-            return None
-        if not self._produced:
-            self._produced = True
-            if self.script.get("produce", True):
-                # argv 最后一个参数就是输出文件
-                dst = Path(self.argv[-1])
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_bytes(b"fake-mp4")
-        return int(self.script.get("exit_code", 0))
+from tests.fakes import FakeFfmpeg
 
 
 @pytest.fixture(autouse=True)
@@ -106,8 +64,18 @@ def materials(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_tools(monkeypatch):
-    """打桩外部工具：find_tool 返回假路径，probe_video_spec 返回固定规格。"""
-    monkeypatch.setattr(mix_runner, "find_tool", lambda name: f"/fake/{name}")
+    """打桩外部工具：find_tool 返回假路径、verify_tool 认可它，规格固定。
+
+    verify_tool 也得打桩：它按定义会去跑 `-version`，测试里的假路径跑不了，
+    不打桩的话每个用 run_job 的用例都会在「ffprobe 不可用」上提前失败。
+
+    两个命名空间都要打：runner 用的是 import 进来的名字（mix_runner.find_tool
+    / mix_runner.verify_tool），而 probe_environment 走的是 media_tools 里的
+    dependency_status，它调的是**那个模块自己**的 find_tool / verify_tool。
+    """
+    for name in (mix_runner, media_tools):
+        monkeypatch.setattr(name, "find_tool", lambda tool: f"/fake/{tool}")
+        monkeypatch.setattr(name, "verify_tool", lambda tool, path: "9.9.9")
     spec = {
         "width": 720, "height": 1280, "fps_num": 30, "fps_den": 1,
         "rotation": 0, "has_audio": True, "duration": 3.5,
@@ -416,6 +384,29 @@ class TestRunJob:
         assert job.status == MixJobStatus.FAILED
         assert "素材文件不存在" in job.outputs[0].error_message
         # 一次 ffmpeg 都不该起
+        assert FakeFfmpeg.instances == []
+
+    def test_bogus_ffprobe_fails_job_with_self_explanatory_reason(
+        self, db_session, materials, tmp_path, monkeypatch
+    ):
+        """PATH 里的 ffprobe 不是真 ffprobe：报的是环境问题，不是素材问题。
+
+        真实踩过：~/.local/bin/ffprobe.exe 是 ffmpeg.exe 的副本，报出来的
+        「无法读取开头第一条素材的规格」把人往素材上引，白查半天。
+        """
+        monkeypatch.setattr(mix_runner, "verify_tool", lambda name, path: "")
+        job = _make_job(
+            db_session, tmp_path,
+            opening=[REL("a")], middle=[REL("b"), REL("c")], ending=[REL("d")],
+            count=1,
+        )
+        runner = _make_runner()
+        assert runner.run_job(job.id) is True
+
+        job = _reload(db_session, job.id)
+        assert job.status == MixJobStatus.FAILED
+        assert "ffprobe" in job.outputs[0].error_message
+        # 一次 ffmpeg 都不该起：环境没就绪就别动素材
         assert FakeFfmpeg.instances == []
 
     def test_legacy_relative_paths_still_run(self, db_session, materials, tmp_path):

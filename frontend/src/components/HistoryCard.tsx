@@ -17,6 +17,10 @@ interface HistoryCardProps<T extends object> {
   onRefresh?: () => void
   emptyText?: ReactNode
   pagination?: TableProps<T>['pagination']
+  /** 传了就启用行多选（批量删除用） */
+  rowSelection?: TableProps<T>['rowSelection']
+  /** 追加在「刷新」按钮左边的操作区（批量删除按钮放这） */
+  extra?: ReactNode
 }
 
 export default function HistoryCard<T extends object>({
@@ -26,6 +30,8 @@ export default function HistoryCard<T extends object>({
   onRefresh,
   emptyText = <Empty description="还没有任务记录" />,
   pagination = false,
+  rowSelection,
+  extra,
 }: HistoryCardProps<T>) {
   return (
     <Card
@@ -36,10 +42,15 @@ export default function HistoryCard<T extends object>({
         </Space>
       }
       extra={
-        onRefresh ? (
-          <Button onClick={onRefresh} loading={loading}>
-            刷新
-          </Button>
+        onRefresh || extra ? (
+          <Space size={8}>
+            {extra}
+            {onRefresh && (
+              <Button onClick={onRefresh} loading={loading}>
+                刷新
+              </Button>
+            )}
+          </Space>
         ) : undefined
       }
     >
@@ -50,6 +61,7 @@ export default function HistoryCard<T extends object>({
         columns={columns}
         pagination={pagination}
         locale={{ emptyText }}
+        rowSelection={rowSelection}
       />
     </Card>
   )

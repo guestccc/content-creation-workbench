@@ -7,9 +7,9 @@
 
 import os
 from datetime import datetime, timezone
-from typing import Generic, TypeVar
+from typing import Annotated, Generic, List, TypeVar
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 # 响应数据类型变量
 T = TypeVar("T")
@@ -63,6 +63,35 @@ class ApiResponse(BaseModel, Generic[T]):
 
     success: bool = Field(default=True, description="请求是否成功")
     data: T = Field(description="业务数据")
+
+
+# 单次批量删除的最大任务数：历史列表一页 10 条，100 已远超「全选一页」
+MAX_BATCH_DELETE_SIZE = 100
+
+
+class JobBatchDeleteRequest(BaseModel):
+    """批量删除任务记录：整批成功或整批失败。
+
+    五个任务域（镜头分割 / 字幕提取 / 混剪 / 素材抓取 / 一键成品）共用一个模型 ——
+    内容没有任何领域差异，不做五份逐字拷贝。
+    """
+
+    ids: List[Annotated[int, Field(ge=1)]] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_BATCH_DELETE_SIZE,
+        description="待删除的任务 ID 列表",
+    )
+    purge_files: bool = Field(
+        default=False,
+        description="是否连同磁盘上的任务产物一起删除（默认保留，只删记录）",
+    )
+
+    @field_validator("ids")
+    @classmethod
+    def _dedupe(cls, value: List[int]) -> List[int]:
+        # 保序去重：重复勾选不该让 count 虚高
+        return list(dict.fromkeys(value))
 
 
 class HealthData(BaseModel):

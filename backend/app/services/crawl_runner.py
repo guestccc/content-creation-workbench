@@ -69,6 +69,47 @@ ALLOWED_PARAMS = (
 #: 标记；❌ 和 Traceback 兜底（平台风控提示常是普通 info 行带 ❌）。
 _ERROR_MARKERS = ("ERROR", "Error", "❌", "Traceback")
 
+#: MC 日志里的阶段标记（读 MC 源码确认的 loguru 输出）。
+#: 同一阶段可能反复出现（重试），detect_phase 取最后一次命中的位置。
+_PHASE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("by cookie", "login_cookie"),
+    ("by qrcode", "login_scan"),
+    ("waiting for scan code", "login_scan"),
+    ("Login successful", "login_redirect"),
+    ("Begin search", "crawling"),
+    ("Begin get note detail", "crawling"),
+    ("Begin get creator", "crawling"),
+)
+
+
+def detect_phase(log_tail: str, *, login_type: str, crawled_count: int) -> str:
+    """从 MC 日志尾部推断 running 任务的当前阶段（纯函数，可单测）。
+
+    返回值（与前端 PHASE_META 对应）：
+    - starting：浏览器还在初始化（日志为空或只有启动行）
+    - login_cookie：cookie 登录验证中
+    - login_scan：等待扫码（二维码由系统看图软件弹出）
+    - login_redirect：登录成功，等页面跳转
+    - crawling：正在抓取笔记
+    - finishing：收尾（关浏览器、存数据）
+
+    优先级：finishing > crawling（有产物）> 日志标记 > starting。
+    """
+    if not log_tail.strip():
+        return "starting"
+    if "Closing browser process" in log_tail:
+        return "finishing"
+    if crawled_count > 0:
+        return "crawling"
+    best_pos = -1
+    best_phase = "starting"
+    for marker, phase in _PHASE_MARKERS:
+        pos = log_tail.rfind(marker)
+        if pos > best_pos:
+            best_pos = pos
+            best_phase = phase
+    return best_phase
+
 
 def build_argv(
     launcher: List[str],

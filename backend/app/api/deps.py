@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.account_service import AccountService
 from app.services.creator_service import CreatorService
+from app.services.crawl_cookie_service import CrawlCookieService
 from app.services.content_service import ContentService
 from app.services.crawl_job_service import CrawlJobService
 from app.services.mix_job_service import MixJobService
@@ -91,6 +92,11 @@ def get_creator_service(db: DbSession) -> CreatorService:
     return CreatorService(db)
 
 
+def get_crawl_cookie_service(db: DbSession) -> CrawlCookieService:
+    """构造 Cookie 库服务实例。"""
+    return CrawlCookieService(db)
+
+
 # 服务依赖类型别名
 ContentServiceDep = Annotated[ContentService, Depends(get_content_service)]
 AccountServiceDep = Annotated[AccountService, Depends(get_account_service)]
@@ -100,3 +106,4 @@ MixJobServiceDep = Annotated[MixJobService, Depends(get_mix_job_service)]
 SubtitleJobServiceDep = Annotated[SubtitleJobService, Depends(get_subtitle_job_service)]
 CrawlJobServiceDep = Annotated[CrawlJobService, Depends(get_crawl_job_service)]
 CreatorServiceDep = Annotated[CreatorService, Depends(get_creator_service)]
+CrawlCookieServiceDep = Annotated[CrawlCookieService, Depends(get_crawl_cookie_service)]

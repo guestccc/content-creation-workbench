@@ -469,3 +469,75 @@ class TestCancelAndDelete:
         data = _create_job(client, source, tmp_path / "字幕")
         response = client.delete(f"/api/v1/subtitle/jobs/{data['id']}")
         assert response.status_code == 409
+
+
+class TestBatchDelete:
+    """批量删除：整批成功或整批失败（POST /jobs/batch-delete）。"""
+
+    def _create_terminal(self, client, video_dir, tmp_path, tag) -> int:
+        source, _ = video_dir
+        created = _create_job(client, source, tmp_path / f"输出{tag}")
+        client.post(f"/api/v1/subtitle/jobs/{created['id']}/cancel")
+        return created["id"]
+
+    def test_batch_delete_success(self, client, video_dir, tmp_path):
+        ids = [self._create_terminal(client, video_dir, tmp_path, tag) for tag in "ab"]
+
+        response = client.post("/api/v1/subtitle/jobs/batch-delete", json={"ids": ids})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"] == {"ids": ids, "count": 2}
+        for job_id in ids:
+            assert client.get(f"/api/v1/subtitle/jobs/{job_id}").status_code == 404
+
+    def test_batch_delete_non_terminal_conflict_rolls_back(
+        self, client, video_dir, tmp_path
+    ):
+        """批里混着一条未结束的：整批 409，已勾选的终态任务一条也不能被删。"""
+        terminal_id = self._create_terminal(client, video_dir, tmp_path, "a")
+        source, _ = video_dir
+        pending = _create_job(client, source, tmp_path / "输出b")["id"]
+
+        response = client.post(
+            "/api/v1/subtitle/jobs/batch-delete", json={"ids": [terminal_id, pending]}
+        )
+        assert response.status_code == 409, response.text
+        assert client.get(f"/api/v1/subtitle/jobs/{terminal_id}").status_code == 200
+
+    def test_batch_delete_empty_ids_422(self, client):
+        response = client.post("/api/v1/subtitle/jobs/batch-delete", json={"ids": []})
+        assert response.status_code == 422, response.text
+
+
+class TestDeletePurge:
+    """删除任务时可选连产物一起清（purge_files）—— 字幕是「一条视频一份」的文件。"""
+
+    def _terminal_with_products(self, client, video_dir, tmp_path) -> tuple[int, list[Path]]:
+        """造一条终态任务，并按条目登记的路径各写一份假字幕文件。"""
+        source, _ = video_dir
+        created = _create_job(client, source, tmp_path / "字幕")
+        files = []
+        for item in created["items"]:
+            path = Path(item["output_path"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("1\n00:00:00,000 --> 00:00:01,000\n测试\n", encoding="utf-8")
+            files.append(path)
+        client.post(f"/api/v1/subtitle/jobs/{created['id']}/cancel")
+        return created["id"], files
+
+    def test_delete_without_purge_keeps_products(self, client, video_dir, tmp_path):
+        """默认只删记录：字幕文件原样保留。"""
+        job_id, files = self._terminal_with_products(client, video_dir, tmp_path)
+
+        response = client.delete(f"/api/v1/subtitle/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        for path in files:
+            assert path.is_file(), f"字幕文件被误删：{path}"
+
+    def test_delete_with_purge_removes_products(self, client, video_dir, tmp_path):
+        """purge_files=true：各条目的字幕文件都清掉。"""
+        job_id, files = self._terminal_with_products(client, video_dir, tmp_path)
+
+        response = client.delete(f"/api/v1/subtitle/jobs/{job_id}?purge_files=true")
+        assert response.status_code == 200, response.text
+        for path in files:
+            assert not path.exists(), f"字幕文件没清掉：{path}"

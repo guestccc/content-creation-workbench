@@ -12,7 +12,8 @@
 - GET    /jobs/{id}/log           MC 子进程日志尾部
 - GET    /jobs/{id}/media/{path}  已下载的本地媒体文件（图片/视频）
 - POST   /jobs/{id}/cancel        取消任务
-- DELETE /jobs/{id}               删除任务记录
+- POST   /jobs/batch-delete       批量删除任务记录（payload 带 purge_files 时产物一并清）
+- DELETE /jobs/{id}               删除任务记录（?purge_files=true 时产物一并清）
 """
 
 from fastapi import APIRouter, Path as PathParam, Query
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import CrawlJobServiceDep
 from app.core.logging import get_logger
 from app.models.crawl_job import CrawlJobStatus, CrawlPlatform
-from app.schemas.common import ApiResponse
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest
 from app.schemas.crawl_job import (
     CrawlEnvironmentResponse,
     CrawlJobCreate,
@@ -105,6 +106,21 @@ def list_jobs(
     )
 
 
+# 静态路径 /jobs/batch-delete 必须写在 /jobs/{job_id} 之前（见文件头说明）
+@router.post(
+    "/jobs/batch-delete",
+    response_model=ApiResponse[dict],
+    summary="批量删除素材抓取任务记录",
+)
+def batch_delete_jobs(
+    payload: JobBatchDeleteRequest,
+    service: CrawlJobServiceDep,
+) -> ApiResponse[dict]:
+    """整批删除（全成功或全失败）；purge_files=true 时输出目录一并清掉。"""
+    ids = service.delete_jobs(payload.ids, purge_files=payload.purge_files)
+    return ApiResponse(data={"ids": ids, "count": len(ids)})
+
+
 @router.get(
     "/jobs/{job_id}",
     response_model=ApiResponse[CrawlJobResponse],
@@ -116,7 +132,9 @@ def get_job(
 ) -> ApiResponse[CrawlJobResponse]:
     """按 ID 获取任务详情，前端轮询进度也调它。"""
     job = service.get_job(job_id)
-    return ApiResponse(data=CrawlJobResponse.from_model(job))
+    data = CrawlJobResponse.from_model(job)
+    data.phase = service.get_job_phase(job)
+    return ApiResponse(data=data)
 
 
 @router.get(
@@ -203,7 +221,8 @@ def cancel_job(
 def delete_job(
     service: CrawlJobServiceDep,
     job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    purge_files: bool = Query(default=False, description="是否连同磁盘上的任务产物一起删除"),
 ) -> ApiResponse[dict]:
-    """删除任务记录；输出目录里的 jsonl 与媒体文件保留不动。"""
-    service.delete_job(job_id)
+    """删除任务记录；默认保留输出目录，purge_files=true 时连同 jsonl/媒体一起清掉。"""
+    service.delete_job(job_id, purge_files=purge_files)
     return ApiResponse(data={"id": job_id})

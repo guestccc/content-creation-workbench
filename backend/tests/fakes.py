@@ -321,6 +321,7 @@ def mc_note(note_id: str, **overrides) -> dict:
         "desc": f"正文-{note_id}",
         "nickname": "测试博主",
         "liked_count": 10,
+        "collected_count": 5,
         "comment_count": 2,
         "share_count": 1,
         "time": 1747000000000,  # 毫秒时间戳
@@ -463,3 +464,46 @@ class FakeMcPopen:
             return self.argv[self.argv.index(flag) + 1]
         except (ValueError, IndexError):
             return None
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg（混剪 / 一键成品共用）
+# ---------------------------------------------------------------------------
+
+
+class FakeFfmpeg:
+    """模拟 ffmpeg 子进程：退出时在 argv 最后一个参数的位置「产出」文件。"""
+
+    instances: List["FakeFfmpeg"] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances = []
+
+    def __init__(self, argv, stdout=None, stderr=None, stdin=None,
+                 start_new_session=False, creationflags=0, cwd=None, env=None, script=None):
+        self.argv = list(argv)
+        self.script = dict(script or {})
+        self.stdout = stdout
+        self.pid = 50000 + len(FakeFfmpeg.instances)
+        self.poll_count = 0
+        self._produced = False
+        FakeFfmpeg.instances.append(self)
+
+    def poll(self) -> Optional[int]:
+        self.poll_count += 1
+        on_poll = self.script.get("on_poll")
+        if on_poll is not None:
+            on_poll(self, self.poll_count)
+        if self.script.get("hang"):
+            return None
+        if self.poll_count <= int(self.script.get("polls_before_exit", 0)):
+            return None
+        if not self._produced:
+            self._produced = True
+            if self.script.get("produce", True):
+                # argv 最后一个参数就是输出文件
+                dst = Path(self.argv[-1])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(b"fake-mp4")
+        return int(self.script.get("exit_code", 0))

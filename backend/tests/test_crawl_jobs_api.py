@@ -124,10 +124,10 @@ class TestCreateJob:
         )
         assert data["expected_count"] == 2
 
-    def test_qrcode_login_forces_headless_off(self, client):
-        """扫码登录必须有界面：前端就算传了 headless 也要压回去。"""
+    def test_qrcode_login_allows_headless(self, client):
+        """扫码登录与无头不互斥：MC 的二维码走系统看图软件，不依赖浏览器窗口。"""
         data = _create_job(client, headless=True)
-        assert data["params"]["headless"] is False
+        assert data["params"]["headless"] is True
 
     def test_cookie_login_allows_headless(self, client):
         data = _create_job(
@@ -364,3 +364,72 @@ class TestResultsAndLogAndMedia:
         response = client.get(f"/api/v1/crawl/jobs/{data['id']}/log")
         assert response.status_code == 200
         assert response.json()["data"]["log"] == ""
+
+
+class TestBatchDelete:
+    """批量删除：整批成功或整批失败（POST /jobs/batch-delete）。"""
+
+    def _create_terminal(self, client) -> int:
+        created = _create_job(client)
+        client.post(f"/api/v1/crawl/jobs/{created['id']}/cancel")
+        return created["id"]
+
+    def test_batch_delete_success(self, client):
+        ids = [self._create_terminal(client) for _ in range(2)]
+
+        response = client.post("/api/v1/crawl/jobs/batch-delete", json={"ids": ids})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"] == {"ids": ids, "count": 2}
+        for job_id in ids:
+            assert client.get(f"/api/v1/crawl/jobs/{job_id}").status_code == 404
+
+    def test_batch_delete_non_terminal_conflict_rolls_back(self, client):
+        terminal_id = self._create_terminal(client)
+        pending = _create_job(client)["id"]
+
+        response = client.post(
+            "/api/v1/crawl/jobs/batch-delete", json={"ids": [terminal_id, pending]}
+        )
+        assert response.status_code == 409, response.text
+        assert client.get(f"/api/v1/crawl/jobs/{terminal_id}").status_code == 200
+
+    def test_batch_delete_empty_ids_422(self, client):
+        response = client.post("/api/v1/crawl/jobs/batch-delete", json={"ids": []})
+        assert response.status_code == 422, response.text
+
+
+class TestDeletePurge:
+    """删除任务时可选连产物一起清（purge_files）—— 抓取的产物是整个输出目录。"""
+
+    def _terminal_with_products(self, client) -> tuple[int, Path]:
+        """造一条终态任务，并在输出目录里留下 jsonl 与一个媒体文件。"""
+        created = _create_job(client)
+        out_dir = Path(created["output_dir"])
+        # 输出目录建任务时还不存在（跑起来才由 runner 建），这里手工造产物
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "notes.jsonl").write_text(
+            json.dumps({"note_id": "n1", "title": "测试笔记"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        media = out_dir / "媒体" / "封面.jpg"
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"fake-image")
+        client.post(f"/api/v1/crawl/jobs/{created['id']}/cancel")
+        return created["id"], out_dir
+
+    def test_delete_without_purge_keeps_products(self, client):
+        """默认只删记录：jsonl 与媒体文件原样保留。"""
+        job_id, out_dir = self._terminal_with_products(client)
+
+        response = client.delete(f"/api/v1/crawl/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        assert (out_dir / "notes.jsonl").is_file()
+        assert (out_dir / "媒体" / "封面.jpg").is_file()
+
+    def test_delete_with_purge_removes_products(self, client):
+        """purge_files=true：整个输出目录（含子目录）都清掉。"""
+        job_id, out_dir = self._terminal_with_products(client)
+
+        response = client.delete(f"/api/v1/crawl/jobs/{job_id}?purge_files=true")
+        assert response.status_code == 200, response.text
+        assert not out_dir.exists(), f"输出目录没清掉：{out_dir}"

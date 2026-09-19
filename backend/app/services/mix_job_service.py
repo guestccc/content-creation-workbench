@@ -51,9 +51,30 @@ from app.services.mix_library import (
     scan_library,
 )
 from app.services.mix_runner import middle_permutation_limit, plan_outputs
+from app.services.fs_cleanup import remove_paths_best_effort
 from app.schemas.mix_job import MixJobCreate
 
 logger = get_logger(__name__)
+
+
+def _product_paths(job: MixJob) -> List[Path]:
+    """列出一条任务的产物路径（只从任务记录推导，不接受外部路径）。
+
+    整个输出目录（mix-<时间戳>，创建时 exist_ok=False 保证任务独占）
+    整棵删 —— 比逐条成片删更干净，失败的半成品也不会留下空目录。
+    """
+    return [Path(job.output_dir)]
+
+
+def _purge_products(products: List[Path], *, job_ids: List[int]) -> None:
+    """best-effort 清产物：有失败的记一条汇总日志，不向上抛。"""
+    if not products:
+        return
+    failed = remove_paths_best_effort(products)
+    if failed:
+        logger.warning(
+            "任务产物清理有残留 | jobs=%s | 失败=%s 个路径", job_ids, len(failed)
+        )
 
 
 class MixJobService:
@@ -273,20 +294,66 @@ class MixJobService:
             logger.exception("取消混剪任务失败 | id=%s", job_id)
             raise DatabaseError("取消混剪任务失败") from exc
 
-    def delete_job(self, job_id: int) -> None:
-        """删除任务记录（级联删除成片条目）；磁盘上已拼出的成片文件保留不动。"""
+    def delete_job(self, job_id: int, *, purge_files: bool = False) -> None:
+        """删除任务记录（级联删除成片条目）。
+
+        仅允许删除终态任务。默认只删记录；purge_files=True 时把任务的输出
+        目录整棵删掉（释放空间是用户明确勾选的操作）。产物清理在记录提交
+        之后 best-effort 执行，个别文件被占用不阻断删除。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            ConflictError: 任务尚未结束。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
         try:
             with transaction(self.db):
                 job = self._get_job_or_404(job_id)
                 if job.status not in MixJobStatus.TERMINAL:
                     raise ConflictError(f"任务尚未结束（{job.status}），请先取消后再删除")
+                products = _product_paths(job) if purge_files else []
                 self.db.delete(job)
-            logger.info("混剪任务已删除 | id=%s", job_id)
+            logger.info("混剪任务已删除 | id=%s | 清产物=%s", job_id, purge_files)
         except (NotFoundError, ConflictError):
             raise
         except SQLAlchemyError as exc:
             logger.exception("删除混剪任务失败 | id=%s", job_id)
             raise DatabaseError("删除混剪任务失败") from exc
+
+        _purge_products(products, job_ids=[job_id])
+
+    def delete_jobs(self, job_ids: List[int], *, purge_files: bool = False) -> List[int]:
+        """批量删除任务记录：全部成功才提交，任何一个不可删则整批回滚。
+
+        与 delete_job 同一套边界：仅终态可删；purge_files=True 时输出目录
+        一并清掉。错误信息带出错位的任务 ID，前端能直接告诉用户卡在哪条。
+
+        Raises:
+            NotFoundError: 某个任务不存在（整批回滚）。
+            ConflictError: 某个任务尚未结束（整批回滚）。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                products: List[Path] = []
+                for job_id in job_ids:
+                    job = self._get_job_or_404(job_id)
+                    if job.status not in MixJobStatus.TERMINAL:
+                        raise ConflictError(
+                            f"任务 #{job_id} 尚未结束（{job.status}），请先取消后再删除"
+                        )
+                    if purge_files:
+                        products.extend(_product_paths(job))
+                    self.db.delete(job)
+            logger.info("混剪任务批量删除 | ids=%s | 清产物=%s", job_ids, purge_files)
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量删除混剪任务失败 | ids=%s", job_ids)
+            raise DatabaseError("批量删除任务失败") from exc
+
+        _purge_products(products, job_ids=job_ids)
+        return job_ids
 
     # ------------------------------------------------------------------
     # 成片定位（供播放/封面接口用；路径完全由任务记录推导）

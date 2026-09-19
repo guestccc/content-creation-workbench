@@ -141,8 +141,8 @@ export function useCrawlForm() {
       get_sub_comments: getSubComments,
       max_comments: Math.max(0, maxComments),
       max_concurrency: Math.min(3, Math.max(1, maxConcurrency)),
-      // 扫码登录必须有浏览器界面，headless 强制关（后端同样兜底）
-      headless: loginType === 'qrcode' ? false : headless,
+      // 无头与扫码登录不互斥：MC 把二维码弹到系统看图软件，不需要浏览器窗口
+      headless,
     }
     if (crawlerType === 'search') {
       payload.keywords = keywords

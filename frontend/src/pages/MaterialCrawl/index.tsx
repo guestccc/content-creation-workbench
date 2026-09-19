@@ -44,7 +44,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd'
-import type { ColumnsType } from 'antd/es/table'
+import type { ColumnsType, TableProps } from 'antd/es/table'
 
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../../components/JobProgressCard'
@@ -54,11 +54,13 @@ import {
   jobIdColumn,
   jobStatusColumn,
 } from '../../components/jobColumns'
-import { useApiMessage, useAsyncData, useJobList, useJobRunner } from '../../hooks'
+import { useApiMessage, useAsyncData, useJobList, useJobRunner, usePurgeFiles } from '../../hooks'
+import type { UsePurgeFilesResult } from '../../hooks'
 import {
   cancelCrawlJob,
   createCrawlJob,
   crawlMediaUrl,
+  batchDeleteCrawlJobs,
   deleteCrawlJob,
   fetchCrawlEnvironment,
   fetchCrawlJob,
@@ -70,12 +72,16 @@ import {
   CRAWLER_TYPE_META,
   JOB_STATUS_META,
   MEDIA_SUPPORT_LABEL,
+  PHASE_META,
   PLATFORM_META,
   PLATFORM_ORDER,
   PLATFORM_SPECS,
   isTerminalStatus,
   noteDisplayTitle,
+  parseCountValue,
+  phaseSteps,
 } from '../../types/crawler'
+import type { CrawlPhase } from '../../types/crawler'
 import type {
   CrawlEnvironment,
   CrawlJob,
@@ -88,6 +94,9 @@ import type {
 import { formatDateTime, formatElapsed } from '../../utils/format'
 import { useCrawlForm } from './useCrawlForm'
 import { useCrawlResults } from './useCrawlResults'
+import { useCookieLibrary } from './useCookieLibrary'
+import CookieEditModal from './CookieEditModal'
+import CookieManagerModal from './CookieManagerModal'
 
 const { Text, Title, Paragraph } = Typography
 
@@ -122,16 +131,24 @@ export default function MaterialCrawl() {
     (creator) => creator.platform === form.platform,
   )
 
+  // ---------- Cookie 库（cookie 登录的「从 Cookie 库选择 / 存到库」） ----------
+  const cookieLib = useCookieLibrary({ message, fail })
+  const platformCookies = cookieLib.cookiesForPlatform(form.platform)
   // ---------- 结果 / 日志弹窗 ----------
   const results = useCrawlResults(fail)
 
   // ---------- 历史 + 当前任务 ----------
   const history = useJobList<CrawlJob>({ fetchList: fetchCrawlJobs })
 
+  // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
+  const purge = usePurgeFiles()
+
   const runner = useJobRunner<CrawlJob, CrawlJobPayload>({
     create: createCrawlJob,
     cancel: cancelCrawlJob,
-    remove: deleteCrawlJob,
+    // take() 在这里调用：删除那一刻取值并重置，勾选只对这一次删除有效
+    remove: (jobId) => deleteCrawlJob(jobId, purge.take()),
+    batchRemove: (ids) => batchDeleteCrawlJobs(ids, purge.take()),
     fetchJob: fetchCrawlJob,
     isTerminal: (job) => isTerminalStatus(job.status),
     fail,
@@ -186,10 +203,27 @@ export default function MaterialCrawl() {
     }
   }
 
+  /** 删除任务记录（是否连抓取产物一起删由确认框里的勾选决定） */
   const remove = async (jobId: number) => {
     if (await runner.remove(jobId)) {
-      message.success('已删除任务记录（已抓取的文件保留）')
+      message.success('已删除任务记录')
     }
+  }
+
+  /** 批量删除历史记录（整批成功或整批失败） */
+  const batchRemove = async () => {
+    const ids = history.selectedRowKeys
+    if (await runner.removeMany(ids)) {
+      message.success(`已删除 ${ids.length} 条任务记录`)
+      history.clearSelection()
+    }
+  }
+
+  /** 历史表行多选：只终态任务可选（运行中的任务禁止勾选） */
+  const historyRowSelection: TableProps<CrawlJob>['rowSelection'] = {
+    selectedRowKeys: history.selectedRowKeys,
+    onChange: (keys) => history.setSelectedRowKeys(keys.map(Number)),
+    getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
   /** 从历史记录点开一条任务：加载详情并挂到当前任务区；有结果的顺带打开结果弹窗 */
@@ -517,13 +551,52 @@ export default function MaterialCrawl() {
                   : '首次会弹出 Chrome 窗口扫码，登录态会缓存，之后同类任务不再弹窗'}
               </Text>
             ) : (
-              <Input.TextArea
-                value={form.cookies}
-                onChange={(event) => form.setCookies(event.target.value)}
-                rows={3}
-                placeholder="粘贴登录后浏览器里的 Cookie 串"
-                style={{ marginTop: 4 }}
-              />
+              <div style={{ marginTop: 4 }}>
+                <Flex gap={8} align="center">
+                  <Select
+                    value={cookieLib.selectedId}
+                    onChange={(id) => {
+                      if (id === undefined || id === null) {
+                        cookieLib.setSelectedId(null)
+                        return
+                      }
+                      void cookieLib.select(id).then((value) => {
+                        if (value !== null) {
+                          form.setCookies(value)
+                        }
+                      })
+                    }}
+                    style={{ flex: 1 }}
+                    placeholder={
+                      platformCookies.length > 0
+                        ? '从 Cookie 库选择（选中即回填下方）'
+                        : 'Cookie 库还是空的，先粘贴再「存到库」'
+                    }
+                    allowClear
+                    disabled={platformCookies.length === 0}
+                    options={platformCookies.map((item) => ({
+                      value: item.id,
+                      label: item.remark ? `${item.name}（${item.remark}）` : item.name,
+                    }))}
+                  />
+                  <Button onClick={cookieLib.openSave} disabled={!form.cookies.trim()}>
+                    存到库
+                  </Button>
+                  {cookieLib.items.length > 0 && (
+                    <Button onClick={() => cookieLib.setManagerOpen(true)}>管理库</Button>
+                  )}
+                </Flex>
+                <Input.TextArea
+                  value={form.cookies}
+                  onChange={(event) => form.setCookies(event.target.value)}
+                  rows={3}
+                  placeholder="粘贴登录后浏览器里的 Cookie 串"
+                  style={{ marginTop: 8 }}
+                />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  存到库后下次直接选，不用再翻浏览器开发者工具；同名会覆盖
+                </Text>
+              </div>
             )}
           </div>
 
@@ -627,16 +700,12 @@ export default function MaterialCrawl() {
                         <div>
                           <Text type="secondary" style={{ fontSize: 12 }}>
                             {form.loginType === 'qrcode'
-                              ? '扫码登录必须弹出浏览器窗口，此开关强制关闭；改用 Cookie 登录后可开启'
+                              ? '扫码登录时二维码由系统看图软件弹出，无头也能扫；若遇到滑块等验证，请关掉无头后重试'
                               : '开启后抓取全程不显示浏览器窗口，适合挂机批量抓'}
                           </Text>
                         </div>
                       </div>
-                      <Switch
-                        checked={form.loginType === 'qrcode' ? false : form.headless}
-                        disabled={form.loginType === 'qrcode'}
-                        onChange={form.setHeadless}
-                      />
+                      <Switch checked={form.headless} onChange={form.setHeadless} />
                     </Flex>
                     <Flex justify="space-between" align="flex-start" gap={16}>
                       <div>
@@ -718,6 +787,9 @@ export default function MaterialCrawl() {
           errorMessage={job.error_message}
           outputDir={job.output_dir}
         >
+          {(job.status === 'pending' || job.status === 'running') && (
+            <PhaseSteps job={job} />
+          )}
           <Space style={{ marginTop: 12 }}>
             {(job.note_count > 0 || job.crawled_count > 0) && (
               <Button icon={<EyeOutlined />} onClick={() => void results.open(job.id)}>
@@ -735,10 +807,35 @@ export default function MaterialCrawl() {
           onView: (id) => void openHistoryJob(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
+        rowSelection={historyRowSelection}
+        extra={
+          <Popconfirm
+            title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
+            description={
+              <div>
+                <div>删除后不可恢复。</div>
+                {purge.checkbox}
+              </div>
+            }
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => void batchRemove()}
+            onOpenChange={(open) => {
+              if (open) {
+                purge.reset()
+              }
+            }}
+          >
+            <Button danger disabled={history.selectedRowKeys.length === 0}>
+              批量删除{history.selectedRowKeys.length > 0 ? ` (${history.selectedRowKeys.length})` : ''}
+            </Button>
+          </Popconfirm>
+        }
       />
 
       {/* ---------- 结果弹窗 ---------- */}
@@ -765,7 +862,7 @@ export default function MaterialCrawl() {
           loading={results.loading}
           dataSource={results.notes}
           pagination={{ pageSize: 10, showSizeChanger: false }}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1000 }}
           expandable={{
             expandedRowRender: (note) => noteDetail(note, results.jobId),
             rowExpandable: (note) =>
@@ -807,6 +904,54 @@ export default function MaterialCrawl() {
           </pre>
         )}
       </Modal>
+
+      {/* ---------- 存到 Cookie 库弹窗 ---------- */}
+      <Modal
+        open={cookieLib.saveOpen}
+        title={`把当前 Cookie 存到「${PLATFORM_META[form.platform].label}」库`}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={cookieLib.saving}
+        onOk={() => void cookieLib.confirmSave(form.platform, form.cookies.trim())}
+        onCancel={cookieLib.closeSave}
+        destroyOnHidden
+      >
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          起个能认出来的名字（如「主号」「小号」）；同平台同名会覆盖旧值
+        </Text>
+        <Input
+          value={cookieLib.saveName}
+          onChange={(event) => cookieLib.setSaveName(event.target.value)}
+          placeholder="例如：主号"
+          maxLength={50}
+          style={{ marginTop: 8 }}
+        />
+      </Modal>
+
+      {/* ---------- Cookie 库管理弹窗 ---------- */}
+      <CookieManagerModal
+        open={cookieLib.managerOpen}
+        items={cookieLib.items}
+        loading={cookieLib.loading}
+        onClose={() => cookieLib.setManagerOpen(false)}
+        onEdit={(id) => void cookieLib.beginEdit(id)}
+        onDelete={(id, name) => void cookieLib.remove(id, name)}
+      />
+
+      {/* ---------- Cookie 编辑弹窗（叠在管理弹窗上） ---------- */}
+      {cookieLib.editing && (
+        <CookieEditModal
+          cookie={cookieLib.editing}
+          onClose={cookieLib.closeEdit}
+          onSaved={(updated) => {
+            void cookieLib.applyEdit(updated)
+            // 编辑的恰好是当前选中那条：输入框里的旧串一起换掉
+            if (cookieLib.selectedId === updated.id) {
+              form.setCookies(updated.cookie)
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -862,15 +1007,29 @@ function noteColumns(
       ),
     },
     { title: '作者', dataIndex: 'nickname', width: 110, ellipsis: true },
-    {
-      title: '互动',
-      width: 120,
-      render: (_: unknown, note: CrawlNote) => (
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          赞 {note.liked_count || '—'} · 评 {note.comment_count || '—'}
-        </Text>
-      ),
-    },
+    // 互动数三列各自可排序：MC 落盘是 "6.6万" 这类字符串，排序先经 parseCountValue
+    // 转数值（纯字符串排序会把 "999" 排在 "6.6万" 前面）；首次点击即从高到低。
+    ...(
+      [
+        { title: '点赞', field: 'liked_count' },
+        { title: '收藏', field: 'collected_count' },
+        { title: '评论', field: 'comment_count' },
+      ] as const
+    ).map(
+      (column): ColumnsType<CrawlNote>[number] => ({
+        title: column.title,
+        dataIndex: column.field,
+        width: 76,
+        align: 'right',
+        sortDirections: ['descend', 'ascend'],
+        sorter: (a, b) => parseCountValue(a[column.field]) - parseCountValue(b[column.field]),
+        render: (value: string) => (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {value || '—'}
+          </Text>
+        ),
+      }),
+    ),
     {
       title: '发布',
       dataIndex: 'publish_time',
@@ -972,11 +1131,56 @@ function paramsSummary(job: CrawlJob): string {
   return list.length > 1 ? `${first} 等 ${list.length} 条` : first
 }
 
+/** 当前任务阶段流程：紧凑标签流，当前阶段高亮，下面一行 hint 告诉用户该做什么 */
+function PhaseSteps({ job }: { job: CrawlJob }) {
+  const steps = phaseSteps(job.login_type)
+  const currentPhase = job.phase as CrawlPhase
+  const currentIndex =
+    job.status === 'pending' ? -1 : Math.max(0, steps.indexOf(currentPhase))
+  const activePhase =
+    currentIndex >= 0 && currentIndex < steps.length ? steps[currentIndex] : null
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Flex align="center" gap={4} wrap>
+        {steps.map((phase, i) => (
+          <Flex key={phase} align="center" gap={4}>
+            {i > 0 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                →
+              </Text>
+            )}
+            {i === currentIndex ? (
+              <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+                {PHASE_META[phase].label}
+              </Tag>
+            ) : (
+              <Text
+                type={i < currentIndex ? 'success' : 'secondary'}
+                style={{ fontSize: 12 }}
+                delete={false}
+              >
+                {i < currentIndex ? `✓ ${PHASE_META[phase].label}` : PHASE_META[phase].label}
+              </Text>
+            )}
+          </Flex>
+        ))}
+      </Flex>
+      {activePhase && (
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+          {PHASE_META[activePhase].hint}
+        </Text>
+      )}
+    </div>
+  )
+}
+
 /** 历史任务表格列定义 */
 function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  purge: UsePurgeFilesResult
 }): ColumnsType<CrawlJob> {
   return [
     jobIdColumn<CrawlJob>(),
@@ -1007,7 +1211,8 @@ function historyColumns(handlers: {
       onView: handlers.onView,
       onCancel: handlers.onCancel,
       onDelete: handlers.onDelete,
-      deleteDescription: '只删记录，已抓取的 jsonl 与媒体文件会保留在磁盘上。',
+      deleteDescription: '删除后不可恢复。',
+      purge: handlers.purge,
     }),
   ]
 }

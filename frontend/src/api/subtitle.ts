@@ -63,7 +63,18 @@ export function cancelSubtitleJob(jobId: number): Promise<SubtitleJob> {
   return post<SubtitleJob>(`/subtitle/jobs/${jobId}/cancel`)
 }
 
-/** 删除任务记录（磁盘上已生成的字幕文件保留） */
-export function deleteSubtitleJob(jobId: number): Promise<{ id: number }> {
-  return del<{ id: number }>(`/subtitle/jobs/${jobId}`)
+/** 删除任务记录；purgeFiles=true 时连同磁盘上的字幕文件一起删除 */
+export function deleteSubtitleJob(jobId: number, purgeFiles = false): Promise<{ id: number }> {
+  return del<{ id: number }>(`/subtitle/jobs/${jobId}`, { purge_files: purgeFiles })
+}
+
+/** 批量删除任务记录（整批成功或整批失败）；purgeFiles=true 时字幕文件一并清掉 */
+export function batchDeleteSubtitleJobs(
+  ids: number[],
+  purgeFiles = false,
+): Promise<{ ids: number[]; count: number }> {
+  return post<{ ids: number[]; count: number }>('/subtitle/jobs/batch-delete', {
+    ids,
+    purge_files: purgeFiles,
+  })
 }

@@ -55,9 +55,20 @@ export function cancelCrawlJob(jobId: number): Promise<CrawlJob> {
   return post<CrawlJob>(`/crawl/jobs/${jobId}/cancel`)
 }
 
-/** 删除任务记录（磁盘上的 jsonl 与媒体文件保留） */
-export function deleteCrawlJob(jobId: number): Promise<{ id: number }> {
-  return del<{ id: number }>(`/crawl/jobs/${jobId}`)
+/** 删除任务记录；purgeFiles=true 时连同磁盘上的 jsonl 与媒体文件一起删除 */
+export function deleteCrawlJob(jobId: number, purgeFiles = false): Promise<{ id: number }> {
+  return del<{ id: number }>(`/crawl/jobs/${jobId}`, { purge_files: purgeFiles })
+}
+
+/** 批量删除任务记录（整批成功或整批失败）；purgeFiles=true 时产物一并清掉 */
+export function batchDeleteCrawlJobs(
+  ids: number[],
+  purgeFiles = false,
+): Promise<{ ids: number[]; count: number }> {
+  return post<{ ids: number[]; count: number }>('/crawl/jobs/batch-delete', {
+    ids,
+    purge_files: purgeFiles,
+  })
 }
 
 /**

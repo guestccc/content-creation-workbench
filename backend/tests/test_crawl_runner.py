@@ -25,6 +25,7 @@ from app.services.crawl_runner import (
     CrawlRunner,
     build_argv,
     claim_next_pending_id,
+    detect_phase,
     is_our_child,
     recover_interrupted_jobs,
     summarize_failure,
@@ -239,6 +240,71 @@ class TestHelpers:
     def test_is_our_child_rejects_nonpositive_pid(self):
         assert is_our_child(0) is False
         assert is_our_child(-1) is False
+
+    # ------------------------------------------------------------------
+    # detect_phase：从 MC 日志尾部推断当前阶段
+    # ------------------------------------------------------------------
+
+    def test_detect_phase_empty_log_is_starting(self):
+        assert detect_phase("", login_type="qrcode", crawled_count=0) == "starting"
+
+    def test_detect_phase_whitespace_log_is_starting(self):
+        assert detect_phase("  \n  ", login_type="cookie", crawled_count=0) == "starting"
+
+    def test_detect_phase_cookie_login(self):
+        tail = "INFO [XiaoHongShuLogin.login_by_cookies] Begin login xiaohongshu by cookie ..."
+        assert detect_phase(tail, login_type="cookie", crawled_count=0) == "login_cookie"
+
+    def test_detect_phase_qrcode_waiting_scan(self):
+        tail = (
+            "INFO [XiaoHongShuLogin.login_by_qrcode] Begin login xiaohongshu by qrcode\n"
+            "INFO waiting for scan code login, remaining time is 120s"
+        )
+        assert detect_phase(tail, login_type="qrcode", crawled_count=0) == "login_scan"
+
+    def test_detect_phase_login_redirect(self):
+        tail = (
+            "INFO [XiaoHongShuLogin.login_by_qrcode] Begin login xiaohongshu by qrcode\n"
+            "INFO waiting for scan code login, remaining time is 120s\n"
+            "INFO Login successful then wait for 3 seconds redirect"
+        )
+        assert detect_phase(tail, login_type="qrcode", crawled_count=0) == "login_redirect"
+
+    def test_detect_phase_crawling_by_search_marker(self):
+        tail = "INFO [XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords"
+        assert detect_phase(tail, login_type="qrcode", crawled_count=0) == "crawling"
+
+    def test_detect_phase_crawling_by_note_detail(self):
+        tail = "INFO [get_note_detail_async_task] Begin get note detail, note_id: abc123"
+        assert detect_phase(tail, login_type="qrcode", crawled_count=0) == "crawling"
+
+    def test_detect_phase_crawling_by_crawled_count(self):
+        """即使日志标记被冲掉，只要已有产物就是 crawling。"""
+        tail = "INFO some random line\nINFO another line"
+        assert detect_phase(tail, login_type="qrcode", crawled_count=5) == "crawling"
+
+    def test_detect_phase_finishing_overrides_all(self):
+        tail = (
+            "INFO Begin search Xiaohongshu keywords\n"
+            "INFO [BrowserLauncher] Closing browser process"
+        )
+        assert detect_phase(tail, login_type="qrcode", crawled_count=10) == "finishing"
+
+    def test_detect_phase_last_marker_wins(self):
+        """日志里同一阶段可能反复出现（重试），取最后命中的。"""
+        tail = (
+            "INFO waiting for scan code login, remaining time is 120s\n"
+            "INFO waiting for scan code login, remaining time is 60s\n"
+            "INFO Login successful then wait for 3 seconds redirect"
+        )
+        assert detect_phase(tail, login_type="qrcode", crawled_count=0) == "login_redirect"
+
+    def test_detect_phase_cookie_flow_full(self):
+        """cookie 登录完整流：by cookie → crawling。"""
+        cookie_tail = "INFO Begin login xiaohongshu by cookie ..."
+        assert detect_phase(cookie_tail, login_type="cookie", crawled_count=0) == "login_cookie"
+        crawl_tail = cookie_tail + "\nINFO Begin search Xiaohongshu keywords"
+        assert detect_phase(crawl_tail, login_type="cookie", crawled_count=0) == "crawling"
 
 
 class TestRunJobSuccess:

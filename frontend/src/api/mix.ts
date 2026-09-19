@@ -63,7 +63,18 @@ export function cancelMixJob(jobId: number): Promise<MixJob> {
   return post<MixJob>(`/mix/jobs/${jobId}/cancel`)
 }
 
-/** 删除任务记录（磁盘上已拼出的成片保留） */
-export function deleteMixJob(jobId: number): Promise<{ id: number }> {
-  return del<{ id: number }>(`/mix/jobs/${jobId}`)
+/** 删除任务记录；purgeFiles=true 时连同磁盘上的成片与输出目录一起删除 */
+export function deleteMixJob(jobId: number, purgeFiles = false): Promise<{ id: number }> {
+  return del<{ id: number }>(`/mix/jobs/${jobId}`, { purge_files: purgeFiles })
+}
+
+/** 批量删除任务记录（整批成功或整批失败）；purgeFiles=true 时产物一并清掉 */
+export function batchDeleteMixJobs(
+  ids: number[],
+  purgeFiles = false,
+): Promise<{ ids: number[]; count: number }> {
+  return post<{ ids: number[]; count: number }>('/mix/jobs/batch-delete', {
+    ids,
+    purge_files: purgeFiles,
+  })
 }

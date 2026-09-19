@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     accounts,
     contents,
+    crawl_cookies,
     crawl_jobs,
     creators,
     fs,
@@ -28,4 +29,5 @@ api_router.include_router(mix_jobs.router)
 api_router.include_router(subtitle_jobs.router)
 api_router.include_router(crawl_jobs.router)
 api_router.include_router(creators.router)
+api_router.include_router(crawl_cookies.router)
 api_router.include_router(fs.router)

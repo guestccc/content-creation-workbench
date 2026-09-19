@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.exceptions import BadRequestError
 from app.core.logging import get_logger
 from app.models.subtitle_job import SubtitleJobStatus
-from app.schemas.common import ApiResponse
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest
 from app.schemas.subtitle_job import (
     SubtitleEnvironmentResponse,
     SubtitleFileResponse,
@@ -164,6 +164,21 @@ def list_jobs(
     )
 
 
+# 静态路径 /jobs/batch-delete 必须写在 /jobs/{job_id} 之前（见文件头说明）
+@router.post(
+    "/jobs/batch-delete",
+    response_model=ApiResponse[dict],
+    summary="批量删除字幕提取任务记录",
+)
+def batch_delete_jobs(
+    payload: JobBatchDeleteRequest,
+    service: SubtitleJobServiceDep,
+) -> ApiResponse[dict]:
+    """整批删除（全成功或全失败）；purge_files=true 时字幕文件一并清掉。"""
+    ids = service.delete_jobs(payload.ids, purge_files=payload.purge_files)
+    return ApiResponse(data={"ids": ids, "count": len(ids)})
+
+
 @router.get(
     "/jobs/{job_id}",
     response_model=ApiResponse[SubtitleJobResponse],
@@ -272,7 +287,8 @@ def cancel_job(
 def delete_job(
     service: SubtitleJobServiceDep,
     job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    purge_files: bool = Query(default=False, description="是否连同磁盘上的任务产物一起删除"),
 ) -> ApiResponse[dict]:
-    """删除任务记录（级联删条目）；磁盘上已生成的字幕文件保留不动。"""
-    service.delete_job(job_id)
+    """删除任务记录（级联删条目）；默认保留磁盘产物，purge_files=true 时一并清掉。"""
+    service.delete_job(job_id, purge_files=purge_files)
     return ApiResponse(data={"id": job_id})

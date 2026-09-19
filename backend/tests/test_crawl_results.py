@@ -40,6 +40,7 @@ class TestScanNotes:
         assert note["title"] == "标题-n1"
         assert note["nickname"] == "测试博主"
         assert note["liked_count"] == "10"
+        assert note["collected_count"] == "5"
         assert note["url"] == "https://www.xiaohongshu.com/explore/n1"
         assert note["images"] == [
             "https://img.example/1.webp",
@@ -53,6 +54,51 @@ class TestScanNotes:
             .isoformat()
             .replace("+00:00", "Z")
         )
+
+    def test_collected_count_mapping(self, tmp_path):
+        """收藏数：xhs/dy 落盘叫 collected_count，B 站叫 video_favorite_count，没有的平台给空串。"""
+        _write_jsonl(
+            tmp_path,
+            "bili",
+            "search_contents_2026-09-19.jsonl",
+            [
+                {
+                    "video_id": "v1",
+                    "title": "B站视频",
+                    "desc": "",
+                    "nickname": "up主",
+                    "liked_count": 3,
+                    "video_favorite_count": 8,
+                    "video_comment": 1,
+                    "video_share_count": 2,
+                    "create_time": 1747000000,
+                    "video_url": "https://www.bilibili.com/video/v1",
+                    "source_keyword": "k",
+                }
+            ],
+        )
+        _write_jsonl(
+            tmp_path,
+            "ks",
+            "search_contents_2026-09-19.jsonl",
+            [
+                {
+                    "video_id": "k1",
+                    "title": "快手视频",
+                    "desc": "",
+                    "nickname": "老铁",
+                    "liked_count": 4,
+                    "create_time": 1747000000,
+                    "video_url": "https://www.kuaishou.com/short-video/k1",
+                    "source_keyword": "k",
+                }
+            ],
+        )
+
+        bili_note = crawl_results.scan_notes(tmp_path, "bili")[0]
+        ks_note = crawl_results.scan_notes(tmp_path, "ks")[0]
+        assert bili_note["collected_count"] == "8"  # B 站的收藏叫 favorite
+        assert ks_note["collected_count"] == ""  # 快手 jsonl 里没有收藏字段
 
     def test_dedupe_keeps_last_row(self, tmp_path):
         """搜索页先写一条、详情页再写一条是常态：同 id 保留后写的（字段更全）。

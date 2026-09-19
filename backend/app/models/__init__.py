@@ -13,6 +13,7 @@ from app.models.crawl_job import (
     CrawlerType,
 )
 from app.models.creator import Creator
+from app.models.crawl_cookie import CrawlCookie
 from app.models.publish_task import PublishTask, PublishTaskStatus
 from app.models.mix_job import (
     MixJob,
@@ -46,6 +47,7 @@ __all__ = [
     "CrawlPlatform",
     "CrawlerType",
     "Creator",
+    "CrawlCookie",
     "MixJob",
     "MixJobItem",
     "MixJobStatus",

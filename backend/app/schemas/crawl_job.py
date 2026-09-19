@@ -96,7 +96,7 @@ class CrawlJobCreate(BaseModel):
     get_comments: bool = Field(default=True, description="是否抓评论")
     get_sub_comments: bool = Field(default=False, description="是否抓二级评论")
     max_comments: int = Field(default=10, ge=0, le=200, description="每条笔记最多抓多少条一级评论")
-    headless: bool = Field(default=False, description="是否无头跑浏览器（扫码登录必须关）")
+    headless: bool = Field(default=False, description="是否无头跑浏览器（扫码的二维码走系统看图软件，与窗口无关；遇滑块验证请关闭重试）")
     max_concurrency: int = Field(default=1, ge=1, description="并发抓取数（后端有上限钳制）")
 
     @field_validator("platform")
@@ -164,6 +164,11 @@ class CrawlJobResponse(TimestampMixin):
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
     error_message: str = Field(description="失败原因或收尾备注")
+    phase: str = Field(
+        default="",
+        description="running 任务的当前阶段（starting/login_cookie/login_scan/login_redirect/crawling/finishing），"
+        "非 running 时为空串",
+    )
     created_at: datetime = Field(description="创建时间")
     updated_at: datetime = Field(description="更新时间")
 
@@ -230,6 +235,10 @@ class CrawlNoteResponse(BaseModel):
     desc: str = Field(default="", description="正文/摘要")
     nickname: str = Field(default="", description="作者昵称（MC 已脱敏）")
     liked_count: str = Field(default="", description="点赞数（MC 落盘为字符串，原样透传）")
+    collected_count: str = Field(
+        default="",
+        description="收藏数（仅 xhs/dy 的 collected_count 与 B 站的 favorite，其余平台为空）",
+    )
     comment_count: str = Field(default="", description="评论数")
     share_count: str = Field(default="", description="分享/转发数")
     publish_time: str = Field(default="", description="发布时间（统一转 ISO，转不了原样返回）")
