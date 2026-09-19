@@ -10,10 +10,11 @@
 | `images/` | 豆包生成的图片素材 |
 | `videos/` | 豆包生成的视频素材 |
 | `specs/` | 提示词规范、生成参数、审核标准等文档 |
+| `tasks/` | 按任务分子目录的 README、规则、进度文档（**入库**） |
 
 ## git 规则
 
 根目录 `.gitignore` 已配置：挡住 `doubao/` 下的资源文件，
-放行 `README.md` 与各子目录的 `.gitkeep` 占位（git 不跟踪空目录）。
-往里面扔素材不会被提交；如果要新增子目录，记得在 `.gitignore` 里
-补一条放行规则。
+放行 `README.md`、`tasks/` 全部内容与各子目录的 `.gitkeep` 占位
+（git 不跟踪空目录）。往 images/ videos/ specs/ 里扔素材不会被提交；
+如果要新增素材子目录，记得在 `.gitignore` 里补一条放行规则。

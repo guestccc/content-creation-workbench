@@ -1,0 +1,86 @@
+{
+  "task": "image-to-video",
+  "description": "把 doubao/images/ 图片逐张生成视频到 doubao/videos/，跳过已完成项。详见同目录 README.md",
+  "initialized_at": "2026-09-19",
+  "last_updated": "2026-09-19",
+  "rules_confirmed": true,
+  "rules_pending": [],
+  "items": [
+    {
+      "image": "扶梯.jpg",
+      "video": "自动扶梯01.mp4",
+      "status": "done",
+      "done_at": "2026-09-15",
+      "note": "扶梯=自动扶梯，01 后缀；依据时间戳推断"
+    },
+    {
+      "image": "空调.jpg",
+      "video": "空调.mp4",
+      "status": "done",
+      "done_at": "2026-09-15",
+      "note": ""
+    },
+    {
+      "image": "自行车.jpeg",
+      "video": "自行车.mp4",
+      "status": "done",
+      "done_at": "2026-09-16",
+      "note": ""
+    },
+    {
+      "image": "高铁.jpeg",
+      "video": "高铁.mp4",
+      "status": "done",
+      "done_at": "2026-09-15",
+      "note": ""
+    },
+    {
+      "image": "相机01.jpeg",
+      "video": "相机01 2026-09-19.mp4",
+      "status": "done",
+      "done_at": "2026-09-19",
+      "note": "镜头固定+只动主体（光圈开合/快门一闪）；5s；seedance_2.0_fast；覆盖了上版错误样片"
+    },
+    {
+      "image": "相机02.jpeg",
+      "video": null,
+      "status": "pending",
+      "done_at": null,
+      "note": ""
+    },
+    {
+      "image": "相机03.jpeg",
+      "video": null,
+      "status": "pending",
+      "done_at": null,
+      "note": ""
+    },
+    {
+      "image": "相机04.jpeg",
+      "video": null,
+      "done_at": null,
+      "status": "pending",
+      "note": ""
+    },
+    {
+      "image": "相机05.jpeg",
+      "video": null,
+      "status": "pending",
+      "done_at": null,
+      "note": ""
+    },
+    {
+      "image": "自动扶梯立体剖面图生成.png",
+      "video": null,
+      "status": "pending",
+      "done_at": null,
+      "note": "2026-09-19 新增，立体剖面图"
+    }
+  ],
+  "orphan_videos": [
+    {
+      "video": "飞机.mp4",
+      "note": "images/ 中无对应源图片，历史遗留，暂不处理"
+    }
+  ]
+}
