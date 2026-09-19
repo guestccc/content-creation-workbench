@@ -66,7 +66,7 @@ class SubtitleEnvironmentResponse(BaseModel):
     platform_label: str = Field(description="系统名的中文展示")
     python_platform: str = Field(description="platform.platform() 的原始输出，排查用")
     materials_dir: str = Field(
-        description="素材目录根（仓库根目录的 materials/），下有 source/clips/subtitle/output 四个分段"
+        description="素材目录根（仓库根目录的 materials/），下有 source/clips/subtitle/output 等分段"
     )
     default_input_dir: str = Field(
         description="默认输入目录（materials/source），页面用它作为输入目录的初始值"

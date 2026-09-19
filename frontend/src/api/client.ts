@@ -150,6 +150,6 @@ export function put<T>(path: string, body?: unknown): Promise<T> {
 }
 
 /** DELETE 请求 */
-export function del<T>(path: string): Promise<T> {
-  return request<T>(path, { method: 'DELETE' })
+export function del<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+  return request<T>(`${path}${buildQuery(params)}`, { method: 'DELETE' })
 }
