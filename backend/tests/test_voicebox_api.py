@@ -156,6 +156,25 @@ class TestEnvironment:
         # 服务是通的，就不该再甩安装指引
         assert data["install_hints"] == []
 
+    def test_model_not_downloaded_explains_hf_mirror(self, client, vb, fake_upstream):
+        """下不动是国内最常踩的坑：提示要带上镜像的变量名与值，光说「会慢」没用。"""
+        fake_upstream["health"] = {**HEALTH_READY, "model_downloaded": False}
+
+        warnings = _environment(client)["warnings"]
+
+        mirror = [text for text in warnings if "HF_ENDPOINT" in text]
+        assert len(mirror) == 1, f"模型没下完时该有一条镜像提示，实际 {warnings}"
+        assert "https://hf-mirror.com" in mirror[0]
+        assert "重启" in mirror[0], "换完镜像不重启不生效，这句不能漏"
+
+    def test_install_hints_preempt_the_hf_mirror(self, client, vb, fake_upstream):
+        """第一次装的人在指引里就看见镜像，别等下到一半才踩坑。"""
+        fake_upstream["health"] = dict(HEALTH_UNREACHABLE)
+
+        hints = _environment(client)["install_hints"]
+
+        assert any("HF_ENDPOINT" in hint["note"] for hint in hints)
+
     def test_ready_reports_profiles_and_gpu(self, client, vb, fake_upstream):
         data = _environment(client)
 
@@ -166,13 +185,18 @@ class TestEnvironment:
         assert data["default_output_dir"].endswith("dubbing")
         assert data["warnings"] == []
 
-    def test_no_gpu_only_warns(self, client, vb, fake_upstream):
+    def test_no_gpu_accel_only_warns(self, client, vb, fake_upstream):
+        """AMD/Intel 机器上 gpu_available 同样是 False —— 它说的是「没有能用的
+        CUDA 加速」，不是「没有显卡」。文案照实说，别让人去重装显卡驱动。"""
         fake_upstream["health"] = {**HEALTH_READY, "gpu_available": False}
 
         data = _environment(client)
 
-        assert data["ready"] is True  # 没显卡也能跑，只是慢
-        assert any("GPU" in warning for warning in data["warnings"])
+        assert data["ready"] is True  # 没有加速也能跑，只是慢
+        warning = next(text for text in data["warnings"] if "GPU" in text)
+        assert "NVIDIA" in warning, "要讲清它只认 CUDA，用户才知道问题出在哪"
+        assert "没有检测到可用的 GPU" not in warning, "有独显的机器上这句是假话"
+        assert "0.6B" in warning, "纯 CPU 的实际出路是换小模型，得写进提示里"
 
     def test_environment_cache_holds_until_refresh(self, client, vb, fake_upstream):
         assert _environment(client)["profile_count"] == 2

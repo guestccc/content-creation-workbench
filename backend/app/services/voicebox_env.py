@@ -26,6 +26,16 @@ logger = get_logger(__name__)
 _cache_lock = threading.Lock()
 _cache: Optional[Tuple[float, dict]] = None
 
+#: 模型下载卡住时的国内解锁方式。Voicebox 从 huggingface.co 拉模型（1.7B 约 3.5GB），
+#: 国内直连会超时 —— 实测症状是下到一半彻底不动（分片停在半路、进程还活着）。
+#: huggingface_hub 认 HF_ENDPOINT，换成镜像即可；**已下载的分片会续传**，
+#: 所以这句里「已经下载的部分会接着下」不是安慰话。
+_HF_MIRROR_HINT = (
+    "模型下载一直卡住不动，多半是国内连不上 huggingface.co："
+    "设置环境变量 HF_ENDPOINT=https://hf-mirror.com 后重启 Voicebox，"
+    "已经下载的部分会接着下。"
+)
+
 
 def install_hints() -> List[dict]:
     """连不上时的分步指引。**命令只是文本**，后端绝不替用户下载安装。"""
@@ -47,7 +57,8 @@ def install_hints() -> List[dict]:
             "title": "3. 建一个音色",
             "command": "",
             "note": "在 Voicebox 的「Profiles」里克隆一段自己的声音，或直接用预设音色；"
-            "模型会在首次生成时自动下载（1.7B 约 3.5GB）。",
+            "模型会在首次生成时自动下载（1.7B 约 3.5GB）。"
+            "国内连不上 huggingface.co：先设 HF_ENDPOINT=https://hf-mirror.com 再下，否则会卡在半路。",
             "url": "",
         },
         {
@@ -106,9 +117,17 @@ def _probe_uncached() -> dict:
 
     if reachable:
         if not gpu_available:
-            warnings.append("没有检测到可用的 GPU：生成会明显慢一些（CPU 也能跑）。")
+            # 措辞要小心：**AMD/Intel 机器上这个字段一样是 False** —— 它说的是
+            # 「没有能用的 CUDA 加速」，不是「没有显卡」。Voicebox 只带 CUDA 后端
+            # （Windows 上 AMD 既没有 ROCm 也没有 DirectML），对着一张独显说
+            # 「没检测到 GPU」会让人以为驱动有问题，白折腾。
+            warnings.append(
+                "没有检测到 Voicebox 能用的 GPU 加速：它只支持 NVIDIA 的 CUDA，"
+                "AMD/Intel 卡都会退回 CPU 跑。生成会明显慢一些，换 0.6B 模型能快很多。"
+            )
         if model_downloaded is False:
             warnings.append("当前模型还没有下载完，第一次生成会先花时间下载（1.7B 约 3.5GB）。")
+            warnings.append(_HF_MIRROR_HINT)
         if profile_count == 0:
             warnings.append(
                 "Voicebox 里还没有音色：在它的「Profiles」里建一个（克隆或预设）之后，"
