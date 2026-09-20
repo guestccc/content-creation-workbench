@@ -1,7 +1,7 @@
 [project]
 name = "content-workbench-cli"
 version = "0.1.0"
-description = "内容创作工作台 - 开发服务管理 CLI"
+description = "content-creation-workbench - 开发服务管理 CLI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

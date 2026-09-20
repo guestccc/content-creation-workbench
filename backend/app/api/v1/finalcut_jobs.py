@@ -1,19 +1,23 @@
 """一键成品接口。
 
-路由注册顺序：/environment、/settings、/sources、/preview、
+路由注册顺序：/environment、/settings、/sources、
 /copy-jobs/batch-delete、/render-jobs/batch-delete 等静态路径
 必须写在 /copy-jobs/{job_id} 与 /render-jobs/{job_id} 之前。
+
+「任意本地视频的只读预览流」不在这儿 —— 它是跨功能的（一键成品的框选步骤、
+镜头分割/字幕提取的素材列表都要播本地视频），统一放在 `GET /fs/preview?path=`，
+见 api/v1/fs.py。
 
 接口一览：
 - GET  /finalcut/environment              环境自检（AI / ffmpeg-drawtext / 中文字体）
 - GET  /finalcut/settings                 读 AI 配置（key 只给掩码）
 - PUT  /finalcut/settings                 写 AI 配置（写回 .env 并热同步；key 留空 = 不改）
 - GET  /finalcut/sources                  历史产物来源（混剪成片 + 字幕 .srt）
-- GET  /finalcut/preview?path=            任意本地视频的只读流式预览（框选步骤用）
 - POST /finalcut/copy-jobs                创建文案生成任务
 - GET  /finalcut/copy-jobs                历史任务分页列表
 - GET  /finalcut/copy-jobs/{id}           任务详情（轮询进度也用它）
 - POST /finalcut/copy-jobs/{id}/cancel    取消任务（结果不落库）
+- PUT  /finalcut/copy-jobs/{id}/remark    更新任务备注（空串 = 清空）
 - POST /finalcut/copy-jobs/batch-delete   批量删除任务记录（无磁盘产物，无 purge）
 - DELETE /finalcut/copy-jobs/{id}         删除任务记录（只删记录）
 - POST /finalcut/render-jobs              创建合成任务（勾选的文案 × 框选 × 样式）
@@ -22,11 +26,10 @@
 - GET  /finalcut/render-jobs/{id}/outputs/{n}/video  成片视频流（支持 Range）
 - GET  /finalcut/render-jobs/{id}/outputs/{n}/thumb  成片封面
 - POST /finalcut/render-jobs/{id}/cancel  取消合成任务
+- PUT  /finalcut/render-jobs/{id}/remark  更新任务备注（空串 = 清空）
 - POST /finalcut/render-jobs/batch-delete 批量删除（purge_files=true 连产物一起删）
 - DELETE /finalcut/render-jobs/{id}       删除合成任务（?purge_files=true 一并清产物）
 """
-
-from pathlib import Path
 
 from fastapi import APIRouter, Path as PathParam, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -34,9 +37,8 @@ from fastapi.responses import FileResponse, Response
 from app.api.deps import FinalcutCopyJobServiceDep, FinalcutRenderJobServiceDep
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.logging import get_logger
-from app.schemas.common import ApiResponse, JobBatchDeleteRequest, absolutize_path
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.finalcut_job import (
-    VIDEO_INPUT_EXTENSIONS,
     AiSettingsResponse,
     AiSettingsUpdate,
     FinalcutCopyJobCreate,
@@ -207,6 +209,21 @@ def cancel_copy_job(
     return ApiResponse(data=FinalcutCopyJobResponse.from_model(job))
 
 
+@router.put(
+    "/copy-jobs/{job_id}/remark",
+    response_model=ApiResponse[FinalcutCopyJobResponse],
+    summary="更新文案任务备注",
+)
+def update_copy_job_remark(
+    payload: JobRemarkUpdate,
+    service: FinalcutCopyJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[FinalcutCopyJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
+    return ApiResponse(data=FinalcutCopyJobResponse.from_model(job))
+
+
 @router.delete(
     "/copy-jobs/{job_id}",
     response_model=ApiResponse[dict],
@@ -241,43 +258,6 @@ def get_sources(
             subtitles=[FinalcutSourceItem(**item) for item in data["subtitles"]],
             videos=[FinalcutSourceItem(**item) for item in data["videos"]],
         )
-    )
-
-
-#: 预览流的 Content-Type 按后缀取（浏览器对 mkv/mov 的支持随缘，播不了是前端的事）。
-_PREVIEW_MEDIA_TYPES = {
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".mkv": "video/x-matroska",
-    ".webm": "video/webm",
-}
-
-
-@router.get("/preview", summary="本地视频只读流式预览（支持 Range）")
-def preview_local_video(
-    request: Request,
-    path: str = Query(..., description="视频文件绝对路径"),
-) -> Response:
-    """框选步骤要播用户选的任意本地视频，这里给一条只读流。
-
-    安全边界：绝对路径 + 视频后缀白名单 + is_file，与 `/fs/list` 同级 ——
-    前提是本工具仅监听 127.0.0.1 的单机场景。任务创建后只认任务记录里的
-    路径，这个接口不参与任务生命周期。
-    """
-    try:
-        video = Path(absolutize_path(path, "视频文件"))
-    except ValueError as exc:
-        raise BadRequestError(str(exc)) from exc
-    if video.suffix.lower() not in VIDEO_INPUT_EXTENSIONS:
-        raise BadRequestError(
-            f"只支持 {' / '.join(VIDEO_INPUT_EXTENSIONS)} 文件，当前是：{video.suffix or '（无扩展名）'}"
-        )
-    if not video.is_file():
-        raise NotFoundError(f"视频文件不存在：{video.name}")
-    return ranged_file_response(
-        video,
-        request.headers.get("range"),
-        media_type=_PREVIEW_MEDIA_TYPES[video.suffix.lower()],
     )
 
 
@@ -417,6 +397,21 @@ def cancel_render_job(
 ) -> ApiResponse[FinalcutRenderJobResponse]:
     """取消排队中或执行中的任务，执行中的会整组杀掉当前 ffmpeg 子进程。"""
     job = service.cancel_job(job_id)
+    return ApiResponse(data=FinalcutRenderJobResponse.from_model(job))
+
+
+@router.put(
+    "/render-jobs/{job_id}/remark",
+    response_model=ApiResponse[FinalcutRenderJobResponse],
+    summary="更新合成任务备注",
+)
+def update_render_job_remark(
+    payload: JobRemarkUpdate,
+    service: FinalcutRenderJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[FinalcutRenderJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
     return ApiResponse(data=FinalcutRenderJobResponse.from_model(job))
 
 

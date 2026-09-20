@@ -146,7 +146,7 @@ def hint(message: str) -> None:
 # 机器可读的进度标记
 # --------------------------------------------------------------------------
 
-#: 进度标记的前缀。工作台（内容创作工作台 backend/app/services/scene_runner.py）
+#: 进度标记的前缀。工作台（content-creation-workbench 的 backend/app/services/scene_runner.py）
 #: 在切割时盯着这一行，把「第几条视频切到第几个片段」展示给用户。两边是同一份
 #: 契约 —— 改格式要同时改那边的 PROGRESS_MARKER 正则。
 #:

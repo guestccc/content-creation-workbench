@@ -243,6 +243,7 @@ class FinalcutCopyJobResponse(TimestampMixin):
     current_phase: str = Field(description="当前相位：read / analyze / parse")
     progress_percent: float = Field(description="完成百分比（0-100）")
     error_message: str = Field(description="失败原因")
+    remark: str = Field(description="备注（用户可编辑，最多 200 字；空串表示没写）")
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
     created_at: datetime = Field(description="创建时间")
@@ -270,6 +271,7 @@ class FinalcutCopyJobResponse(TimestampMixin):
             current_phase=model.current_phase,
             progress_percent=model.progress_percent,
             error_message=model.error_message,
+            remark=model.remark,
             started_at=model.started_at,
             finished_at=model.finished_at,
             created_at=model.created_at,
@@ -352,6 +354,7 @@ class FinalcutRenderJobResponse(TimestampMixin):
     current_index: int = Field(description="当前处理的成片序号（0 表示未开始）")
     progress_percent: float = Field(description="当前这条成片的完成百分比（0-100）")
     error_message: str = Field(description="失败原因汇总")
+    remark: str = Field(description="备注（用户可编辑，最多 200 字；空串表示没写）")
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
     created_at: datetime = Field(description="创建时间")
@@ -385,6 +388,7 @@ class FinalcutRenderJobResponse(TimestampMixin):
             current_index=model.current_index,
             progress_percent=model.progress_percent,
             error_message=model.error_message,
+            remark=model.remark,
             started_at=model.started_at,
             finished_at=model.finished_at,
             created_at=model.created_at,

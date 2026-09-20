@@ -6,6 +6,7 @@
 接口一览：
 
 - ``GET    /fs/list``                        列目录
+- ``GET    /fs/preview?path=``               本地视频只读流式预览（支持 Range）
 - ``GET    /fs/favorites``                   收藏的目录
 - ``POST   /fs/favorites``                   收藏目录（幂等）
 - ``DELETE /fs/favorites/{favorite_id}``     取消收藏
@@ -13,28 +14,32 @@
 静态路径要写在动态路径之前（``/favorites`` 在 ``/favorites/{favorite_id}`` 前面）。
 
 安全边界（按需求有意放开根目录限制后，仍保留的底线）：
-- 只读：只返回名称/类型/大小，绝不返回任何文件内容；
-- 路径必须真实存在且是目录，否则 400；
+- 路径必须真实存在（列表还要求是目录），否则 400；
 - 单次最多返回 SCENE_FS_LIST_LIMIT 条，超出截断并置 truncated 标记；
-- 收藏只登记路径，不读取、不移动、不复制任何文件；取消收藏不动磁盘。
+- 收藏只登记路径，不读取、不移动、不复制任何文件；取消收藏不动磁盘；
+- ``/preview`` 是全模块唯一会吐文件内容的接口，因此**只吐视频**：绝对路径 +
+  视频后缀白名单 + is_file，只读、不改写、不删除，并且只服务白名单内的后缀。
 
-⚠️ 若日后把 HOST 改成 0.0.0.0 暴露到局域网，本接口必须先加鉴权
+⚠️ 若日后把 HOST 改成 0.0.0.0 暴露到局域网，本模块必须先加鉴权
 或恢复根目录白名单 —— 现在它依赖「仅监听 127.0.0.1 的单机工具」这个前提。
 """
 
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi import Path as PathParam
+from fastapi.responses import Response
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.logging import get_logger
 from app.core.materials import ensure_materials_layout
-from app.schemas.common import ApiResponse
+from app.core.video_files import media_type_for_video
+from app.schemas.common import ApiResponse, absolutize_path
 from app.schemas.scene_job import FsEntry, FsFavoriteCreate, FsFavoriteItem, FsListData
 from app.services import fs_favorites
+from app.services.file_range import ranged_file_response
 from app.services.scene_job_service import is_video_file
 
 router = APIRouter(prefix="/fs", tags=["文件系统"])
@@ -128,6 +133,50 @@ def list_directory(
             truncated=truncated,
             video_count=video_count,
         )
+    )
+
+
+@router.get("/preview", summary="本地视频只读流式预览（支持 Range）")
+def preview_local_video(
+    request: Request,
+    path: str = Query(..., description="视频文件绝对路径"),
+) -> Response:
+    """把本地视频以只读流发给 ``<video>``：整文件（200）或字节段（206 Partial Content）。
+
+    素材列表里的「预览」按钮走它 —— 勾选之前先看一眼这条素材是不是想要的那条，
+    免得选错了再等一遍切分。字幕提取页共用同一张卡片，因此也一并有了预览。
+
+    后缀白名单与 ``/fs/list`` 判 ``is_video`` 用的是同一份配置：
+    **列表里标成视频的，这里都播得出来**，不会出现「列得出来、点开 400」。
+
+    安全边界与 ``/fs/list`` 同级：绝对路径 + 后缀白名单 + ``is_file()``，
+    只读（不接收任何写操作）。前提是本工具仅监听 127.0.0.1。
+
+    Raises:
+        BadRequestError(400): 不是绝对路径、后缀不在白名单。
+        NotFoundError(404): 文件不存在。
+    """
+    try:
+        video = Path(absolutize_path(path, "视频文件"))
+    except ValueError as exc:
+        raise BadRequestError(str(exc)) from exc
+
+    # is_video_file 是 scene_job_service 的薄封装（内部填的就是场景白名单），
+    # 与 /fs/list 判 is_video 用的是同一个函数，规则不会漂
+    if not is_video_file(video.name):
+        raise BadRequestError(
+            f"只支持 {' / '.join(settings.SCENE_INPUT_EXTENSIONS)} 文件，"
+            f"当前是：{video.suffix or '（无扩展名）'}"
+        )
+    if not video.is_file():
+        raise NotFoundError(f"视频文件不存在：{video.name}")
+
+    # Range 由父进程按字节转发，媒体类型按后缀给 —— 给成 octet-stream
+    # 浏览器会当成附件下载，<video> 只会黑屏
+    return ranged_file_response(
+        video,
+        request.headers.get("range"),
+        media_type=media_type_for_video(video.name),
     )
 
 

@@ -1,6 +1,6 @@
-# 内容创作工作台 · 后端服务
+# content-creation-workbench · 后端服务
 
-基于 FastAPI 的内容创作工作台后端，提供内容的增删改查与统计接口。
+基于 FastAPI 的 content-creation-workbench 后端，提供内容的增删改查与统计接口。
 
 ## 技术选型
 
@@ -76,7 +76,7 @@ uv run pytest
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `APP_NAME` | 内容创作工作台 | 应用名称 |
+| `APP_NAME` | content-creation-workbench | 应用名称 |
 | `DEBUG` | false | 调试模式 |
 | `HOST` / `PORT` | 127.0.0.1 / 8000 | 监听地址 |
 | `DATABASE_URL` | sqlite:///./workbench.db | 数据库连接串 |

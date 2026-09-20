@@ -127,6 +127,8 @@ export interface MixJob {
   started_at: string | null
   finished_at: string | null
   error_message: string
+  /** 备注（用户可编辑，最多 200 字；空串表示没写） */
+  remark: string
   created_at: string
   updated_at: string
   outputs: MixOutputItem[]

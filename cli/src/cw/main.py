@@ -27,14 +27,14 @@ app = typer.Typer(
     add_completion=False,
     rich_markup_mode=None,
     no_args_is_help=False,
-    help="内容创作工作台 - 开发服务管理",
+    help="content-creation-workbench - 开发服务管理",
 )
 
 
 def _show_version(value: bool) -> None:
     """--version 的回调。"""
     if value:
-        console.print(f"内容创作工作台 CLI {__version__}")
+        console.print(f"content-creation-workbench CLI {__version__}")
         raise typer.Exit()
 
 

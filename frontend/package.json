@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "内容创作工作台 - 前端（React + TypeScript + Vite）",
+  "description": "content-creation-workbench - 前端（React + TypeScript + Vite）",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

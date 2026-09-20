@@ -63,6 +63,11 @@ export function cancelSubtitleJob(jobId: number): Promise<SubtitleJob> {
   return post<SubtitleJob>(`/subtitle/jobs/${jobId}/cancel`)
 }
 
+/** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateSubtitleJobRemark(jobId: number, remark: string): Promise<SubtitleJob> {
+  return put<SubtitleJob>(`/subtitle/jobs/${jobId}/remark`, { remark })
+}
+
 /** 删除任务记录；purgeFiles=true 时连同磁盘上的字幕文件一起删除 */
 export function deleteSubtitleJob(jobId: number, purgeFiles = false): Promise<{ id: number }> {
   return del<{ id: number }>(`/subtitle/jobs/${jobId}`, { purge_files: purgeFiles })

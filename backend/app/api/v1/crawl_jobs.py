@@ -12,6 +12,7 @@
 - GET    /jobs/{id}/log           MC 子进程日志尾部
 - GET    /jobs/{id}/media/{path}  已下载的本地媒体文件（图片/视频）
 - POST   /jobs/{id}/cancel        取消任务
+- PUT    /jobs/{id}/remark       更新任务备注（空串 = 清空）
 - POST   /jobs/batch-delete       批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}               删除任务记录（?purge_files=true 时产物一并清）
 """
@@ -22,7 +23,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import CrawlJobServiceDep
 from app.core.logging import get_logger
 from app.models.crawl_job import CrawlJobStatus, CrawlPlatform
-from app.schemas.common import ApiResponse, JobBatchDeleteRequest
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.crawl_job import (
     CrawlEnvironmentResponse,
     CrawlJobCreate,
@@ -210,6 +211,21 @@ def cancel_job(
     已抓到的 jsonl 与媒体保留在输出目录，结果接口照常可查。
     """
     job = service.cancel_job(job_id)
+    return ApiResponse(data=CrawlJobResponse.from_model(job))
+
+
+@router.put(
+    "/jobs/{job_id}/remark",
+    response_model=ApiResponse[CrawlJobResponse],
+    summary="更新素材抓取任务备注",
+)
+def update_job_remark(
+    payload: JobRemarkUpdate,
+    service: CrawlJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[CrawlJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
     return ApiResponse(data=CrawlJobResponse.from_model(job))
 
 

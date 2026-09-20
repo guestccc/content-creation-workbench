@@ -1,12 +1,13 @@
 /**
  * 历史任务表里几个跨页面一致的列。
  *
- * 镜头分割与字幕提取的历史表逐列同构（ID / 状态 / 输入 / 视频数 / 创建时间 / 操作），
- * 差异只在中间那两列，所以共用的这几列做成工厂函数，各页面自己拼装数组。
+ * 六个任务域的历史表都是「ID / 状态 / …中间各域自己的列… / 备注 / 创建时间 / 操作」，
+ * 逐字一样的那几列做成工厂函数，各页面自己拼装数组。
  */
 
 import { Button, Popconfirm, Space, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnType } from 'antd/es/table'
+import type { MouseEvent } from 'react'
 
 import type { UsePurgeFilesResult } from '../hooks'
 
@@ -68,6 +69,65 @@ export function jobInputColumn<T extends { input_path: string }>(): ColumnType<T
         <Text style={{ fontSize: 12 }}>{value.split('/').pop()}</Text>
       </Tooltip>
     ),
+  }
+}
+
+/** 备注列要用到的最小行形状：备注就在列表行上，不必为编辑再取一次详情 */
+export interface JobRowRemark {
+  id: number
+  /** 备注（用户自己写的标记；空串 / 缺失都表示没写） */
+  remark?: string
+}
+
+/**
+ * 备注列：单元格本身就是编辑入口 —— 有备注就显示备注（截断、悬浮看全文），
+ * 没备注显示「＋ 添加备注」，点一下打开备注编辑弹窗。
+ *
+ * 截断交给单元格里的 Typography.Text（它自带 antd 样式的 tooltip），所以列上的
+ * ellipsis 写 { showTitle: false }：把 rc-table 往 <td> 上写的原生 title 关掉，
+ * 否则悬停时浏览器原生提示会和 antd 提示同时冒出来。
+ *
+ * 不用 Typography.Link：它的 ellipsis 只接受 boolean，给不了 { tooltip }；
+ * 链接观感用 Text + 主题色自己给。
+ */
+export function jobRemarkColumn<T extends JobRowRemark>({
+  onEdit,
+}: {
+  /** 点备注单元格：打开这条任务的备注编辑弹窗 */
+  onEdit: (job: T) => void
+}): ColumnType<T> {
+  return {
+    title: '备注',
+    dataIndex: 'remark',
+    // 窄列：再宽就要去挤「输入 / 输出目录 / 内容」那些真正需要空间的弹性列了
+    width: 160,
+    ellipsis: { showTitle: false },
+    render: (_: unknown, record: T) => {
+      const remark = record.remark?.trim() ?? ''
+      const openEditor = (event: MouseEvent) => {
+        // 挡一下冒泡：将来若有人给表加 onRow.onClick（点行看详情），
+        //「点备注 = 改备注」应当优先
+        event.stopPropagation()
+        onEdit(record)
+      }
+
+      if (!remark) {
+        return (
+          <Text type="secondary" style={{ fontSize: 12, cursor: 'pointer' }} onClick={openEditor}>
+            ＋ 添加备注
+          </Text>
+        )
+      }
+      return (
+        <Text
+          ellipsis={{ tooltip: remark }}
+          style={{ fontSize: 12, cursor: 'pointer', color: 'var(--color-primary)' }}
+          onClick={openEditor}
+        >
+          {remark}
+        </Text>
+      )
+    },
   }
 }
 

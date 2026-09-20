@@ -35,6 +35,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.content import utcnow
+from app.models.job_common import JobRemarkMixin
 
 
 class MixJobStatus:
@@ -80,7 +81,7 @@ class MixPhase:
     ALL: tuple = (NORMALIZE, CONCAT)
 
 
-class MixJob(Base):
+class MixJob(Base, JobRemarkMixin):
     """智能混剪任务表。"""
 
     __tablename__ = "mix_jobs"

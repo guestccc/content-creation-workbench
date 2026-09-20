@@ -5,13 +5,19 @@
  * 几条（不勾=全部）→ 选输出目录。差别只有输出目录的文案，所以文案做成 props。
  *
  * 扫描目录、维护勾选这些逻辑都在 useSourceDir 里，这个组件只负责把它摆出来。
+ * 唯一的本地状态是「正在预览哪一条」—— 纯粹是这个卡片自己的开关，
+ * 不跨页也不影响任务，没必要往上提。
  */
 
-import { FolderOpenOutlined } from '@ant-design/icons'
+import { FolderOpenOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import { Button, Card, Checkbox, Flex, Space, Switch, Tag, Typography } from 'antd'
+import { useState } from 'react'
 
+import { localVideoPreviewUrl } from '../api/filesystem'
 import type { UseSourceDirResult } from '../hooks/useSourceDir'
+import type { FsEntry } from '../types/scene'
 import { formatBytes } from '../utils/format'
+import VideoPreviewModal from './VideoPreviewModal'
 
 const { Text } = Typography
 
@@ -63,6 +69,8 @@ export default function SourceDirCard({
   onPickOutput,
 }: SourceDirCardProps) {
   const { path, data, videos, selected } = dir
+  /** 正在预览的那一条；null 表示弹窗关着 */
+  const [previewing, setPreviewing] = useState<FsEntry | null>(null)
 
   return (
     <Card
@@ -126,12 +134,25 @@ export default function SourceDirCard({
                   style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
                 >
                   {videos.map((entry) => (
-                    <Checkbox key={entry.name} value={entry.name}>
-                      <Text style={{ fontSize: 13 }}>{entry.name}</Text>
-                      <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-                        {entry.size_bytes !== null ? formatBytes(entry.size_bytes) : ''}
-                      </Text>
-                    </Checkbox>
+                    // 预览按钮放在 Checkbox **外面**：套进 label 里的话，点一下
+                    // 预览会连带把这一条勾上/取消勾选 —— 用户只是看一眼，不该
+                    // 顺手改了勾选状态
+                    <Flex key={entry.name} align="center" gap={8}>
+                      <Checkbox value={entry.name} style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13 }}>{entry.name}</Text>
+                        <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                          {entry.size_bytes !== null ? formatBytes(entry.size_bytes) : ''}
+                        </Text>
+                      </Checkbox>
+                      <Button
+                        type="link"
+                        style={{ padding: 0 }}
+                        icon={<PlayCircleOutlined />}
+                        onClick={() => setPreviewing(entry)}
+                      >
+                        预览
+                      </Button>
+                    </Flex>
                   ))}
                 </Checkbox.Group>
               )}
@@ -150,6 +171,22 @@ export default function SourceDirCard({
           </Text>
         </div>
       </Space>
+
+      {/* 素材预览：勾选之前先确认是哪一条素材，省得选错了再白等一遍切分 */}
+      <VideoPreviewModal
+        open={previewing !== null}
+        title={previewing?.name}
+        src={previewing ? localVideoPreviewUrl(previewing.path) : undefined}
+        // 换一条要换 key，否则浏览器接着放上一条的缓冲
+        videoKey={previewing?.path}
+        caption={
+          <Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>
+            {previewing?.path}
+          </Text>
+        }
+        width={720}
+        onClose={() => setPreviewing(null)}
+      />
     </Card>
   )
 }

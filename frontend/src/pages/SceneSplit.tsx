@@ -53,6 +53,7 @@ import type { ColumnsType, TableProps } from 'antd/es/table'
 import DirectoryPicker from '../components/DirectoryPicker'
 import HistoryCard from '../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../components/JobProgressCard'
+import JobRemarkModal from '../components/JobRemarkModal'
 import SourceDirCard from '../components/SourceDirCard'
 import VideoPreviewModal from '../components/VideoPreviewModal'
 import {
@@ -60,6 +61,7 @@ import {
   jobCreatedColumn,
   jobIdColumn,
   jobInputColumn,
+  jobRemarkColumn,
   jobStatusColumn,
 } from '../components/jobColumns'
 import {
@@ -68,6 +70,7 @@ import {
   useDirectoryPicker,
   useJobList,
   useJobPolling,
+  useJobRemark,
   useJobRunner,
   usePurgeFiles,
   useSourceDir,
@@ -85,6 +88,7 @@ import {
   fetchSceneSummary,
   fetchSceneTemplates,
   retrySceneItem,
+  updateSceneJobRemark,
 } from '../api/scene'
 import {
   DETECTOR_OPTIONS,
@@ -187,6 +191,9 @@ export default function SceneSplit() {
   }
 
   const history = useJobList<SceneJob>({ fetchList: fetchSceneJobs })
+
+  // 历史表「备注」列的编辑开关：保存成功后就地刷新列表
+  const remark = useJobRemark<SceneJob>({ message, onSaved: history.reload })
 
   // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
   const purge = usePurgeFiles()
@@ -776,12 +783,20 @@ export default function SceneSplit() {
           onView: (id) => void openJobDetail(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          onEditRemark: remark.open,
           purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
         rowSelection={historyRowSelection}
+        pagination={{
+          total: history.total,
+          pageSize: 10,
+          showSizeChanger: false,
+          current: history.page,
+          onChange: history.setPage,
+        }}
         extra={
           <Popconfirm
             title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
@@ -969,6 +984,16 @@ export default function SceneSplit() {
           }
         }}
       />
+
+      {/* ---------- 备注编辑 ---------- */}
+      {remark.editing && (
+        <JobRemarkModal
+          job={remark.editing}
+          save={updateSceneJobRemark}
+          onClose={remark.close}
+          onSaved={remark.handleSaved}
+        />
+      )}
     </div>
   )
 }
@@ -1271,6 +1296,7 @@ function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  onEditRemark: (job: SceneJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<SceneJob> {
   return [
@@ -1285,6 +1311,7 @@ function historyColumns(handlers: {
     jobInputColumn<SceneJob>(),
     { title: '视频', dataIndex: 'total_videos', width: 64 },
     { title: '片段', dataIndex: 'clip_count', width: 64 },
+    jobRemarkColumn<SceneJob>({ onEdit: handlers.onEditRemark }),
     jobCreatedColumn<SceneJob>(),
     jobActionsColumn<SceneJob>({
       isTerminal: (job) => isTerminalStatus(job.status),

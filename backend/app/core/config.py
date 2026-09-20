@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def repo_root() -> Path:
-    """本仓库（内容创作工作台）的根目录。
+    """本仓库（content-creation-workbench）的根目录。
 
     本文件位于 <仓库>/backend/app/core/config.py，所以 parents[3] 是仓库根。
     它是「仓库内的绝对路径」类默认值的唯一来源（vct、materials/ 等）。
@@ -87,7 +87,8 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用信息 ----------
-    APP_NAME: str = "内容创作工作台"
+    # 与 GitHub 仓库名保持一致（guestccc/content-creation-workbench）。
+    APP_NAME: str = "content-creation-workbench"
     APP_VERSION: str = "0.1.0"
     APP_DESCRIPTION: str = "面向内容创作者的选题、创作与发布管理工作台"
     DEBUG: bool = False
@@ -115,7 +116,7 @@ class Settings(BaseSettings):
 
     # ---------- 智能镜头分割 ----------
     # vct 命令行工具的路径。vct + vctl 已作为仓库一部分维护在
-    # 内容创作工作台/vct 与 内容创作工作台/vctl/。
+    # content-creation-workbench/vct 与 content-creation-workbench/vctl/。
     SCENE_VCT_PATH: str = str(repo_root() / "vct")
     # 素材目录的**根**，默认是仓库根目录的 materials/。
     # 整个目录被 .gitignore 挡在 git 外面（原片与产物都太大），
@@ -183,8 +184,8 @@ class Settings(BaseSettings):
 
     # ---------- 视频字幕提取 ----------
     # VideoCaptioner 的安装根目录。它**不在本仓库里**，而是与本仓库平级：
-    # 本文件位于 <工具箱>/内容创作工作台/backend/app/core/config.py，
-    # parents[3] = 内容创作工作台，parents[4] = 内容制作工具（工具箱根），
+    # 本文件位于 <工具箱>/content-creation-workbench/backend/app/core/config.py，
+    # parents[3] = content-creation-workbench，parents[4] = 内容制作工具（工具箱根），
     # VideoCaptioner 就放在工具箱根下。注意别照抄 vctl/env.py 里的
     # VC_ROOT —— 那边指的是仓库内的路径，本机并不存在。
     SUBTITLE_VC_ROOT: str = default_vc_root()

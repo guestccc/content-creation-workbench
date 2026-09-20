@@ -4,7 +4,7 @@
  * 每个函数对应后端一个接口，返回值已完成拆包（直接拿到 data）。
  */
 
-import { del, get, post } from './client'
+import { del, get, post, put } from './client'
 import type {
   MixEnvironment,
   MixJob,
@@ -61,6 +61,11 @@ export function fetchMixJob(jobId: number): Promise<MixJob> {
 /** 取消任务 */
 export function cancelMixJob(jobId: number): Promise<MixJob> {
   return post<MixJob>(`/mix/jobs/${jobId}/cancel`)
+}
+
+/** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateMixJobRemark(jobId: number, remark: string): Promise<MixJob> {
+  return put<MixJob>(`/mix/jobs/${jobId}/remark`, { remark })
 }
 
 /** 删除任务记录；purgeFiles=true 时连同磁盘上的成片与输出目录一起删除 */

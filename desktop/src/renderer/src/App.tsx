@@ -47,7 +47,7 @@ export default function App(): JSX.Element {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-title">
-          内容创作工作台
+          content-creation-workbench
           <span className="sidebar-subtitle">客户端 · 代理发布</span>
         </div>
 

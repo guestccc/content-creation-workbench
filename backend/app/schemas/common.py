@@ -94,6 +94,29 @@ class JobBatchDeleteRequest(BaseModel):
         return list(dict.fromkeys(value))
 
 
+# 任务备注的字数上限：与前端编辑弹窗的 maxLength 保持一致
+MAX_JOB_REMARK_LENGTH = 200
+
+
+class JobRemarkUpdate(BaseModel):
+    """更新任务备注：六个任务域共用一个模型（与 JobBatchDeleteRequest 同理）。
+
+    备注是纯用户标记，各域没有任何差异；空串是有效值，表示清空备注。
+    """
+
+    remark: str = Field(
+        default="",
+        max_length=MAX_JOB_REMARK_LENGTH,
+        description="备注，空串表示清空",
+    )
+
+    @field_validator("remark")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        # 粘贴时常常带首尾空白，原样存进去会让「看着是空的其实不是」的判断失准
+        return value.strip()
+
+
 class HealthData(BaseModel):
     """健康检查返回数据。"""
 

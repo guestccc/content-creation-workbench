@@ -9,6 +9,7 @@
  * - useJobList       历史任务列表（分页 + 行多选）
  * - useJobRunner     当前任务：创建 / 轮询 / 取消 / 删除
  * - useJobPolling    单条任务的轮询（useJobRunner 内部用它，弹窗里单独盯一条任务时也用）
+ * - useJobRemark     任务备注的编辑开关（历史表的「备注」列点了它开弹窗）
  * - usePurgeFiles    删除任务时「是否连同磁盘产物一起删」的勾选状态
  *
  * 新增页面时先来这里找有没有能复用的，别再往页面里写一套 useState + useEffect + fetch。
@@ -28,6 +29,9 @@ export type { PagedList, UseJobListOptions, UseJobListResult } from './useJobLis
 
 export { useJobPolling, POLL_INTERVAL_MS } from './useJobPolling'
 export type { UseJobPollingOptions } from './useJobPolling'
+
+export { useJobRemark } from './useJobRemark'
+export type { UseJobRemarkOptions, UseJobRemarkResult } from './useJobRemark'
 
 export { useJobRunner } from './useJobRunner'
 export type { UseJobRunnerOptions, UseJobRunnerResult } from './useJobRunner'

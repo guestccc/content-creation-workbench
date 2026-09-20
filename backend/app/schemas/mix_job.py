@@ -190,6 +190,7 @@ class MixJobResponse(TimestampMixin):
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
     error_message: str = Field(description="失败原因汇总")
+    remark: str = Field(description="备注（用户可编辑，最多 200 字；空串表示没写）")
     created_at: datetime = Field(description="创建时间")
     updated_at: datetime = Field(description="更新时间")
     outputs: List[MixOutputItemResponse] = Field(
@@ -228,6 +229,7 @@ class MixJobResponse(TimestampMixin):
             started_at=model.started_at,
             finished_at=model.finished_at,
             error_message=model.error_message,
+            remark=model.remark,
             created_at=model.created_at,
             updated_at=model.updated_at,
             outputs=(

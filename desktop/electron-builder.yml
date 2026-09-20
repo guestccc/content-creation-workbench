@@ -2,7 +2,7 @@
 # 只打包构建产物 out/，源码与开发依赖都不会进入安装包。
 
 appId: com.contentworkbench.desktop
-productName: 内容创作工作台客户端
+productName: content-creation-workbench客户端
 copyright: Copyright © 2026
 
 directories:
@@ -51,7 +51,7 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  shortcutName: 内容创作工作台客户端
+  shortcutName: content-creation-workbench客户端
 
 linux:
   target:

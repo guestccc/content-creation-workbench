@@ -16,6 +16,7 @@
 - GET  /jobs/{id}/outputs/{n}/video  成片视频流（支持 Range）
 - GET  /jobs/{id}/outputs/{n}/thumb  成片封面
 - POST /jobs/{id}/cancel         取消任务
+- PUT  /jobs/{id}/remark        更新任务备注（空串 = 清空）
 - POST /jobs/batch-delete        批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}              删除任务记录（默认成片文件保留，?purge_files=true 一并清）
 """
@@ -30,7 +31,7 @@ from app.services.file_range import ranged_file_response
 from app.services.media_tools import generate_thumbnail
 from app.services.mix_library import list_sources, resolve_clip, thumb_path_for
 from app.services.mix_runner import probe_environment
-from app.schemas.common import ApiResponse, JobBatchDeleteRequest
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.mix_job import (
     MixEnvironmentResponse,
     MixJobCreate,
@@ -289,6 +290,22 @@ def cancel_job(
     """取消排队中或执行中的任务，执行中的会整组杀掉当前 ffmpeg 子进程。"""
     job = service.cancel_job(job_id)
     return ApiResponse(data=MixJobResponse.from_model(job))
+
+
+@router.put(
+    "/jobs/{job_id}/remark",
+    response_model=ApiResponse[MixJobResponse],
+    summary="更新混剪任务备注",
+)
+def update_job_remark(
+    payload: JobRemarkUpdate,
+    service: MixJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[MixJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
+    # 备注接口不返回成片明细：调用方只关心这条备注写没写上，明细是详情接口的事
+    return ApiResponse(data=MixJobResponse.from_model(job, include_outputs=False))
 
 
 @router.delete(

@@ -34,6 +34,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.content import utcnow
+from app.models.job_common import JobRemarkMixin
 
 
 class SceneJobStatus:
@@ -74,7 +75,7 @@ class SceneJobMode:
     ALL: tuple = (PREVIEW, SPLIT)
 
 
-class SceneJob(Base):
+class SceneJob(Base, JobRemarkMixin):
     """镜头分割任务表。"""
 
     __tablename__ = "scene_jobs"

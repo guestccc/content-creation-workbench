@@ -37,6 +37,11 @@ from typing import List, Optional, Set, Tuple
 from app.core.config import repo_root, settings, toolbox_root
 from app.core.logging import get_logger
 from app.core.materials import SOURCE, SUBTITLE, materials_root, subdir
+# 平台判断已抽到 app/core/platform.py（Voicebox 那边也要按平台分支，不能有两份）。
+# 这里**从本模块导入**而不是 `from app.core import platform`：测试用
+# `monkeypatch.setattr(subtitle_env, "platform_key", ...)` 整体替换，导入进来的名字
+# 才是那个可替换的模块属性。
+from app.core.platform import platform_key, platform_label
 from app.services.media_tools import find_tool, run_probe
 from app.services.subtitle_settings import shadowing_warning, vc_root_source
 
@@ -498,24 +503,6 @@ RUN_SH_URL = (
     "https://raw.githubusercontent.com/WEIFENG2333/VideoCaptioner/master/scripts/run.sh"
 )
 PYPI_URL = "https://pypi.org/project/videocaptioner/"
-
-
-def platform_key() -> str:
-    """当前系统的简写：macos / windows / linux。
-
-    探测跑在后端，而这是个本机工具（后端与浏览器在同一台机器），所以后端
-    的系统就是用户要照着装的那个系统 —— 指引只需要出当前系统这一份。
-    """
-    if os.name == "nt":
-        return "windows"
-    if sys.platform == "darwin":
-        return "macos"
-    return "linux"
-
-
-def platform_label() -> str:
-    """给用户看的系统名。"""
-    return {"macos": "macOS", "windows": "Windows", "linux": "Linux"}[platform_key()]
 
 
 def install_hints(install: Optional[VcInstall] = None) -> List[dict]:

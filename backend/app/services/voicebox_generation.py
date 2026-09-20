@@ -67,6 +67,7 @@ def submit(
     profile_name: str = "",
     filename: str = "",
     language: str = "zh",
+    engine: str = "qwen",
     model_size: str = "1.7B",
 ) -> Dict[str, Any]:
     """入队一次生成，立即返回 queued 状态的记录。
@@ -97,6 +98,7 @@ def submit(
             "profile_name": profile_name,
             "requested_name": filename,
             "language": language,
+            "engine": engine,
             "model_size": model_size,
             "filename": "",
             "output_path": "",
@@ -138,6 +140,8 @@ def _public(record: Dict[str, Any]) -> Dict[str, Any]:
         "text_excerpt": record["text_excerpt"],
         "profile_id": record["profile_id"],
         "profile_name": record["profile_name"],
+        "engine": record["engine"],
+        "model_size": record["model_size"],
         "filename": record["filename"],
         "output_path": record["output_path"],
         "duration": record["duration"],
@@ -186,6 +190,7 @@ def _run(record_id: int) -> None:
             record["text"],
             profile_id=record["profile_id"],
             language=record["language"],
+            engine=record["engine"],
             model_size=record["model_size"],
         )
         record["progress_hint"] = "生成完毕，取回音频"

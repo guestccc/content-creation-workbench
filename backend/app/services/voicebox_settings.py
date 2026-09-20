@@ -96,6 +96,22 @@ def base_url_source() -> str:
     return "default"
 
 
+#: 算「本机」的主机名。`::1` 是 IPv6 回环，urlparse 会把它放在 hostname 里。
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def is_local_base_url() -> bool:
+    """当前生效地址是不是本机。
+
+    「设置镜像」和「重启 Voicebox」这两个动作都只能作用在**跑着 Voicebox 的那台
+    机器**上：环境变量写在本地用户的会话 / 注册表里，进程也是本机进程。地址指向
+    远程 GPU 机器（Voicebox 的 Remote Mode / Docker）时这两个动作没有意义 ——
+    页面该把按钮藏起来，并如实说明「去那台机器上设置」。
+    """
+    host = (urlparse(settings.VOICEBOX_BASE_URL).hostname or "").lower()
+    return host in _LOCAL_HOSTS
+
+
 def shadowing_warning() -> Optional[str]:
     """环境变量盖过 .env 时给用户的一句提醒；不冲突时返回 None。
 

@@ -35,6 +35,7 @@ from app.models.finalcut_job import (
 )
 from app.models.mix_job import MixJob, MixJobItem, MixOutputStatus
 from app.models.subtitle_job import SubtitleJobItem, SubtitleJobItemStatus
+from app.schemas.common import JobRemarkUpdate
 from app.schemas.finalcut_job import FinalcutRenderJobCreate
 from app.services.finalcut_env import detect_font
 from app.services.fs_cleanup import remove_paths_best_effort
@@ -317,6 +318,33 @@ class FinalcutRenderJobService:
         except SQLAlchemyError as exc:
             logger.exception("取消合成任务失败 | id=%s", job_id)
             raise DatabaseError("取消合成任务失败") from exc
+
+    # ------------------------------------------------------------------
+    # 备注
+    # ------------------------------------------------------------------
+
+    def update_remark(self, job_id: int, payload: JobRemarkUpdate) -> FinalcutRenderJob:
+        """更新任务备注（空串表示清空）。
+
+        备注纯属用户标记，不参与状态机：终态任务也能改（回头补个标记很正常）。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                job.remark = payload.remark
+                self.db.flush()
+
+            logger.info("合成任务备注已更新 | id=%s", job_id)
+            return job
+        except NotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("更新合成任务备注失败 | id=%s", job_id)
+            raise DatabaseError("更新任务备注失败") from exc
 
     # ------------------------------------------------------------------
     # 删除

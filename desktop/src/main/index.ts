@@ -83,7 +83,7 @@ function createWindow(): void {
     minWidth: 1024,
     minHeight: 700,
     show: false,
-    title: '内容创作工作台客户端',
+    title: 'content-creation-workbench客户端',
     backgroundColor: '#f5f6f8',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

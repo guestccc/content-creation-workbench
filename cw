@@ -1,5 +1,5 @@
 #!/bin/sh
-# 内容创作工作台 - 开发服务管理 CLI 的启动器。
+# content-creation-workbench - 开发服务管理 CLI 的启动器。
 #
 # 直接执行 cli/.venv 里的可执行文件，而不是 `uv run --project cli cw`：
 # 后者每次都会做一遍环境校验，lock 过期时还会尝试联网。

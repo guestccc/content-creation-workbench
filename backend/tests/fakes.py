@@ -13,7 +13,8 @@ SceneRunner 通过 popen_factory 注入它，测试在主线程同步跑完整�
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple
 
 # vct 切点 CSV 的表头（与 vctl/commands/scene.py 的真实产物一致）
 CSV_HEADER = "序号,开始(秒),结束(秒),时长(秒),开始时间码,结束时间码"
@@ -507,3 +508,273 @@ class FakeFfmpeg:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(b"fake-mp4")
         return int(self.script.get("exit_code", 0))
+
+
+# --------------------------------------------------------------------------
+# launchctl 的替身
+# --------------------------------------------------------------------------
+#
+# 作用：让 macOS 的写入路径（写 plist → bootstrap → 读回验证）在**不碰开发机
+# 真实 `~/Library/LaunchAgents/` 的前提下**跑完整。
+#
+# 关键在 `_run_plist`：真实的值不是 `_set_macos` 直接 setenv 进去的，而是
+# bootstrap 让 launchd 执行 plist 里那条 `launchctl setenv` 的结果。照抄这个
+# 语义，plist 写错键名或转义时用例才会失败 —— 假实现比「set 了就当成功」强在
+# 这里。
+#
+# `launchctl` 的返回码语义（本机实测，假实现照此建模）：
+# - `getenv <未设置的键>` → **rc=0 + 空输出**（不是错误！`_read_macos` 正是靠
+#   「rc 为 0 但值为空」区分「没设置」与「读失败」）；
+# - `bootout <没装载的 label>` → rc≠0，这是预期，调用方必须容忍；
+# - `print gui/<uid>` → 在图形会话里 rc=0，由 launchd/SSH 起的进程会失败。
+
+
+class FakeLaunchctl:
+    """假的 `launchctl`：setenv / getenv / unsetenv 作用于一个 dict。
+
+    行为照本机实测的返回码建模（见本节说明）。`bootstrap` / `kickstart`
+    的成功与否由构造参数控制，用来覆盖那两条分支。
+    """
+
+    def __init__(
+        self,
+        *,
+        in_gui_session: bool = True,
+        bootstrap_rc: int = 0,
+        kickstart_rc: int = 0,
+        apply_delay_seconds: float = 0.0,
+        never_applies: bool = False,
+    ) -> None:
+        self.env: Dict[str, str] = {}
+        self.commands: List[List[str]] = []
+        self.in_gui_session = in_gui_session
+        self.bootstrap_rc = bootstrap_rc
+        self.kickstart_rc = kickstart_rc
+        #: launchd 从「装载了 job」到「真的执行那条 setenv」之间的延迟。
+        #: 真机实测：清掉镜像后再设置，紧跟的 getenv 读到的是空的 —— 就是这个延迟。
+        #: 默认 0（立刻生效）让大多数用例不必关心它；要复现真机那条路径的用例
+        #: 把它调大。
+        self.apply_delay_seconds = apply_delay_seconds
+        #: 装载永远不生效（模拟「plist 装了、setenv 没跑起来」）
+        self.never_applies = never_applies
+        #: 已装载的 plist（bootstrap 成功时记下，kickstart 会重跑它）
+        self.loaded_plist: Optional[Path] = None
+        #: 待生效的 plist 与它的生效时刻（`apply_delay_seconds > 0` 时才用得上）
+        self._pending: Optional[Path] = None
+        self._pending_at = 0.0
+
+    def _apply(self, path: Path) -> None:
+        """真正执行一次 plist 里的 ProgramArguments。"""
+        import plistlib
+
+        payload = plistlib.loads(Path(path).read_bytes())
+        argv = payload.get("ProgramArguments") or []
+        if len(argv) == 4 and argv[:2] == ["/bin/launchctl", "setenv"]:
+            self.env[argv[2]] = argv[3]
+
+    def _run_plist(self, path: Path) -> None:
+        """模拟 launchd 装载 plist 时**执行一次** ProgramArguments。
+
+        `apply_delay_seconds` 复现的是「装载成功 ≠ 值已生效」：launchd 收下 job
+        之后要过一会儿才执行它，这期间读 `getenv` 拿到的是旧值。
+        """
+        import time
+
+        self.loaded_plist = Path(path)
+        if self.never_applies:
+            return
+        if self.apply_delay_seconds > 0:
+            self._pending = Path(path)
+            self._pending_at = time.monotonic() + self.apply_delay_seconds
+            return
+        self._apply(path)
+
+    def _drain_pending(self) -> None:
+        """到点了就把待生效的 plist 执行掉（launchd 终于轮到它了）。"""
+        import time
+
+        if self._pending is not None and time.monotonic() >= self._pending_at:
+            pending, self._pending = self._pending, None
+            self._apply(pending)
+
+    def __call__(self, argv: List[str]) -> Tuple[int, str, str]:
+        argv = list(argv)
+        self.commands.append(argv)
+        self._drain_pending()
+        verb = argv[1] if len(argv) > 1 else ""
+        if verb == "print":
+            if self.in_gui_session:
+                return 0, "gui domain\n", ""
+            return 1, "", "Could not find domain for gui/501"
+        if verb == "setenv":
+            self.env[argv[2]] = argv[3]
+            return 0, "", ""
+        if verb == "getenv":
+            # 未设置时 rc=0、输出为空 —— 与真 launchctl 一致
+            return 0, f"{self.env.get(argv[2], '')}\n", ""
+        if verb == "unsetenv":
+            self.env.pop(argv[2], None)
+            return 0, "", ""
+        if verb == "bootout":
+            # 卸载 job 不会清掉会话里的值（setenv 是会话级的），所以 env 不动
+            return 0, "", ""
+        if verb == "bootstrap":
+            if self.bootstrap_rc != 0:
+                return self.bootstrap_rc, "", "Bootstrap failed: 5: Input/output error"
+            self._run_plist(Path(argv[3]))
+            return 0, "", ""
+        if verb == "kickstart":
+            if self.kickstart_rc != 0:
+                return self.kickstart_rc, "", "Kickstart failed: 3: No such process"
+            if self.loaded_plist is not None:
+                self._run_plist(self.loaded_plist)
+            return 0, "", ""
+        return 1, "", f"unknown verb: {verb}"
+
+    def verbs(self) -> List[str]:
+        """按调用顺序取动词，用来断言编排顺序（print → bootout → bootstrap）。"""
+        return [argv[1] for argv in self.commands if len(argv) > 1]
+
+
+# --------------------------------------------------------------------------
+# Windows 注册表 / ctypes 的替身
+# --------------------------------------------------------------------------
+#
+# 作用：让**真实的 Windows 代码路径**在 macOS 开发机上跑一遍。
+# `services/user_env.py` 与 `services/voicebox_restart.py` 把 winreg / ctypes
+# 留成模块属性（非 Windows 上为 None）就是为了这个 —— 否则「Windows 那一半」
+# 在 CI 里连一行都不会被执行。接口严格照 CPython 文档实现，只覆盖这两个模块
+# 用到的那一小撮；行为（尤其是「缺失抛 FileNotFoundError」）与真 winreg 一致，
+# 因为调用方正是靠它区分「没设置」和「读失败」。
+
+
+class _Key:
+    """注册表里的一个键：一堆值 + 一堆子键（真注册表就是这两样分开存的）。"""
+
+    __slots__ = ("values", "subkeys")
+
+    def __init__(self) -> None:
+        #: 值：`{小写名: (原始名, 值)}`（键名大小写不敏感，真注册表如此）
+        self.values: dict = {}
+        #: 子键：`{小写名: (原始名, _Key)}`
+        self.subkeys: dict = {}
+
+
+class _KeyHandle:
+    """`winreg.OpenKey` / `CreateKeyEx` 返回的句柄。支持 with（真实用法）。"""
+
+    def __init__(self, key: _Key) -> None:
+        self.key = key
+        self.closed = False
+
+    def __enter__(self) -> "_KeyHandle":
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        self.closed = True
+        return False
+
+
+class FakeWinreg:
+    """按 CPython 文档实现的假 winreg（只覆盖本项目用到的接口）。"""
+
+    HKEY_CURRENT_USER = "HKEY_CURRENT_USER"
+    HKEY_LOCAL_MACHINE = "HKEY_LOCAL_MACHINE"
+    KEY_READ = 0x20019
+    KEY_SET_VALUE = 0x0002
+    REG_SZ = 1
+
+    def __init__(self) -> None:
+        self.tree = {
+            self.HKEY_CURRENT_USER: _Key(),
+            self.HKEY_LOCAL_MACHINE: _Key(),
+        }
+        #: 记录 (hive, 子键路径, 值名, 值)，便于断言「写没写、写到哪」
+        self.writes: list = []
+
+    # ---- 内部 ----
+
+    def _walk(self, hive: str, sub_key: str, *, create: bool) -> _Key:
+        node = self.tree[hive]
+        for part in [p for p in (sub_key or "").split("\\") if p]:
+            found = node.subkeys.get(part.casefold())
+            if found is None:
+                if not create:
+                    raise FileNotFoundError(2, "系统找不到指定的文件。", sub_key)
+                found = (part, _Key())
+                node.subkeys[part.casefold()] = found
+            node = found[1]
+        return node
+
+    @staticmethod
+    def _norm(name: str) -> str:
+        return (name or "").casefold()
+
+    # ---- winreg 的表面 ----
+
+    def OpenKey(self, hive, sub_key, reserved=0, access=KEY_READ):
+        return _KeyHandle(self._walk(hive, sub_key, create=False))
+
+    def CreateKeyEx(self, hive, sub_key, reserved=0, access=KEY_SET_VALUE):
+        return _KeyHandle(self._walk(hive, sub_key, create=True))
+
+    def QueryValueEx(self, handle, name):
+        found = handle.key.values.get(self._norm(name))
+        if found is None:
+            raise FileNotFoundError(2, "系统找不到指定的文件。", name)
+        return found[1], self.REG_SZ
+
+    def SetValueEx(self, handle, name, reserved, type, value):
+        handle.key.values[self._norm(name)] = (name, value)
+        self.writes.append((name, value))
+
+    def DeleteValue(self, handle, name):
+        if self._norm(name) not in handle.key.values:
+            raise FileNotFoundError(2, "系统找不到指定的文件。", name)
+        del handle.key.values[self._norm(name)]
+
+    def QueryInfoKey(self, key):
+        return len(key.key.subkeys), len(key.key.values), None
+
+    def EnumKey(self, key, index):
+        names = [original for original, _node in key.key.subkeys.values()]
+        return names[index]
+
+
+class FakeCtypes:
+    """假 ctypes：只实现 `SendMessageTimeoutW` 那一条广播路径。
+
+    `c_wchar_p` 直接把 Python 字符串原样返回，于是断言里能直接比
+    `"Environment"`，不必去研究 ctypes 对象怎么取值。
+    """
+
+    def __init__(self, *, raise_on_send: bool = False) -> None:
+        self.calls: list = []
+        self._raise = raise_on_send
+        self.windll = SimpleNamespace(
+            user32=SimpleNamespace(SendMessageTimeoutW=self._send)
+        )
+
+    def _send(self, hwnd, msg, wparam, lparam, flags, timeout, result):
+        if self._raise:
+            raise OSError("Explorer 没响应")
+        self.calls.append(
+            {
+                "hwnd": hwnd,
+                "msg": msg,
+                "lparam": lparam,
+                "flags": flags,
+                "timeout": timeout,
+            }
+        )
+        return 1
+
+    # ctypes 的那几个小工具（返回值不重要，够真代码用就行）
+    def c_ulong(self):
+        return 0
+
+    def c_wchar_p(self, value):
+        return value
+
+    def byref(self, obj):
+        return obj

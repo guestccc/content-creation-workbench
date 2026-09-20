@@ -82,6 +82,8 @@ export interface FinalcutCopyJob {
   current_phase: CopyPhase
   progress_percent: number
   error_message: string
+  /** 备注（用户可编辑，最多 200 字；空串表示没写） */
+  remark: string
   started_at: string | null
   finished_at: string | null
   created_at: string
@@ -136,6 +138,8 @@ export interface FinalcutRenderJob {
   current_index: number
   progress_percent: number
   error_message: string
+  /** 备注（用户可编辑，最多 200 字；空串表示没写） */
+  remark: string
   started_at: string | null
   finished_at: string | null
   created_at: string

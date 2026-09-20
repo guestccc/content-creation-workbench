@@ -42,16 +42,30 @@ import type { ColumnsType } from 'antd/es/table'
 import DirectoryPicker from '../../components/DirectoryPicker'
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard from '../../components/JobProgressCard'
+import JobRemarkModal from '../../components/JobRemarkModal'
 import VideoPreviewModal from '../../components/VideoPreviewModal'
 import {
   jobActionsColumn,
   jobCreatedColumn,
   jobIdColumn,
+  jobRemarkColumn,
   jobStatusColumn,
 } from '../../components/jobColumns'
-import { useApiMessage, useDirectoryPicker, useJobList, usePurgeFiles } from '../../hooks'
+import {
+  useApiMessage,
+  useDirectoryPicker,
+  useJobList,
+  useJobRemark,
+  usePurgeFiles,
+} from '../../hooks'
 import { formatBytes, formatDuration } from '../../utils/format'
-import { fetchCopyJobs, fetchRenderJobs, finalcutPreviewUrl } from '../../api/finalcut'
+import {
+  fetchCopyJobs,
+  fetchRenderJobs,
+  updateCopyJobRemark,
+  updateRenderJobRemark,
+} from '../../api/finalcut'
+import { localVideoPreviewUrl } from '../../api/filesystem'
 import {
   COPY_PHASE_LABEL,
   ITEM_STATUS_META,
@@ -86,7 +100,10 @@ function OriginTag({ origin }: { origin: SelectedMaterial['origin'] }) {
 }
 
 /** 文案任务历史表的列（文案任务磁盘上无产物，删除确认不带 purge 勾选） */
-function copyJobColumns(flow: ReturnType<typeof useFinalcutFlow>): ColumnsType<FinalcutCopyJob> {
+function copyJobColumns(
+  flow: ReturnType<typeof useFinalcutFlow>,
+  onEditRemark: (job: FinalcutCopyJob) => void,
+): ColumnsType<FinalcutCopyJob> {
   return [
     jobIdColumn(),
     jobStatusColumn(JOB_STATUS_META),
@@ -104,6 +121,7 @@ function copyJobColumns(flow: ReturnType<typeof useFinalcutFlow>): ColumnsType<F
       },
     },
     { title: '条数', dataIndex: 'copy_count', width: 64 },
+    jobRemarkColumn<FinalcutCopyJob>({ onEdit: onEditRemark }),
     {
       title: '结果',
       key: 'copies',
@@ -153,6 +171,7 @@ function renderJobColumns(
   flow: ReturnType<typeof useFinalcutFlow>,
   purge: ReturnType<typeof usePurgeFiles>,
   onView: (jobId: number) => void,
+  onEditRemark: (job: FinalcutRenderJob) => void,
 ): ColumnsType<FinalcutRenderJob> {
   return [
     jobIdColumn(),
@@ -177,6 +196,7 @@ function renderJobColumns(
         )
       },
     },
+    jobRemarkColumn<FinalcutRenderJob>({ onEdit: onEditRemark }),
     jobCreatedColumn(),
     jobActionsColumn({
       isTerminal: (record) => isTerminalStatus(record.status),
@@ -193,6 +213,16 @@ export default function FinalCut() {  const api = useApiMessage()
   const purge = usePurgeFiles()
   const copyHistory = useJobList<FinalcutCopyJob>({ fetchList: fetchCopyJobs })
   const renderHistory = useJobList<FinalcutRenderJob>({ fetchList: fetchRenderJobs })
+
+  // 两个历史表各有自己的「备注」编辑开关：保存成功后就地刷新各自的列表
+  const copyRemark = useJobRemark<FinalcutCopyJob>({
+    message: api.message,
+    onSaved: copyHistory.reload,
+  })
+  const renderRemark = useJobRemark<FinalcutRenderJob>({
+    message: api.message,
+    onSaved: renderHistory.reload,
+  })
   const flow = useFinalcutFlow(api, {
     onCopyJobChanged: copyHistory.reload,
     onRenderJobChanged: renderHistory.reload,
@@ -224,16 +254,16 @@ export default function FinalCut() {  const api = useApiMessage()
     void flow.loadSources()
   }
 
-  /** 视频预览地址：历史产物走混剪的成片流，本地文件走 finalcut 的只读预览 */
+  /** 视频预览地址：历史产物走混剪的成片流，本地文件走公共的只读预览 */
   const previewUrl = useMemo(() => {
     if (!flow.video) {
       return ''
     }
     if (flow.video.origin === 'local') {
-      return finalcutPreviewUrl(flow.video.path)
+      return localVideoPreviewUrl(flow.video.path)
     }
     const hit = flow.sources?.videos.find((item) => item.path === flow.video?.path)
-    return hit?.video_url || finalcutPreviewUrl(flow.video.path)
+    return hit?.video_url || localVideoPreviewUrl(flow.video.path)
   }, [flow.video, flow.sources])
 
   const sourceItems: FinalcutSource[] =
@@ -515,7 +545,7 @@ export default function FinalCut() {  const api = useApiMessage()
           />
 
           <HistoryCard<FinalcutRenderJob>
-            columns={renderJobColumns(flow, purge, openRenderDetail)}
+            columns={renderJobColumns(flow, purge, openRenderDetail, renderRemark.open)}
             dataSource={renderHistory.items}
             loading={renderHistory.loading}
             onRefresh={renderHistory.reload}
@@ -564,7 +594,7 @@ export default function FinalCut() {  const api = useApiMessage()
       {/* 文案历史任务（第 ③ 步展示合成历史，这里只在 ①② 步出现） */}
       {flow.step <= 1 && (
         <HistoryCard<FinalcutCopyJob>
-          columns={copyJobColumns(flow)}
+          columns={copyJobColumns(flow, copyRemark.open)}
           dataSource={copyHistory.items}
           loading={copyHistory.loading}
           onRefresh={copyHistory.reload}
@@ -674,6 +704,24 @@ export default function FinalCut() {  const api = useApiMessage()
         onClose={() => setAiSettingsOpen(false)}
         onSaved={() => void refresh(true)}
       />
+
+      {/* ---------- 备注编辑（两个历史表各一个，同一时刻只开一个） ---------- */}
+      {copyRemark.editing && (
+        <JobRemarkModal
+          job={copyRemark.editing}
+          save={updateCopyJobRemark}
+          onClose={copyRemark.close}
+          onSaved={copyRemark.handleSaved}
+        />
+      )}
+      {renderRemark.editing && (
+        <JobRemarkModal
+          job={renderRemark.editing}
+          save={updateRenderJobRemark}
+          onClose={renderRemark.close}
+          onSaved={renderRemark.handleSaved}
+        />
+      )}
 
       {/* 合成任务详情（历史「查看」）：逐条成片的状态与产物 */}
       <Modal

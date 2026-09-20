@@ -1,6 +1,6 @@
-# 内容创作工作台 · 前端应用
+# content-creation-workbench · 前端应用
 
-基于 React + TypeScript + Vite 的内容创作工作台前端。
+基于 React + TypeScript + Vite 的 content-creation-workbench 前端。
 
 ## 技术选型
 

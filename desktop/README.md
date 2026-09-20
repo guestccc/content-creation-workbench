@@ -1,4 +1,4 @@
-# 内容创作工作台客户端（Electron）
+# content-creation-workbench客户端（Electron）
 
 桌面客户端，负责**代理发布**：从后端认领发布任务，在本机解密凭证、
 调用平台适配器完成发布，再把结果回传。

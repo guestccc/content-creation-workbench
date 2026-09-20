@@ -18,6 +18,30 @@ from typing import List, Optional, Sequence
 
 from app.core.exceptions import BadRequestError
 
+#: 视频后缀 → Content-Type。
+#:
+#: 播放接口必须给对类型：浏览器对 `application/octet-stream` 的处理是**下载**
+#: 而不是播放，`<video>` 拿到这种类型只会黑屏。
+#: 这里不认识的后缀一律退回 octet-stream —— 白名单之外的文件本来也不该走到
+#: 播放接口（大小写不敏感，后缀统一小写后查表）。
+VIDEO_MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+    ".avi": "video/x-msvideo",
+}
+
+
+def media_type_for_video(name: str) -> str:
+    """按扩展名取视频的 Content-Type。
+
+    扩展名在不在白名单是调用方的事（`is_video_file`），这里只负责查表 ——
+    白名单里加了新后缀却忘了加类型时，结果是「浏览器自己嗅探」而不是 KeyError。
+    """
+    return VIDEO_MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
+
 
 def is_video_file(name: str, extensions: Sequence[str]) -> bool:
     """按扩展名白名单判断是否为可处理的视频文件。

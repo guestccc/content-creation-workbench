@@ -14,6 +14,7 @@
 - GET  /jobs/{id}/clips/{n}/thumb  片段缩略图（首次访问时抽帧生成）
 - GET  /jobs/{id}/clips/{n}/video  片段视频流（支持 Range，可拖动进度条）
 - POST /jobs/{id}/cancel    取消任务
+- PUT  /jobs/{id}/remark    更新任务备注（空串 = 清空）
 - POST /jobs/{id}/items/{n}/retry  重试单条失败的视频（条目重置回 pending，任务重新入队）
 - POST /jobs/batch-delete   批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}         删除任务记录（?purge_files=true 时产物一并清）
@@ -36,7 +37,7 @@ from app.core.scene_templates import (
 from app.services.file_range import ranged_file_response
 from app.services.scene_runner import generate_thumbnail, probe_environment
 from app.models.scene_job import SceneJobMode, SceneJobStatus
-from app.schemas.common import ApiResponse, JobBatchDeleteRequest
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.scene_job import (
     SceneClipResponse,
     SceneEnvironmentResponse,
@@ -302,6 +303,21 @@ def cancel_job(
     """取消排队中或执行中的任务，执行中的会整组杀掉当前 vct/ffmpeg 子进程。"""
     job = service.cancel_job(job_id)
     return ApiResponse(data=SceneJobResponse.from_model(job))
+
+
+@router.put(
+    "/jobs/{job_id}/remark",
+    response_model=ApiResponse[SceneJobResponse],
+    summary="更新镜头分割任务备注",
+)
+def update_job_remark(
+    payload: JobRemarkUpdate,
+    service: SceneJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[SceneJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
+    return ApiResponse(data=SceneJobResponse.from_model(job, include_items=False))
 
 
 @router.post(

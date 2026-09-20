@@ -39,6 +39,38 @@ export interface VoiceboxEnvironment {
   install_hints: VoiceboxInstallHint[]
   /** 需要提醒用户的情况（没显卡、模型没下完、没有音色……） */
   warnings: string[]
+
+  // ---- 页面按钮（「设置镜像」「重启 Voicebox」）的可用性 ----
+  // 这八个字段只为回答「按钮该不该出现、该说什么话」。**前端不做平台判断**：
+  // 系统差异、下载源现状、安装位置全由后端算好，页面只按这些值渲染。
+  /** 后端所在系统：macos / windows / linux */
+  platform: string
+  /** 系统名的中文展示 */
+  platform_label: string
+  /** 能否由本工具设置模型下载源（系统支持且 Voicebox 就在本机） */
+  hf_mirror_supported: boolean
+  /** 当前 HF_ENDPOINT 的值；空串表示未设置 */
+  hf_mirror_value: string
+  /** 当前下载源是不是本页推荐的镜像 */
+  hf_mirror_is_recommended: boolean
+  /** 下载源在注销 / 重启后是否仍然有效 */
+  hf_mirror_persistent: boolean
+  /** 找到的 Voicebox 安装位置；空串表示没找到 */
+  voicebox_app_path: string
+  /** 页面是否该显示「重启 Voicebox」 */
+  restart_supported: boolean
+}
+
+/** 一次「重启 Voicebox」的结果（**不代表服务已就绪**，就绪靠轮询自检判断） */
+export interface VoiceboxRestartResult {
+  /** 是否已发起启动 */
+  started: boolean
+  /** 拉起的安装位置；空串表示按名字查找拉起 */
+  app_path: string
+  /** 给用户看的一句话 */
+  detail: string
+  /** 要等多久 / 等的是什么 */
+  wait_hint: string
 }
 
 /** 一条安装/启动指引 */
@@ -64,6 +96,45 @@ export interface VoiceProfileListData {
   total: number
 }
 
+/** 一个能用来配音的模型（= 上游 engine + model_size 的一个组合） */
+export interface DubbingModel {
+  /** 上游 /generate 的 engine 参数 */
+  engine: string
+  /** 上游 /generate 的 model_size 参数；**空串表示不分尺寸**，提交时这个字段不发 */
+  model_size: string
+  /** 上游 /models/status 里的标识 */
+  model_name: string
+  /** 页面上显示的名字 */
+  label: string
+  /** 一句话说明它适合什么场景 */
+  note: string
+  /** 是否已下载；**null 表示上游列表里没这个模型（可能是版本差异），不是「没下载」** */
+  downloaded: boolean | null
+  /** 是否正在下载 */
+  downloading: boolean
+  /** 是否已加载进显存/内存 */
+  loaded: boolean
+  /** 已下载时占用的体积（MB） */
+  size_mb: number | null
+}
+
+/** 配音可选模型清单（顺序即后端给的顺序，页面照排） */
+export interface DubbingModelListData {
+  items: DubbingModel[]
+  total: number
+}
+
+/**
+ * 模型在下拉里的唯一键。
+ *
+ * 为什么不用 model_name：那是**上游**的标识，上游改了名它就变了，而页面的选中值
+ * 不该随之漂移。engine + model_size 才是我们跟上游约定的调用参数，也是提交时要
+ * 发的东西 —— 用同一对值做键，选中值可以直接拿去提交，不必再查一次表。
+ */
+export function modelKey(model: Pick<DubbingModel, 'engine' | 'model_size'>): string {
+  return `${model.engine}:${model.model_size}`
+}
+
 /** 一次配音生成的状态 */
 export type DubbingStatus = 'queued' | 'running' | 'success' | 'failed'
 
@@ -75,6 +146,10 @@ export interface DubbingGeneration {
   text_excerpt: string
   profile_id: string
   profile_name: string
+  /** 这次用的 TTS 引擎 */
+  engine: string
+  /** 这次用的模型规模；空串表示这个引擎不分尺寸 */
+  model_size: string
   /** 产物文件名（含扩展名），成功后有值 */
   filename: string
   output_path: string
@@ -96,6 +171,9 @@ export interface DubbingGenerationPayload {
   /** 产物文件名（不含扩展名）；留空按 dub_<时间戳> 自动命名 */
   filename?: string
   language?: string
+  /** TTS 引擎与模型规模（一起指向模型列表里的一个模型） */
+  engine?: string
+  /** 部分引擎不分尺寸，此时传空串（后端会整个不发这个字段） */
   model_size?: string
 }
 
@@ -121,17 +199,18 @@ export interface DubbingAudioListData {
   dir: string
 }
 
-/** 语言候选：与上游 GenerationRequest 的 `^(en|zh)$` 对齐 */
+/**
+ * 语言候选。**上游支持的远不止这两个**（它收了二十几种），这里只放开中英文：
+ * 本工具的产出是中文短视频，别的语言没人用，而且多语言能力还取决于所选 engine
+ * （Kokoro 就是英文为主）。
+ */
 export const LANGUAGE_OPTIONS = [
   { value: 'zh', label: '中文' },
   { value: 'en', label: '英文' },
 ] as const
 
-/** 模型规模候选：与上游的 `^(1\.7B|0\.6B)$` 对齐 */
-export const MODEL_SIZE_OPTIONS = [
-  { value: '1.7B', label: '1.7B（质量更好，更慢）' },
-  { value: '0.6B', label: '0.6B（更快，质量一般）' },
-] as const
+// 模型候选**不再写死在这里** —— 它跟着所装的 Voicebox 版本走（哪些下好了、有哪些
+// 引擎都只有上游知道），改由 GET /voicebox/models 下发，见 useDubbingModels。
 
 /** 文案字数上限：与后端 VOICEBOX_MAX_TEXT_CHARS / 上游 maxLength 对齐 */
 export const MAX_TEXT_CHARS = 5000

@@ -12,13 +12,16 @@
  * 进页面先探测 VideoCaptioner 环境：没装就显示安装指引并禁用「开始提取」，
  * 装了就在顶部给一条绿色的版本信息。
  *
+ * 字幕预览弹窗提供两种视图：`srt 原文` 与 `无时间文本`（去掉序号与时间轴）。
+ * 后者是拿已返回的内容现算的展示变换，不另发请求，切换是瞬时的。
+ *
  * 页面自己不写状态机：环境探测与手动指定目录在本文件夹的 useSubtitleEnv 里
  * （单页私有，不进公共 hooks），目录扫描、任务生命周期、历史列表分别在公共的
  * useSourceDir / useJobRunner / useJobList 里，这里只做编排与布局。
  */
 
 import { CopyOutlined, FileTextOutlined, FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -30,6 +33,7 @@ import {
   Modal,
   Popconfirm,
   Row,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -43,12 +47,14 @@ import type { ColumnsType, TableProps } from 'antd/es/table'
 import DirectoryPicker from '../../components/DirectoryPicker'
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../../components/JobProgressCard'
+import JobRemarkModal from '../../components/JobRemarkModal'
 import SourceDirCard from '../../components/SourceDirCard'
 import {
   jobActionsColumn,
   jobCreatedColumn,
   jobIdColumn,
   jobInputColumn,
+  jobRemarkColumn,
   jobStatusColumn,
 } from '../../components/jobColumns'
 import {
@@ -56,6 +62,7 @@ import {
   useDirectoryPicker,
   useJobList,
   useJobPolling,
+  useJobRemark,
   useJobRunner,
   usePurgeFiles,
   useSourceDir,
@@ -70,6 +77,7 @@ import {
   fetchSubtitleJob,
   fetchSubtitleJobs,
   fetchSubtitleText,
+  updateSubtitleJobRemark,
 } from '../../api/subtitle'
 import { ITEM_STATUS_META, JOB_STATUS_META, isTerminalStatus } from '../../types/subtitle'
 import type {
@@ -100,6 +108,9 @@ const PICKER_TITLES = {
   vc: '选择 VideoCaptioner 目录',
 } as const
 
+/** 字幕预览弹窗的两种视图：srt 原文 / 去掉序号与时间轴的纯文本 */
+type PreviewView = 'srt' | 'plain'
+
 /** VideoCaptioner 目录来源的展示标签 */
 const VC_ROOT_SOURCE_LABEL: Record<string, string> = {
   environment: '环境变量',
@@ -121,6 +132,8 @@ export default function SubtitleExtract() {
   const [subtitles, setSubtitles] = useState<SubtitleFile[]>([])
   const [preview, setPreview] = useState<SubtitleText | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  /** 预览弹窗当前看的是原文还是无时间文本，每次打开都回到原文 */
+  const [previewView, setPreviewView] = useState<PreviewView>('srt')
 
   // ---------- 历史任务的下钻弹窗 ----------
   // 与镜头分割同一个模式：点「查看」开弹窗看这条任务，不顶掉页面上正在跑的那条
@@ -145,6 +158,9 @@ export default function SubtitleExtract() {
   }
 
   const history = useJobList<SubtitleJob>({ fetchList: fetchSubtitleJobs })
+
+  // 历史表「备注」列的编辑开关：保存成功后就地刷新列表
+  const remark = useJobRemark<SubtitleJob>({ message, onSaved: history.reload })
 
   // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
   const purge = usePurgeFiles()
@@ -257,8 +273,9 @@ export default function SubtitleExtract() {
     getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
-  /** 打开字幕预览 */
+  /** 打开字幕预览（一律从 srt 原文看起，别把上一条的视图选择带过来） */
   const openPreview = async (jobId: number, index: number) => {
+    setPreviewView('srt')
     setPreviewLoading(true)
     try {
       setPreview(await fetchSubtitleText(jobId, index))
@@ -298,6 +315,15 @@ export default function SubtitleExtract() {
   }
 
   const canSubmit = Boolean(env?.ready) && !runner.running && !runner.submitting
+
+  // 无时间文本按当前预览内容现算：不二次请求，切换视图是瞬时的。
+  // 预览被截断时转出来也只有开头一段，与原文视图看到的一致。
+  const previewPlainText = useMemo(
+    () => (preview ? srtToPlainText(preview.content) : ''),
+    [preview],
+  )
+  /** 弹窗里当前显示的内容（复制按钮复制的也是它） */
+  const previewContent = previewView === 'srt' ? (preview?.content ?? '') : previewPlainText
 
   return (
     <div className="page">
@@ -649,12 +675,20 @@ export default function SubtitleExtract() {
           onView: (id) => void openJobDetail(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          onEditRemark: remark.open,
           purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
         rowSelection={historyRowSelection}
+        pagination={{
+          total: history.total,
+          pageSize: 10,
+          showSizeChanger: false,
+          current: history.page,
+          onChange: history.setPage,
+        }}
         extra={
           <Popconfirm
             title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
@@ -734,28 +768,31 @@ export default function SubtitleExtract() {
         open={preview !== null || previewLoading}
         title={
           preview && (
-            <Space size={8}>
-              <FileTextOutlined />
-              <span>{preview.name}</span>
-              <Text type="secondary" style={{ fontWeight: 'normal', fontSize: 12 }}>
+            // 文件名可能很长（如抓取素材的哈希名）：一行放不下，挤在一行里
+            // 会导致它和来源名各截一半，主要信息反而认不出来，所以分两行 ——
+            // 首行文件名（跟图标同行），次行小字来源，各自单行省略号截断、
+            // 悬浮看全名；右侧留出关闭按钮的宽度，别让省略号顶到 × 上
+            <Flex vertical gap={2} style={{ minWidth: 0, paddingRight: 32 }}>
+              <Flex align="center" gap={8} style={{ minWidth: 0 }}>
+                <FileTextOutlined style={{ flexShrink: 0 }} />
+                <Text ellipsis={{ tooltip: preview.name }} style={{ minWidth: 0 }}>
+                  {preview.name}
+                </Text>
+              </Flex>
+              <Text
+                type="secondary"
+                ellipsis={{ tooltip: `来自 ${preview.source_name}` }}
+                // 24 = 图标 16 + 间距 8，与首行文件名的左边缘对齐
+                style={{ minWidth: 0, fontWeight: 'normal', fontSize: 12, paddingInlineStart: 24 }}
+              >
                 来自 {preview.source_name}
               </Text>
-            </Space>
-          )
-        }
-        footer={
-          preview && (
-            <Flex justify="space-between" align="center">
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {formatBytes(preview.size_bytes)}
-                {preview.truncated && ' · 内容过长，只显示了开头一段'}
-              </Text>
-              <Button icon={<CopyOutlined />} onClick={() => preview && copyText(preview.content)}>
-                复制全文
-              </Button>
             </Flex>
           )
         }
+        // 视图切换与复制都在正文上方的工具条里，不放底栏：
+        // 内容是长文，操作跟在内容下面时要先滚到底才看得见
+        footer={null}
         width={720}
         onCancel={() => setPreview(null)}
         destroyOnHidden
@@ -766,22 +803,43 @@ export default function SubtitleExtract() {
           </Flex>
         ) : (
           preview && (
-            <pre
-              style={{
-                maxHeight: '60vh',
-                overflow: 'auto',
-                padding: 12,
-                background: 'var(--color-bg-soft, #f5f5f5)',
-                borderRadius: 6,
-                fontSize: 12,
-                lineHeight: 1.7,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-                margin: 0,
-              }}
-            >
-              {preview.content}
-            </pre>
+            <Flex vertical gap={8}>
+              <Flex justify="space-between" align="center" gap={12}>
+                <Space size={8}>
+                  <Segmented
+                    value={previewView}
+                    onChange={(value) => setPreviewView(value as PreviewView)}
+                    options={[
+                      { label: 'srt 原文', value: 'srt' },
+                      { label: '无时间文本', value: 'plain' },
+                    ]}
+                  />
+                  <Button icon={<CopyOutlined />} onClick={() => copyText(previewContent)}>
+                    复制{previewView === 'srt' ? '全文' : '纯文本'}
+                  </Button>
+                </Space>
+                <Text type="secondary" ellipsis style={{ minWidth: 0, fontSize: 12 }}>
+                  {formatBytes(preview.size_bytes)}
+                  {preview.truncated && ' · 内容过长，只显示了开头一段'}
+                </Text>
+              </Flex>
+              <pre
+                style={{
+                  maxHeight: '60vh',
+                  overflow: 'auto',
+                  padding: 12,
+                  background: 'var(--color-bg-soft, #f5f5f5)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  lineHeight: 1.7,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  margin: 0,
+                }}
+              >
+                {previewContent}
+              </pre>
+            </Flex>
           )
         )}
       </Modal>
@@ -808,6 +866,16 @@ export default function SubtitleExtract() {
           }
         }}
       />
+
+      {/* ---------- 备注编辑 ---------- */}
+      {remark.editing && (
+        <JobRemarkModal
+          job={remark.editing}
+          save={updateSubtitleJobRemark}
+          onClose={remark.close}
+          onSaved={remark.handleSaved}
+        />
+      )}
     </div>
   )
 }
@@ -825,6 +893,39 @@ function DescriptionsBlock({ job }: { job: SubtitleJob }) {
       <Descriptions.Item label="字幕">{job.subtitle_count} 份</Descriptions.Item>
     </Descriptions>
   )
+}
+
+/**
+ * srt 的时间轴行，形如 `00:00:01,000 --> 00:00:04,000`。
+ *
+ * 逗号是标准写法，但有的工具（含部分 ASR 导出）用小数点，箭头也可能写成 `->`，
+ * 一并认掉；行首行尾的空白不敏感。
+ */
+const SRT_TIME_LINE = /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-+>\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*$/
+
+/**
+ * srt 原文 → 去掉序号与时间轴的纯文本：一个字幕块一行，块与块之间空一行，
+ * 块内的多行字幕（双语、长句折行）照旧换行。
+ *
+ * 纯展示用的文本变换，不落盘、不改后端产物；文件本身还是原来的 .srt。
+ */
+function srtToPlainText(content: string): string {
+  const blocks: string[] = []
+  for (const block of content.split(/\r?\n[ \t]*\r?\n/)) {
+    const lines = block.split(/\r?\n/)
+    // 块首的纯数字是字幕序号，去掉；没有序号的文件不多走这一步
+    if (lines.length > 0 && /^\s*\d+\s*$/.test(lines[0])) {
+      lines.shift()
+    }
+    const text = lines
+      .filter((line) => !SRT_TIME_LINE.test(line))
+      .join('\n')
+      .trim()
+    if (text) {
+      blocks.push(text)
+    }
+  }
+  return blocks.join('\n\n')
 }
 
 /** 每条视频的处理明细列定义 */
@@ -933,6 +1034,7 @@ function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  onEditRemark: (job: SubtitleJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<SubtitleJob> {
   return [
@@ -941,6 +1043,7 @@ function historyColumns(handlers: {
     jobInputColumn<SubtitleJob>(),
     { title: '视频', dataIndex: 'total_videos', width: 64 },
     { title: '字幕', dataIndex: 'subtitle_count', width: 64 },
+    jobRemarkColumn<SubtitleJob>({ onEdit: handlers.onEditRemark }),
     jobCreatedColumn<SubtitleJob>(),
     jobActionsColumn<SubtitleJob>({
       isTerminal: (job) => isTerminalStatus(job.status),

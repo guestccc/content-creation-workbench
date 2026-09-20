@@ -4,7 +4,7 @@
  * 每个函数对应后端一个接口，返回值已完成拆包（直接拿到 data）。
  */
 
-import { del, get, post } from './client'
+import { del, get, post, put } from './client'
 import type {
   SceneClip,
   SceneEnvironment,
@@ -58,6 +58,11 @@ export function fetchSceneClips(jobId: number): Promise<SceneClip[]> {
 /** 取消任务 */
 export function cancelSceneJob(jobId: number): Promise<SceneJob> {
   return post<SceneJob>(`/scene/jobs/${jobId}/cancel`)
+}
+
+/** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateSceneJobRemark(jobId: number, remark: string): Promise<SceneJob> {
+  return put<SceneJob>(`/scene/jobs/${jobId}/remark`, { remark })
 }
 
 /** 重试单条失败的视频：条目重置回 pending，任务重新入队（其余条目结果不动） */

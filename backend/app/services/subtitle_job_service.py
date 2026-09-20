@@ -40,6 +40,7 @@ from app.models.subtitle_job import (
     SubtitleJobItemStatus,
     SubtitleJobStatus,
 )
+from app.schemas.common import JobRemarkUpdate
 from app.schemas.subtitle_job import OUTPUT_FORMAT, SubtitleJobCreate
 from app.services.subtitle_env import detect
 
@@ -309,6 +310,29 @@ class SubtitleJobService:
         except SQLAlchemyError as exc:
             logger.exception("取消字幕提取任务失败 | id=%s", job_id)
             raise DatabaseError("取消字幕提取任务失败") from exc
+
+    def update_remark(self, job_id: int, payload: JobRemarkUpdate) -> SubtitleJob:
+        """更新任务备注（空串表示清空）。
+
+        备注是纯用户标记，不参与状态机，因此任何状态（含运行中、终态）都能改。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                job.remark = payload.remark
+                self.db.flush()
+
+            logger.info("字幕提取任务备注已更新 | id=%s", job_id)
+            return job
+        except NotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("更新字幕提取任务备注失败 | id=%s", job_id)
+            raise DatabaseError("更新任务备注失败") from exc
 
     def delete_job(self, job_id: int, *, purge_files: bool = False) -> None:
         """删除任务记录（级联删除所有条目）。

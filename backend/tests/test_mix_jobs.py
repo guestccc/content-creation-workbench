@@ -393,3 +393,57 @@ class TestDeletePurge:
         response = client.delete(f"/api/v1/mix/jobs/{job_id}?purge_files=true")
         assert response.status_code == 200, response.text
         assert not out_dir.exists(), f"输出目录没清掉：{out_dir}"
+
+
+class TestJobRemark:
+    """任务备注：用户自己看的标记（PUT /jobs/{id}/remark）。"""
+
+    def _create(self, client, materials) -> dict:
+        ids = _library_ids(client)
+        resp = client.post("/api/v1/mix/jobs", json=_create_payload(ids, materials))
+        assert resp.status_code == 201, resp.text
+        return resp.json()["data"]
+
+    def test_update_remark_echoed_in_detail_and_list(self, client, materials):
+        """备注写进去后，详情与列表都必须回显（列表用的是同一个响应模型）。"""
+        job = self._create(client, materials)
+
+        response = client.put(
+            f"/api/v1/mix/jobs/{job['id']}/remark", json={"remark": "  待替换开头  "}
+        )
+        assert response.status_code == 200, response.text
+        # 首尾空白由 schema 统一剥掉，避免「看着是空的其实不是」
+        assert response.json()["data"]["remark"] == "待替换开头"
+
+        detail = client.get(f"/api/v1/mix/jobs/{job['id']}")
+        assert detail.json()["data"]["remark"] == "待替换开头"
+
+        item = next(
+            i for i in client.get("/api/v1/mix/jobs").json()["data"]["items"]
+            if i["id"] == job["id"]
+        )
+        assert item["remark"] == "待替换开头"
+
+    def test_empty_remark_clears_existing(self, client, materials):
+        """空串是「清空」而不是「不更新」—— 与 PATCH 的缺省语义刻意不同。"""
+        job = self._create(client, materials)
+        client.put(f"/api/v1/mix/jobs/{job['id']}/remark", json={"remark": "写错了"})
+
+        response = client.put(f"/api/v1/mix/jobs/{job['id']}/remark", json={"remark": ""})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == ""
+        assert client.get(f"/api/v1/mix/jobs/{job['id']}").json()["data"]["remark"] == ""
+
+    def test_remark_too_long_422(self, client, materials):
+        job = self._create(client, materials)
+        response = client.put(
+            f"/api/v1/mix/jobs/{job['id']}/remark", json={"remark": "备" * 201}
+        )
+        assert response.status_code == 422, response.text
+        # 超长被拒时备注保持原值，不写半截进去
+        assert client.get(f"/api/v1/mix/jobs/{job['id']}").json()["data"]["remark"] == ""
+
+    def test_update_missing_job_404(self, client, materials):
+        response = client.put("/api/v1/mix/jobs/9999/remark", json={"remark": "x"})
+        assert response.status_code == 404, response.text
+        assert response.json()["success"] is False

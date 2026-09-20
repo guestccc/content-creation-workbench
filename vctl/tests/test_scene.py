@@ -586,7 +586,7 @@ class TestSplitScenes(unittest.TestCase):
 class TestProgressMarkers(unittest.TestCase):
     """给工作台看的进度标记。
 
-    内容创作工作台在另一头实时解析这几行，把「第几条视频切到第几个片段」
+    content-creation-workbench 在另一头实时解析这几行，把「第几条视频切到第几个片段」
     展示给用户（backend/app/services/scene_runner.py）。格式是两边的契约，
     所以在这里钉死：前缀、字段顺序、每段切完都要报一次。
 

@@ -29,7 +29,7 @@ SAMPLE = (
     "# 使用方法：复制为 .env 后按需修改。\r\n"
     "\r\n"
     "# ---------- 应用信息 ----------\r\n"
-    "APP_NAME=内容创作工作台\r\n"
+    "APP_NAME=content-creation-workbench\r\n"
     "\r\n"
     "# ---------- 日志 ----------\r\n"
     "LOG_LEVEL=INFO\r\n"
@@ -119,7 +119,7 @@ class TestWrite:
         text = fake_env.read_bytes().decode("utf-8")
         assert "# 环境变量样例文件" in text
         assert "# 使用方法：复制为 .env 后按需修改。" in text
-        assert "APP_NAME=内容创作工作台" in text
+        assert "APP_NAME=content-creation-workbench" in text
         assert "LOG_LEVEL=INFO" in text
         assert "# ---------- 应用信息 ----------" in text
 

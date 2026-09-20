@@ -1,7 +1,7 @@
 {
   "name": "content-workbench-desktop",
   "version": "0.1.0",
-  "description": "内容创作工作台客户端：本地凭证托管 + 发布任务代理执行",
+  "description": "content-creation-workbench客户端：本地凭证托管 + 发布任务代理执行",
   "main": "./out/main/index.js",
   "license": "UNLICENSED",
   "private": true,

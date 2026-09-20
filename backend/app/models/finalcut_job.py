@@ -36,6 +36,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.content import utcnow
+from app.models.job_common import JobRemarkMixin
 
 
 class FinalcutCopyJobStatus:
@@ -93,7 +94,7 @@ class FinalcutCopyPhase:
     ALL: tuple = (READ, ANALYZE, PARSE)
 
 
-class FinalcutCopyJob(Base):
+class FinalcutCopyJob(Base, JobRemarkMixin):
     """一键成品的文案生成任务（AI 调用，无子进程无磁盘产物）。"""
 
     __tablename__ = "finalcut_copy_jobs"
@@ -170,7 +171,7 @@ class FinalcutCopyJob(Base):
         return f"<FinalcutCopyJob id={self.id} status={self.status}>"
 
 
-class FinalcutRenderJob(Base):
+class FinalcutRenderJob(Base, JobRemarkMixin):
     """一键成品的合成任务（把勾选的文案烧进视频，每条候选一个成片）。"""
 
     __tablename__ = "finalcut_render_jobs"

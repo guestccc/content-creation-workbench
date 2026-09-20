@@ -17,6 +17,7 @@ from app.services.voicebox_client import (
     VoiceboxError,
     fetch_audio,
     generate,
+    list_models,
     list_profiles,
     probe,
 )
@@ -103,6 +104,46 @@ class TestListProfiles:
         assert excinfo.value.kind == "bad_response"
 
 
+class TestListModels:
+    def test_unwraps_the_models_key(self):
+        """上游给的是 `{"models": [...]}`，本函数把它拆到列表就返回。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/models/status"
+            return httpx.Response(
+                200,
+                json={"models": [{"model_name": "qwen-tts-0.6B", "downloaded": True}]},
+            )
+
+        items = list_models(config=_config(), transport=httpx.MockTransport(handler))
+
+        assert items == [{"model_name": "qwen-tts-0.6B", "downloaded": True}]
+
+    def test_bare_list_payload_is_also_accepted(self):
+        """个别版本可能直接给数组 —— 两种形状都认，免得升级即挂。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"model_name": "kokoro", "downloaded": False}])
+
+        items = list_models(config=_config(), transport=httpx.MockTransport(handler))
+
+        assert items == [{"model_name": "kokoro", "downloaded": False}]
+
+    def test_unreachable_raises_voicebox_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        with pytest.raises(VoiceboxError) as excinfo:
+            list_models(config=_config(), transport=httpx.MockTransport(handler))
+        assert excinfo.value.kind == "unreachable"
+
+    def test_unexpected_payload_is_bad_response(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"models": "不是数组"})
+
+        with pytest.raises(VoiceboxError) as excinfo:
+            list_models(config=_config(), transport=httpx.MockTransport(handler))
+        assert excinfo.value.kind == "bad_response"
+
+
 class TestGenerate:
     def test_request_shape_and_result(self):
         seen = []
@@ -130,8 +171,53 @@ class TestGenerate:
             "profile_id": "p1",
             "text": "大家好，今天推荐一款保温杯",
             "language": "zh",
+            "engine": "qwen",
             "model_size": "1.7B",
         }
+
+    def test_engine_selects_the_model(self):
+        """engine 别丢了：丢了就静默退回上游默认的 qwen，用户选的 Kokoro 白选。"""
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"id": "gen_1", "duration": 1.0})
+
+        generate(
+            "hi",
+            profile_id="p1",
+            engine="kokoro",
+            model_size="",
+            config=_config(),
+            transport=httpx.MockTransport(handler),
+        )
+
+        body = json.loads(seen[0].content)
+        assert body["engine"] == "kokoro"
+
+    def test_empty_model_size_is_omitted(self):
+        """不分尺寸的引擎（kokoro / luxtts / chatterbox）**整个字段都不发**。
+
+        上游对 model_size 的校验是 `^(1\\.7B|0\\.6B|1B|3B)$` —— 发个空串过去会被
+        422 顶回来，用户看到的是「Voicebox 拒绝了这次请求」，而真正的原因在我们
+        这边多发了一个字段。
+        """
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"id": "gen_1", "duration": 1.0})
+
+        generate(
+            "hi",
+            profile_id="p1",
+            engine="kokoro",
+            model_size="",
+            config=_config(),
+            transport=httpx.MockTransport(handler),
+        )
+
+        assert "model_size" not in json.loads(seen[0].content)
 
     def test_timeout_is_timeout_kind(self):
         def handler(request: httpx.Request) -> httpx.Response:

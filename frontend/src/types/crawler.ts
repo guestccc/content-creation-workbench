@@ -73,6 +73,9 @@ export interface CrawlJob {
   started_at: string | null
   finished_at: string | null
   error_message: string
+  /** 备注（用户可编辑，最多 200 字；空串表示没写）。
+   *  注意别和上面的 note_count 混了：那是「抓到的笔记数」，这个才是备注 */
+  remark: string
   /** running 任务的当前阶段（starting、login_前缀、crawling、finishing），非 running 为空串 */
   phase: string
   created_at: string

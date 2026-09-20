@@ -5,12 +5,21 @@
  * 所以「选输入/输出目录」必须由后端列目录。
  */
 
-import { del, get, post } from './client'
+import { BASE_URL, del, get, post } from './client'
 import type { FsFavorite, FsListData } from '../types/scene'
 
 /** 列出指定目录的内容；不传 path 时列出用户主目录 */
 export function fetchDirectory(path?: string): Promise<FsListData> {
   return get<FsListData>('/fs/list', path ? { path } : undefined)
+}
+
+/**
+ * 任意本地视频的只读预览流地址（直接塞给 `<video src>`，支持 Range）。
+ *
+ * 素材列表「看一眼再勾选」、一键成品的框选步骤都用它。
+ */
+export function localVideoPreviewUrl(path: string): string {
+  return `${BASE_URL}/fs/preview?path=${encodeURIComponent(path)}`
 }
 
 /** 收藏的目录清单（目录选择弹窗左侧那一列） */

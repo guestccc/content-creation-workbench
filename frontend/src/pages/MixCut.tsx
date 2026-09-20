@@ -65,16 +65,19 @@ import {
   fetchMixJobs,
   fetchMixLibrary,
   removeMixSource,
+  updateMixJobRemark,
 } from '../api/mix'
 import DirectoryPicker from '../components/DirectoryPicker'
 import HistoryCard from '../components/HistoryCard'
+import JobRemarkModal from '../components/JobRemarkModal'
 import VideoPreviewModal from '../components/VideoPreviewModal'
-import { jobStatusColumn } from '../components/jobColumns'
+import { jobRemarkColumn, jobStatusColumn } from '../components/jobColumns'
 import {
   useApiMessage,
   useAsyncData,
   useDirectoryPicker,
   useJobList,
+  useJobRemark,
   useJobRunner,
   usePurgeFiles,
 } from '../hooks'
@@ -377,6 +380,9 @@ export default function MixCut() {
   })
 
   const history = useJobList<MixJob>({ fetchList: fetchMixJobs })
+
+  // 历史表「备注」列的编辑开关：保存成功后就地刷新列表
+  const remark = useJobRemark<MixJob>({ message, onSaved: history.reload })
 
   // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
   const purge = usePurgeFiles()
@@ -1213,6 +1219,7 @@ export default function MixCut() {
       dataIndex: 'output_dir',
       ellipsis: true,
     },
+    jobRemarkColumn<MixJob>({ onEdit: remark.open }),
     {
       title: '创建时间',
       dataIndex: 'created_at',
@@ -1388,6 +1395,9 @@ export default function MixCut() {
           onChange: history.setPage,
         }}
         rowSelection={historyRowSelection}
+        // 这页列偏多（成片 / 规模 / 输出目录都占宽）：窄屏改成横向滚动，
+        // 别让「输出目录」这个弹性列被备注列压成一条缝
+        scroll={{ x: 1080 }}
         extra={
           <Popconfirm
             title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
@@ -1494,6 +1504,16 @@ export default function MixCut() {
         onClose={picker.close}
         onSelect={(path) => void handleAddSource(path)}
       />
+
+      {/* ---------- 备注编辑 ---------- */}
+      {remark.editing && (
+        <JobRemarkModal
+          job={remark.editing}
+          save={updateMixJobRemark}
+          onClose={remark.close}
+          onSaved={remark.handleSaved}
+        />
+      )}
     </Flex>
   )
 }

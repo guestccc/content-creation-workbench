@@ -129,6 +129,89 @@ def test_ensure_materials_dir_falls_back_to_home(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# 素材预览流
+# --------------------------------------------------------------------------
+
+
+def test_preview_ok(client, tmp_path):
+    """整文件 200：Accept-Ranges 必须声明，否则浏览器不发分段请求、拖不动进度条。"""
+    video = tmp_path / "素材.mp4"
+    video.write_bytes(b"fake-video-bytes")
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(video)})
+    assert response.status_code == 200, response.text
+    assert response.content == b"fake-video-bytes"
+    assert response.headers["Accept-Ranges"] == "bytes"
+    # 类型给错（octet-stream）浏览器会当成附件下载，<video> 只会黑屏
+    assert response.headers["content-type"] == "video/mp4"
+
+
+def test_preview_range_206(client, tmp_path):
+    """带 Range 的请求回字节段，播放器靠它取尾部的 moov。"""
+    video = tmp_path / "素材.mp4"
+    video.write_bytes(b"fake-video-bytes")
+
+    response = client.get(
+        "/api/v1/fs/preview",
+        params={"path": str(video)},
+        headers={"Range": "bytes=0-3"},
+    )
+    assert response.status_code == 206, response.text
+    assert response.content == b"fake"
+    assert response.headers["content-range"] == "bytes 0-3/16"
+
+
+def test_preview_covers_every_listed_video(client, tmp_path):
+    """列表里标成 is_video 的后缀，预览都得播得出来。
+
+    两处共用 SCENE_INPUT_EXTENSIONS —— 出现「列得出来、点开 400」就是白名单
+    分了家。顺带守住媒体类型：白名单加了新后缀却忘了配类型，这里会红。
+    """
+    for suffix in settings.SCENE_INPUT_EXTENSIONS:
+        video = tmp_path / f"素材{suffix}"
+        video.write_bytes(b"v")
+
+        listed = client.get("/api/v1/fs/list", params={"path": str(tmp_path)}).json()["data"]
+        assert [entry["is_video"] for entry in listed["entries"]] == [True], suffix
+
+        response = client.get("/api/v1/fs/preview", params={"path": str(video)})
+        assert response.status_code == 200, suffix
+        assert response.headers["content-type"].startswith("video/"), suffix
+
+        video.unlink()
+
+
+def test_preview_rejects_non_video_400(client, tmp_path):
+    """非视频后缀 → 400（这是本模块唯一吐文件内容的接口，白名单必须生效）。"""
+    note = tmp_path / "说明.txt"
+    note.write_text("t", encoding="utf-8")
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(note)})
+    assert response.status_code == 400, response.text
+    assert "只支持" in response.json()["error"]["message"]
+
+
+def test_preview_relative_path_400(client):
+    """相对路径 → 400：后端的 cwd 不是用户敲命令的地方，不猜。"""
+    response = client.get("/api/v1/fs/preview", params={"path": "a/b.mp4"})
+    assert response.status_code == 400, response.text
+
+
+def test_preview_missing_file_404(client, tmp_path):
+    response = client.get("/api/v1/fs/preview", params={"path": str(tmp_path / "没有.mp4")})
+    assert response.status_code == 404, response.text
+
+
+def test_preview_directory_404(client, tmp_path):
+    """目录名恰好以视频后缀结尾：过了后缀白名单也必须是文件。"""
+    folder = tmp_path / "假视频.mp4"
+    folder.mkdir()
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(folder)})
+    assert response.status_code == 404, response.text
+
+
+# --------------------------------------------------------------------------
 # 目录收藏
 # --------------------------------------------------------------------------
 

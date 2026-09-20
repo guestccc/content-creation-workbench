@@ -33,6 +33,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.content import utcnow
+from app.models.job_common import JobRemarkMixin
 
 
 class SubtitleJobStatus:
@@ -64,7 +65,7 @@ class SubtitleJobItemStatus:
     TERMINAL: tuple = (SUCCESS, FAILED, SKIPPED)
 
 
-class SubtitleJob(Base):
+class SubtitleJob(Base, JobRemarkMixin):
     """字幕提取任务表。"""
 
     __tablename__ = "subtitle_jobs"

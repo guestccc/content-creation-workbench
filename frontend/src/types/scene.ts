@@ -84,6 +84,8 @@ export interface SceneJob {
   started_at: string | null
   finished_at: string | null
   error_message: string
+  /** 备注（用户可编辑，最多 200 字；空串表示没写） */
+  remark: string
   created_at: string
   updated_at: string
   /** 每个视频的处理结果；列表接口不返回 */

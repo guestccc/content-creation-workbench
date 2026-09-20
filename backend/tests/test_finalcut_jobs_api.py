@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.schemas.common import MAX_JOB_REMARK_LENGTH
 from app.services import ai_settings
 
 #: 假探测返回的视频规格（与 mix_runner.probe_video_spec 的键形状一致）。
@@ -481,6 +482,58 @@ class TestCopyJobLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# 文案任务备注
+# ---------------------------------------------------------------------------
+
+
+class TestCopyJobRemark:
+    """备注是给用户自己看的标记：写过之后详情与列表都要回显。"""
+
+    def test_save_echoes_in_detail_and_list(self, client, media_files):
+        created = _create_job(client, media_files)
+        response = client.put(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/remark",
+            json={"remark": "只投 A 组"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == "只投 A 组"
+
+        detail = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}").json()["data"]
+        assert detail["remark"] == "只投 A 组"
+        items = client.get("/api/v1/finalcut/copy-jobs").json()["data"]["items"]
+        assert items[0]["remark"] == "只投 A 组"
+
+    def test_empty_string_clears_remark(self, client, media_files):
+        """空串是有效值（清空），不是「本次不改」—— 与 AI 配置留空即不改的语义相反。"""
+        created = _create_job(client, media_files)
+        path = f"/api/v1/finalcut/copy-jobs/{created['id']}/remark"
+        client.put(path, json={"remark": "先写一条"})
+
+        response = client.put(path, json={"remark": ""})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == ""
+        assert client.get(path.rsplit("/remark", 1)[0]).json()["data"]["remark"] == ""
+
+    def test_remark_too_long_422(self, client, media_files):
+        created = _create_job(client, media_files)
+        response = client.put(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/remark",
+            json={"remark": "长" * (MAX_JOB_REMARK_LENGTH + 1)},
+        )
+        assert response.status_code == 422
+        # 超长整条被拒，没落半个字进去
+        detail = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}").json()["data"]
+        assert detail["remark"] == ""
+
+    def test_remark_missing_job_404(self, client):
+        response = client.put(
+            "/api/v1/finalcut/copy-jobs/9999/remark", json={"remark": "随便写点"}
+        )
+        assert response.status_code == 404
+        assert response.json()["success"] is False
+
+
+# ---------------------------------------------------------------------------
 # 合成任务（render-jobs）
 # ---------------------------------------------------------------------------
 
@@ -791,6 +844,50 @@ class TestRenderJobLifecycle:
         assert client.get("/api/v1/finalcut/render-jobs").json()["data"]["total"] == 2
 
 
+class TestRenderJobRemark:
+    """合成任务的备注与文案任务同一套契约（共用 JobRemarkUpdate 模型）。"""
+
+    def test_save_echoes_in_detail_and_list(self, client, media_files):
+        created = _create_render_job(client, media_files)
+        response = client.put(
+            f"/api/v1/finalcut/render-jobs/{created['id']}/remark",
+            json={"remark": "等审核通过再发"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == "等审核通过再发"
+
+        detail = client.get(f"/api/v1/finalcut/render-jobs/{created['id']}").json()["data"]
+        assert detail["remark"] == "等审核通过再发"
+        items = client.get("/api/v1/finalcut/render-jobs").json()["data"]["items"]
+        assert items[0]["remark"] == "等审核通过再发"
+
+    def test_empty_string_clears_remark(self, client, media_files):
+        created = _create_render_job(client, media_files)
+        path = f"/api/v1/finalcut/render-jobs/{created['id']}/remark"
+        client.put(path, json={"remark": "先写一条"})
+
+        response = client.put(path, json={"remark": ""})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == ""
+        detail = client.get(f"/api/v1/finalcut/render-jobs/{created['id']}").json()["data"]
+        assert detail["remark"] == ""
+
+    def test_remark_too_long_422(self, client, media_files):
+        created = _create_render_job(client, media_files)
+        response = client.put(
+            f"/api/v1/finalcut/render-jobs/{created['id']}/remark",
+            json={"remark": "长" * (MAX_JOB_REMARK_LENGTH + 1)},
+        )
+        assert response.status_code == 422
+
+    def test_remark_missing_job_404(self, client):
+        response = client.put(
+            "/api/v1/finalcut/render-jobs/9999/remark", json={"remark": "随便写点"}
+        )
+        assert response.status_code == 404
+        assert response.json()["success"] is False
+
+
 class TestRenderOutputs:
     """成片视频流 / 封面：路径只从任务记录推导（item 序号），不接受外部路径。"""
 
@@ -955,37 +1052,5 @@ class TestSources:
         assert data == {"subtitles": [], "videos": []}
 
 
-class TestPreview:
-    def test_preview_ok(self, client, media_files):
-        _, video = media_files
-        response = client.get("/api/v1/finalcut/preview", params={"path": str(video)})
-        assert response.status_code == 200
-        assert response.content == b"fake-video"
-        assert response.headers["Accept-Ranges"] == "bytes"
-
-    def test_preview_range_206(self, client, media_files):
-        _, video = media_files
-        response = client.get(
-            "/api/v1/finalcut/preview",
-            params={"path": str(video)},
-            headers={"Range": "bytes=0-3"},
-        )
-        assert response.status_code == 206
-        assert response.content == b"fake"
-
-    def test_preview_relative_path_400(self, client):
-        response = client.get("/api/v1/finalcut/preview", params={"path": "a/b.mp4"})
-        assert response.status_code == 400
-
-    def test_preview_bad_extension_400(self, client, media_files):
-        subtitle, _ = media_files
-        response = client.get(
-            "/api/v1/finalcut/preview", params={"path": str(subtitle)}
-        )
-        assert response.status_code == 400
-
-    def test_preview_missing_file_404(self, client, tmp_path):
-        response = client.get(
-            "/api/v1/finalcut/preview", params={"path": str(tmp_path / "没有.mp4")}
-        )
-        assert response.status_code == 404
+# 本地视频预览流的测试在 tests/test_fs.py —— 接口已统一到 GET /fs/preview
+# （跨功能公共设施，一键成品的框选步骤与镜头分割的素材列表共用同一条流）。

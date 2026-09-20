@@ -37,6 +37,7 @@ from app.models.crawl_job import (
     CrawlPlatform,
     CrawlerType,
 )
+from app.schemas.common import JobRemarkUpdate
 from app.schemas.crawl_job import CrawlJobCreate
 from app.services import crawl_results
 from app.services.crawler_env import probe_environment
@@ -348,6 +349,35 @@ class CrawlJobService:
 
         _purge_products(products, job_ids=job_ids)
         return job_ids
+
+    # ------------------------------------------------------------------
+    # 编辑
+    # ------------------------------------------------------------------
+
+    def update_remark(self, job_id: int, payload: JobRemarkUpdate) -> CrawlJob:
+        """更新任务备注（空串表示清空）。
+
+        备注是纯用户标记，不参与状态机，任何状态下都允许改。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self.db.get(CrawlJob, job_id)
+                if job is None:
+                    raise NotFoundError(f"素材抓取任务不存在：id={job_id}")
+                job.remark = payload.remark
+                self.db.flush()
+
+            logger.info("素材抓取任务备注已更新 | id=%s", job_id)
+            return job
+        except NotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("更新抓取任务备注失败 | id=%s", job_id)
+            raise DatabaseError("更新任务备注失败") from exc
 
     # ------------------------------------------------------------------
     # 产物

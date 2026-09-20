@@ -1,10 +1,11 @@
 """智能配音（Voicebox）相关的 Pydantic 模型。
 
-包含四组：
+包含五组：
 1. 环境自检 —— 本机 Voicebox 服务在不在、模型下没下、有没有 GPU；
-2. 音色 —— 音色列表（只读，建音色在 Voicebox 自己的界面里做）；
-3. 生成 —— 提交一次配音、轮询它的进度；
-4. 产物 —— materials/dubbing/ 下的音频清单。
+2. 模型 —— 能用来配音的模型清单（只读，下载/删除在 Voicebox 里做）；
+3. 音色 —— 音色列表（只读，建音色在 Voicebox 自己的界面里做）；
+4. 生成 —— 提交一次配音、轮询它的进度；
+5. 产物 —— materials/dubbing/ 下的音频清单。
 
 与其它功能的一处结构差异：**没有任务表**。Voicebox 是常驻外部服务，我们只做
 HTTP 代理，所以生成记录只活在进程内存里（见 services/voicebox_generation.py），
@@ -21,11 +22,14 @@ from pydantic import BaseModel, Field, field_serializer
 from app.core.config import settings
 from app.schemas.common import to_utc_iso
 
-#: 视频配音的语言白名单，与上游 GenerationRequest 的 `^(en|zh)$` 对齐。
+#: 视频配音的语言白名单。**上游支持的比这多得多**（它的正则收了二十几种），
+#: 这里只放开中英文：配这个工具的产出是中文短视频，别的语言没人用，而多语言
+#: 能力还取决于所选 engine（Kokoro 就是英文为主）。要放开时两边一起改。
 LANGUAGE_OPTIONS = ("zh", "en")
 
-#: 模型规模白名单，与上游的 `^(1\.7B|0\.6B)$` 对齐。
-MODEL_SIZE_OPTIONS = ("1.7B", "0.6B")
+# 能选的模型不在本文件写死 —— 它由 services/voicebox_models.py 的 CATALOG 定义，
+# 并经 GET /voicebox/models 下发（那张表还要跟上游 /models/status 对上下载状态，
+# 不是一份单纯的白名单）。生成接口的参数校验也是查那张表，见 api/v1/voicebox.py。
 
 
 class VoiceboxInstallHint(BaseModel):
@@ -67,6 +71,45 @@ class VoiceboxEnvironmentResponse(BaseModel):
     )
     warnings: List[str] = Field(default_factory=list, description="需要提醒用户的情况")
 
+    # 下面八个字段只为回答一件事：页面上那两个按钮（「设置镜像」「重启 Voicebox」）
+    # 该不该出现、该说什么话。**前端不做平台判断** —— 所有差异都在后端算好，
+    # 页面只按这些布尔值与文案渲染（同 subtitle_env 的 install_hints 约定）。
+    platform: str = Field(default="", description="后端所在系统：macos / windows / linux")
+    platform_label: str = Field(default="", description="系统名的中文展示")
+    hf_mirror_supported: bool = Field(
+        default=False,
+        description="能否由本工具设置模型下载源（系统支持且 Voicebox 就在本机）",
+    )
+    hf_mirror_value: str = Field(
+        default="", description="当前 HF_ENDPOINT 的值；空串表示未设置"
+    )
+    hf_mirror_is_recommended: bool = Field(
+        default=False, description="当前下载源是不是本页推荐的镜像"
+    )
+    hf_mirror_persistent: bool = Field(
+        default=False, description="下载源在注销 / 重启后是否仍然有效"
+    )
+    voicebox_app_path: str = Field(
+        default="", description="找到的 Voicebox 安装位置；空串表示没找到"
+    )
+    restart_supported: bool = Field(
+        default=False, description="页面是否该显示「重启 Voicebox」"
+    )
+
+
+class VoiceboxRestartResponse(BaseModel):
+    """一次「重启 Voicebox」的结果。
+
+    **不代表服务已就绪**：桌面端冷启动到 /health 可用约 30 秒，而前端请求 15 秒
+    就超时了，所以这个接口不等就绪、立即返回；就绪与否由前端轮询 GET /environment
+    判断（与切割 / 字幕 / 生成同一套「任务异步跑、进度靠轮询」）。
+    """
+
+    started: bool = Field(description="是否已发起启动（不代表服务已经就绪）")
+    app_path: str = Field(default="", description="拉起的安装位置；空串表示按名字查找拉起")
+    detail: str = Field(default="", description="给用户看的一句话")
+    wait_hint: str = Field(default="", description="要等多久 / 等的是什么")
+
 
 class VoiceboxBaseUrlUpdate(BaseModel):
     """指定 Voicebox 服务地址（写进 backend/.env）。"""
@@ -94,8 +137,38 @@ class VoiceProfileListData(BaseModel):
     total: int = Field(description="音色数量")
 
 
+class DubbingModelItem(BaseModel):
+    """一个能用来配音的模型（= 上游 engine + model_size 的一个组合）。"""
+
+    engine: str = Field(description="上游 /generate 的 engine 参数")
+    model_size: str = Field(
+        description="上游 /generate 的 model_size 参数；**空串表示不分尺寸**，"
+        "提交时这个字段不发"
+    )
+    model_name: str = Field(description="上游 /models/status 里的标识")
+    label: str = Field(description="页面上显示的名字")
+    note: str = Field(default="", description="一句话说明它适合什么场景")
+    downloaded: Optional[bool] = Field(
+        default=None, description="是否已下载；null 表示上游列表里没这个模型（可能是版本差异）"
+    )
+    downloading: bool = Field(default=False, description="是否正在下载")
+    loaded: bool = Field(default=False, description="是否已加载进显存/内存")
+    size_mb: Optional[float] = Field(default=None, description="已下载时占用的体积（MB）")
+
+
+class DubbingModelListData(BaseModel):
+    """配音可选模型清单（顺序即页面下拉顺序）。"""
+
+    items: List[DubbingModelItem] = Field(description="模型清单")
+    total: int = Field(description="模型数量")
+
+
 class DubbingGenerationCreate(BaseModel):
-    """提交一次配音生成。"""
+    """提交一次配音生成。
+
+    `engine` 与 `model_size` 一起指向一个具体模型（见 DubbingModelItem）：
+    后端按目录校验这个组合存不存在，而不是各自查一份白名单。
+    """
 
     text: str = Field(
         ...,
@@ -113,7 +186,11 @@ class DubbingGenerationCreate(BaseModel):
         description="产物文件名（不含扩展名）；留空按 dub_<时间戳> 自动命名",
     )
     language: str = Field(default="zh", description="语言：zh / en")
-    model_size: str = Field(default="1.7B", description="模型规模：1.7B / 0.6B")
+    engine: str = Field(default="qwen", description="TTS 引擎（来自模型列表）")
+    model_size: str = Field(
+        default="1.7B",
+        description="模型规模（来自模型列表）；部分引擎不分尺寸，此时传空串",
+    )
 
 
 class DubbingGenerationResponse(BaseModel):
@@ -124,6 +201,8 @@ class DubbingGenerationResponse(BaseModel):
     text_excerpt: str = Field(description="文案摘要（前若干字，列表里展示用）")
     profile_id: str = Field(description="音色 id")
     profile_name: str = Field(default="", description="音色名")
+    engine: str = Field(default="qwen", description="这次用的 TTS 引擎")
+    model_size: str = Field(default="", description="这次用的模型规模；空串表示不分尺寸")
     filename: str = Field(default="", description="产物文件名（含扩展名），成功后有值")
     output_path: str = Field(default="", description="产物绝对路径，成功后有值")
     duration: Optional[float] = Field(default=None, description="音频时长（秒）")

@@ -52,6 +52,7 @@ from app.services.mix_library import (
 )
 from app.services.mix_runner import middle_permutation_limit, plan_outputs
 from app.services.fs_cleanup import remove_paths_best_effort
+from app.schemas.common import JobRemarkUpdate
 from app.schemas.mix_job import MixJobCreate
 
 logger = get_logger(__name__)
@@ -354,6 +355,35 @@ class MixJobService:
 
         _purge_products(products, job_ids=job_ids)
         return job_ids
+
+    # ------------------------------------------------------------------
+    # 编辑
+    # ------------------------------------------------------------------
+
+    def update_remark(self, job_id: int, payload: JobRemarkUpdate) -> MixJob:
+        """更新任务备注（空串表示清空）。
+
+        备注是纯用户标记，不参与状态机，任何状态下都允许改。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self.db.get(MixJob, job_id)
+                if job is None:
+                    raise NotFoundError(f"混剪任务不存在：id={job_id}")
+                job.remark = payload.remark
+                self.db.flush()
+
+            logger.info("混剪任务备注已更新 | id=%s", job_id)
+            return job
+        except NotFoundError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("更新混剪任务备注失败 | id=%s", job_id)
+            raise DatabaseError("更新任务备注失败") from exc
 
     # ------------------------------------------------------------------
     # 成片定位（供播放/封面接口用；路径完全由任务记录推导）

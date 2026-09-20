@@ -13,8 +13,10 @@ import type {
   DubbingAudioListData,
   DubbingGeneration,
   DubbingGenerationPayload,
+  DubbingModelListData,
   VoiceProfileListData,
   VoiceboxEnvironment,
+  VoiceboxRestartResult,
 } from '../types/voicebox'
 
 /** 探测 Voicebox 服务：连没连上、模型下没下、有没有 GPU（refresh 绕过后端缓存） */
@@ -33,6 +35,41 @@ export function fetchVoiceboxEnvironment(refresh = false): Promise<VoiceboxEnvir
  */
 export function updateVoiceboxBaseUrl(baseUrl: string): Promise<VoiceboxEnvironment> {
   return put<VoiceboxEnvironment>('/voicebox/environment/base-url', { base_url: baseUrl })
+}
+
+/**
+ * 一键把模型下载源换成镜像（写**用户级**环境变量，不是 .env）。
+ *
+ * 为什么不能写 .env：那是我方后端的配置，而 Voicebox 是另一个进程；也不能写
+ * `~/.zshrc`：macOS 上 GUI 应用由 LaunchServices 拉起、不继承 shell 环境。
+ * 幂等，重复点不报错。设完必须重启 Voicebox 才生效。
+ */
+export function enableVoiceboxHfMirror(): Promise<VoiceboxEnvironment> {
+  return put<VoiceboxEnvironment>('/voicebox/environment/hf-mirror')
+}
+
+/** 清除下载源、恢复 HuggingFace 官方默认（幂等；给用户设了的东西要能撤销） */
+export function disableVoiceboxHfMirror(): Promise<VoiceboxEnvironment> {
+  return del<VoiceboxEnvironment>('/voicebox/environment/hf-mirror')
+}
+
+/**
+ * 重启 Voicebox 桌面端。**不等就绪就返回**：冷启动到可用约 30 秒，而前端
+ * fetch 15 秒超时，同步等必然撞超时、用户会以为重启失败 —— 就绪靠轮询自检。
+ */
+export function restartVoicebox(): Promise<VoiceboxRestartResult> {
+  return post<VoiceboxRestartResult>('/voicebox/environment/restart')
+}
+
+/**
+ * 拉配音可选模型清单（含每个的下载状态）。
+ *
+ * 候选来自后端而不是写死在前端：哪些引擎有、哪个下好了，只有所装的那版 Voicebox
+ * 知道；写死的话每个 Voicebox 版本都得跟着发一次前端。只读 —— 下载模型在
+ * Voicebox 自己的界面里做（首次生成时它自己也会下）。
+ */
+export function fetchDubbingModels(): Promise<DubbingModelListData> {
+  return get<DubbingModelListData>('/voicebox/models')
 }
 
 /** 拉音色列表（建音色在 Voicebox 自己的界面里做） */

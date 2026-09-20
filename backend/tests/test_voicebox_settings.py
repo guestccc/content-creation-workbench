@@ -31,7 +31,7 @@ SAMPLE = (
     "# 使用方法：复制为 .env 后按需修改。\r\n"
     "\r\n"
     "# ---------- 应用信息 ----------\r\n"
-    "APP_NAME=内容创作工作台\r\n"
+    "APP_NAME=content-creation-workbench\r\n"
     "\r\n"
     "# ---------- 日志 ----------\r\n"
     "LOG_LEVEL=INFO\r\n"

@@ -5,7 +5,7 @@
  * 两个任务域：copy-jobs（AI 文案）与 render-jobs（烧字合成）。
  */
 
-import { del, get, post, put, BASE_URL } from './client'
+import { del, get, post, put } from './client'
 import type {
   AiSettings,
   AiSettingsPayload,
@@ -39,7 +39,7 @@ export function updateAiSettings(payload: AiSettingsPayload): Promise<AiSettings
 }
 
 // ---------------------------------------------------------------------------
-// 素材来源与本地视频预览
+// 素材来源
 // ---------------------------------------------------------------------------
 
 /** 历史产物来源清单：混剪的成片 + 字幕任务的 .srt */
@@ -47,10 +47,8 @@ export function fetchFinalcutSources(): Promise<FinalcutSources> {
   return get<FinalcutSources>('/finalcut/sources')
 }
 
-/** 任意本地视频的只读预览流地址（给 <video src> 用，支持 Range） */
-export function finalcutPreviewUrl(path: string): string {
-  return `${BASE_URL}/finalcut/preview?path=${encodeURIComponent(path)}`
-}
+// 本地视频的只读预览流不在这儿：它是跨功能的，统一在 api/filesystem.ts 的
+// localVideoPreviewUrl（后端 GET /fs/preview）。
 
 // ---------------------------------------------------------------------------
 // 文案任务
@@ -78,6 +76,11 @@ export function fetchCopyJob(jobId: number): Promise<FinalcutCopyJob> {
 /** 取消文案任务（在途的 AI 请求会跑完再丢弃，结果不落库） */
 export function cancelCopyJob(jobId: number): Promise<FinalcutCopyJob> {
   return post<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}/cancel`)
+}
+
+/** 更新文案任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateCopyJobRemark(jobId: number, remark: string): Promise<FinalcutCopyJob> {
+  return put<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}/remark`, { remark })
 }
 
 /** 删除文案任务记录（磁盘上无产物，删的就是记录本身） */
@@ -116,6 +119,11 @@ export function fetchRenderJob(jobId: number): Promise<FinalcutRenderJob> {
 /** 取消合成任务（执行中的会整组杀掉当前 ffmpeg） */
 export function cancelRenderJob(jobId: number): Promise<FinalcutRenderJob> {
   return post<FinalcutRenderJob>(`/finalcut/render-jobs/${jobId}/cancel`)
+}
+
+/** 更新合成任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateRenderJobRemark(jobId: number, remark: string): Promise<FinalcutRenderJob> {
+  return put<FinalcutRenderJob>(`/finalcut/render-jobs/${jobId}/remark`, { remark })
 }
 
 /** 删除合成任务记录；purgeFiles=true 时连同输出目录一起删 */

@@ -12,6 +12,7 @@
 - GET  /jobs/{id}/subtitles      任务产出的字幕文件列表
 - GET  /jobs/{id}/subtitles/{n}  单份字幕的文本内容（预览用，超长截断）
 - POST /jobs/{id}/cancel         取消任务
+- PUT  /jobs/{id}/remark        更新任务备注（空串 = 清空）
 - DELETE /jobs/{id}              删除任务记录
 """
 
@@ -24,7 +25,7 @@ from app.core.config import settings
 from app.core.exceptions import BadRequestError
 from app.core.logging import get_logger
 from app.models.subtitle_job import SubtitleJobStatus
-from app.schemas.common import ApiResponse, JobBatchDeleteRequest
+from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.subtitle_job import (
     SubtitleEnvironmentResponse,
     SubtitleFileResponse,
@@ -277,6 +278,21 @@ def cancel_job(
     """取消排队中或执行中的任务，执行中的会整组杀掉当前转写子进程。"""
     job = service.cancel_job(job_id)
     return ApiResponse(data=SubtitleJobResponse.from_model(job))
+
+
+@router.put(
+    "/jobs/{job_id}/remark",
+    response_model=ApiResponse[SubtitleJobResponse],
+    summary="更新字幕提取任务备注",
+)
+def update_job_remark(
+    payload: JobRemarkUpdate,
+    service: SubtitleJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[SubtitleJobResponse]:
+    """更新任务备注，空串表示清空。"""
+    job = service.update_remark(job_id, payload)
+    return ApiResponse(data=SubtitleJobResponse.from_model(job, include_items=False))
 
 
 @router.delete(

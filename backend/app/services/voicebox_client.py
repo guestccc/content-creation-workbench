@@ -2,8 +2,12 @@
 
 Voicebox 是一个外部桌面应用，装着 `%APPDATA%/sh.voicebox.app` 那套数据，并在
 本机起一个 FastAPI 服务（默认 `http://127.0.0.1:17493`）。它**不是**命令行工具：
-我们不起子进程、不解析 stdout、不管它的生命周期，只发 HTTP —— 所以
+**本模块**不起子进程、不解析 stdout、不管它的生命周期，只发 HTTP —— 所以
 「装在哪、跑没跑」这类问题的答案只有一个：连得上就用，连不上就如实告诉用户。
+
+（唯一涉及进程的地方是 `services/voicebox_restart.py`：改完下载源必须重启桌面端
+才生效。两个模块**互不导入** —— 那边只管进程、不管 HTTP，就绪与否由前端轮询
+自检接口判断，不在那边等。）
 
 设计取舍（与 services/ai_client.py 同一套）：
 - **同步 httpx.Client**：整个后端是同步路由 + 线程 worker，没有 async 的必要；
@@ -12,11 +16,17 @@ Voicebox 是一个外部桌面应用，装着 `%APPDATA%/sh.voicebox.app` 那套
   不关心是 ConnectTimeout 还是 ReadTimeout；
 - **transport 关键字只给测试注入 httpx.MockTransport**：生产传 None。
 
-上游接口（来自它仓库的 docs/openapi.json，本文件只用到这四个）：
+上游接口（来自它仓库的 docs/openapi.json，本文件只用到这五个）：
     GET  /health              服务状态 + 模型/GPU 情况
+    GET  /models/status       所有模型的下载/加载状态（真相在这里，见下）
     GET  /profiles            音色列表
     POST /generate            生成语音（**同步阻塞**返回结果，长文案要等）
     GET  /audio/{id}          取生成出来的音频字节
+
+**关于 /health 的 model_downloaded**：0.5.0 上它恒为 `null`（实测：模型明明下好了
+也报 null），而 `/models/status` 里每条模型都带准确的 downloaded / loaded / size_mb。
+所以「模型下没下」一律以 /models/status 为准，/health 那个字段只在非 null 时参考
+（见 services/voicebox_env.py 的兜底）。
 """
 
 from dataclasses import dataclass
@@ -245,11 +255,48 @@ def list_profiles(
     return [item for item in payload if isinstance(item, dict)]
 
 
+def list_models(
+    *,
+    config: Optional[VoiceboxConfig] = None,
+    transport: Optional[httpx.BaseTransport] = None,
+) -> List[Dict[str, Any]]:
+    """拉模型清单（**全部**模型，不只是能配音的）。
+
+    上游这一份混着三类：TTS（能配音）、whisper（转写）、qwen3（LLM）。本函数原样
+    返回，由调用方按自己的用途筛 —— 筛选规则属于业务知识，不该塞进这个纯 HTTP 层
+    （见 services/voicebox_models.py）。
+
+    Raises:
+        VoiceboxError: 连不上 / 超时 / 上游报错。
+    """
+    cfg = config or voicebox_config()
+    try:
+        with _client(cfg, QUICK_TIMEOUT_SECONDS, transport) as client:
+            response = client.get(f"{cfg.api}/models/status")
+    except httpx.HTTPError as exc:
+        raise _network_error(cfg, exc) from exc
+    if response.status_code != 200:
+        _raise_for_status(response, what="模型列表")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise VoiceboxError(
+            "bad_response", "Voicebox 返回的模型列表不是 JSON", detail=str(exc)[:200]
+        ) from exc
+    # 形状是 {"models": [...]}；个别版本可能直接给数组，两种都认
+    if isinstance(payload, dict):
+        payload = payload.get("models")
+    if not isinstance(payload, list):
+        raise VoiceboxError("bad_response", "Voicebox 返回的模型列表结构不对")
+    return [item for item in payload if isinstance(item, dict)]
+
+
 def generate(
     text: str,
     *,
     profile_id: str,
     language: str = "zh",
+    engine: str = "qwen",
     model_size: str = "1.7B",
     config: Optional[VoiceboxConfig] = None,
     transport: Optional[httpx.BaseTransport] = None,
@@ -258,16 +305,24 @@ def generate(
 
     这是唯一一个用长超时的接口：上游是同步生成，长文案要跑很久。
 
+    `engine` 与 `model_size` 是**两个正交参数**：engine 选哪套 TTS 实现
+    （qwen / luxtts / kokoro / chatterbox / tada …），model_size 只在部分是
+    有意义的（qwen 分 1.7B/0.6B，tada 分 1B/3B，而 luxtts / kokoro / chatterbox
+    只有一个尺寸）。所以 **model_size 为空串时整个字段都不发** —— 上游对它的
+    校验是 `^(1\.7B|0\.6B|1B|3B)$`，发个空串会被 422 顶回来。
+
     Raises:
         VoiceboxError: 连不上 / 超时 / 上游报错 / 返回结构不对。
     """
     cfg = config or voicebox_config()
-    payload = {
+    payload: Dict[str, Any] = {
         "profile_id": profile_id,
         "text": text,
         "language": language,
-        "model_size": model_size,
+        "engine": engine,
     }
+    if model_size:
+        payload["model_size"] = model_size
     try:
         with _client(cfg, cfg.timeout_seconds, transport) as client:
             response = client.post(f"{cfg.api}/generate", json=payload)

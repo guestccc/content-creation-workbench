@@ -164,6 +164,7 @@ class CrawlJobResponse(TimestampMixin):
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     finished_at: Optional[datetime] = Field(default=None, description="结束时间")
     error_message: str = Field(description="失败原因或收尾备注")
+    remark: str = Field(description="备注（用户可编辑，最多 200 字；空串表示没写）")
     phase: str = Field(
         default="",
         description="running 任务的当前阶段（starting/login_cookie/login_scan/login_redirect/crawling/finishing），"
@@ -196,6 +197,7 @@ class CrawlJobResponse(TimestampMixin):
             started_at=model.started_at,
             finished_at=model.finished_at,
             error_message=model.error_message,
+            remark=model.remark,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

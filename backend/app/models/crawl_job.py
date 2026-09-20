@@ -29,6 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.models.content import utcnow
+from app.models.job_common import JobRemarkMixin
 
 
 class CrawlJobStatus:
@@ -95,7 +96,7 @@ class CrawlLoginType:
     ALL: tuple = (QRCODE, COOKIE)
 
 
-class CrawlJob(Base):
+class CrawlJob(Base, JobRemarkMixin):
     """素材抓取任务表。"""
 
     __tablename__ = "crawl_jobs"

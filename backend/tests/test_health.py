@@ -8,7 +8,7 @@ def test_root_returns_service_info(client):
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert body["data"]["name"] == "内容创作工作台"
+    assert body["data"]["name"] == "content-creation-workbench"
     assert body["data"]["docs"] == "/docs"
 
 

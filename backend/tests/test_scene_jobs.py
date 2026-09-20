@@ -723,3 +723,58 @@ class TestDeletePurge:
         assert response.status_code == 200, response.text
         for out_dir in dirs:
             assert out_dir.is_dir(), f"产物被误删：{out_dir}"
+
+
+class TestUpdateRemark:
+    """更新任务备注（PUT /jobs/{id}/remark）：纯用户标记，不参与状态机。"""
+
+    def test_remark_echoed_in_detail_and_list(self, client, video_dir, tmp_path):
+        """保存成功：详情接口与列表接口都回显新备注。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        remark = "给客户 A 的那版"
+
+        response = client.put(
+            f"/api/v1/scene/jobs/{created['id']}/remark", json={"remark": remark}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == remark
+
+        detail = client.get(f"/api/v1/scene/jobs/{created['id']}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["data"]["remark"] == remark
+
+        # 列表走的是 from_model(include_items=False) 那条分支，容易漏掉 remark
+        listed = client.get("/api/v1/scene/jobs")
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["data"]["items"][0]["remark"] == remark
+
+    def test_empty_remark_clears_existing(self, client, video_dir, tmp_path):
+        """空串是有效值：把已有备注清掉，而不是被当成「不更新」。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        url = f"/api/v1/scene/jobs/{created['id']}/remark"
+        client.put(url, json={"remark": "先写一句"})
+
+        response = client.put(url, json={"remark": ""})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["remark"] == ""
+
+        detail = client.get(f"/api/v1/scene/jobs/{created['id']}")
+        assert detail.json()["data"]["remark"] == ""
+
+    def test_remark_over_limit_422(self, client, video_dir, tmp_path):
+        """超过 200 字 → 422（上限与前端编辑弹窗的 maxLength 一致）。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+
+        response = client.put(
+            f"/api/v1/scene/jobs/{created['id']}/remark", json={"remark": "备" * 201}
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["success"] is False
+
+    def test_update_remark_missing_job_returns_404(self, client):
+        """任务不存在 → 404。"""
+        response = client.put("/api/v1/scene/jobs/99999/remark", json={"remark": "x"})
+        assert response.status_code == 404, response.text

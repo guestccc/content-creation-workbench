@@ -235,11 +235,21 @@ def set_values(
         atomic_write(path, bom + "".join(lines).encode("utf-8"), log_label=log_label)
 
 
-def atomic_write(path: Path, data: bytes, *, log_label: str) -> None:
+def atomic_write(
+    path: Path,
+    data: bytes,
+    *,
+    log_label: str,
+    tmp_prefix: str = ".env.",
+    tmp_suffix: str = ".local",
+) -> None:
     """同目录临时文件 + os.replace 原子落盘。
 
-    临时文件名用 `.env.` 前缀 + `.local` 后缀，恰好命中 `.gitignore` 里的
-    `backend/.env.*.local` —— 进程崩在中间也不会把残留文件带进 git。
+    临时文件名的**默认值**用 `.env.` 前缀 + `.local` 后缀，恰好命中
+    `.gitignore` 里的 `backend/.env.*.local` —— 进程崩在中间也不会把残留文件
+    带进 git。写别的文件的调用方（如 services/user_env.py 写 LaunchAgent 的
+    plist）传自己的前缀后缀，把这份「同目录临时文件 + fsync + os.replace +
+    处处补权限」的教训共用起来。
 
     Windows 上 os.replace 走 MoveFileExW(MOVEFILE_REPLACE_EXISTING)，
     目标被别的进程打开且没带 FILE_SHARE_DELETE 时会抛 PermissionError
@@ -248,7 +258,7 @@ def atomic_write(path: Path, data: bytes, *, log_label: str) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     handle_fd, tmp_name = tempfile.mkstemp(
-        prefix=".env.", suffix=".local", dir=str(path.parent)
+        prefix=tmp_prefix, suffix=tmp_suffix, dir=str(path.parent)
     )
     try:
         with os.fdopen(handle_fd, "wb") as handle:

@@ -32,7 +32,7 @@ export interface BoxPreviewStyle {
 }
 
 interface BoxSelectorProps {
-  /** 视频流地址（/finalcut/preview 或历史产物的成片流） */
+  /** 视频流地址（本地文件走 /fs/preview，历史产物走混剪的成片流） */
   src: string
   /** 视频切换时重建 <video> */
   videoKey?: string

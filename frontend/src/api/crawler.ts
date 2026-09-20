@@ -5,7 +5,7 @@
  * crawlMediaUrl 不是请求函数：本地媒体地址直接给 <img>/<video> 的 src 用。
  */
 
-import { BASE_URL, del, get, post } from './client'
+import { BASE_URL, del, get, post, put } from './client'
 import type {
   CrawlEnvironment,
   CrawlJob,
@@ -53,6 +53,11 @@ export function fetchCrawlLog(jobId: number, limit?: number): Promise<CrawlLogDa
 /** 取消任务（执行中的会整组结束 MC 进程，已抓内容保留） */
 export function cancelCrawlJob(jobId: number): Promise<CrawlJob> {
   return post<CrawlJob>(`/crawl/jobs/${jobId}/cancel`)
+}
+
+/** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
+export function updateCrawlJobRemark(jobId: number, remark: string): Promise<CrawlJob> {
+  return put<CrawlJob>(`/crawl/jobs/${jobId}/remark`, { remark })
 }
 
 /** 删除任务记录；purgeFiles=true 时连同磁盘上的 jsonl 与媒体文件一起删除 */

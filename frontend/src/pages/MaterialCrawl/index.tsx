@@ -48,13 +48,22 @@ import type { ColumnsType, TableProps } from 'antd/es/table'
 
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../../components/JobProgressCard'
+import JobRemarkModal from '../../components/JobRemarkModal'
 import {
   jobActionsColumn,
   jobCreatedColumn,
   jobIdColumn,
+  jobRemarkColumn,
   jobStatusColumn,
 } from '../../components/jobColumns'
-import { useApiMessage, useAsyncData, useJobList, useJobRunner, usePurgeFiles } from '../../hooks'
+import {
+  useApiMessage,
+  useAsyncData,
+  useJobList,
+  useJobRemark,
+  useJobRunner,
+  usePurgeFiles,
+} from '../../hooks'
 import type { UsePurgeFilesResult } from '../../hooks'
 import {
   cancelCrawlJob,
@@ -65,6 +74,7 @@ import {
   fetchCrawlEnvironment,
   fetchCrawlJob,
   fetchCrawlJobs,
+  updateCrawlJobRemark,
 } from '../../api/crawler'
 import { fetchCreators } from '../../api/creator'
 import type { CreatorListData } from '../../types/creator'
@@ -139,6 +149,9 @@ export default function MaterialCrawl() {
 
   // ---------- 历史 + 当前任务 ----------
   const history = useJobList<CrawlJob>({ fetchList: fetchCrawlJobs })
+
+  // 历史表「备注」列的编辑开关：保存成功后就地刷新列表
+  const remark = useJobRemark<CrawlJob>({ message, onSaved: history.reload })
 
   // 删除时是否连产物一起清（每个删除确认框里都有这个勾选项）
   const purge = usePurgeFiles()
@@ -807,12 +820,23 @@ export default function MaterialCrawl() {
           onView: (id) => void openHistoryJob(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          onEditRemark: remark.open,
           purge,
         })}
         dataSource={history.items}
         loading={history.loading}
         onRefresh={history.reload}
         rowSelection={historyRowSelection}
+        pagination={{
+          total: history.total,
+          pageSize: 10,
+          showSizeChanger: false,
+          current: history.page,
+          onChange: history.setPage,
+        }}
+        // 这页列最多（平台 / 模式 / 内容都占宽）：窄屏改成横向滚动，
+        // 别让「内容」这个弹性列被备注列压成一条缝
+        scroll={{ x: 1080 }}
         extra={
           <Popconfirm
             title={`删除这 ${history.selectedRowKeys.length} 条任务记录？`}
@@ -950,6 +974,16 @@ export default function MaterialCrawl() {
               form.setCookies(updated.cookie)
             }
           }}
+        />
+      )}
+
+      {/* ---------- 备注编辑 ---------- */}
+      {remark.editing && (
+        <JobRemarkModal
+          job={remark.editing}
+          save={updateCrawlJobRemark}
+          onClose={remark.close}
+          onSaved={remark.handleSaved}
         />
       )}
     </div>
@@ -1180,6 +1214,7 @@ function historyColumns(handlers: {
   onView: (jobId: number) => void
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
+  onEditRemark: (job: CrawlJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<CrawlJob> {
   return [
@@ -1205,6 +1240,7 @@ function historyColumns(handlers: {
       render: (_: unknown, job: CrawlJob) => paramsSummary(job),
     },
     { title: '笔记', dataIndex: 'note_count', width: 64 },
+    jobRemarkColumn<CrawlJob>({ onEdit: handlers.onEditRemark }),
     jobCreatedColumn<CrawlJob>(),
     jobActionsColumn<CrawlJob>({
       isTerminal: (job) => isTerminalStatus(job.status),
