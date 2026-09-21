@@ -120,6 +120,18 @@ def detect_font() -> Optional[FontChoice]:
 # --------------------------------------------------------------------------
 
 
+#: 缺 drawtext 时的修复指引。写得具体是因为「装个 ffmpeg 就有」在这里不成立：
+#: macOS 上 brew 的**普通 ffmpeg formula 不含 libfreetype**（实测 9.0.2 的
+#: 编译配置里连 --enable-libfreetype 都没有），带 drawtext 的是另一个
+#: keg-only 的 ffmpeg-full。早先这条写的是「macOS 用 brew install ffmpeg
+#: （默认带）」，照着做完 drawtext 还是缺 —— 建议本身把人带进了死胡同。
+_NEED_DRAWTEXT_HINT = (
+    "换一个带 libfreetype 的构建：Windows 用 gyan.dev 的 full build；"
+    "macOS 的普通 ffmpeg formula 不含 drawtext，要 brew install ffmpeg-full"
+    "（keg-only，装完还需 brew link --overwrite ffmpeg-full）"
+)
+
+
 def probe_drawtext(ffmpeg_path: Optional[str] = None) -> dict:
     """实测 ffmpeg 的 drawtext 能力（不猜版本号）。
 
@@ -141,10 +153,9 @@ def probe_drawtext(ffmpeg_path: Optional[str] = None) -> dict:
     path = ffmpeg_path or find_tool("ffmpeg")
     if not path:
         result["detail"] = "PATH 里找不到 ffmpeg"
-        result["fix_hint"] = (
-            "安装 ffmpeg 并确保在 PATH 里（Windows 推荐 gyan.dev 的 full build，"
-            "macOS 用 brew install ffmpeg）"
-        )
+        # 这里同样直接指向能用的构建：装一个不带 drawtext 的 ffmpeg 等于没装，
+        # 烧字那一步照样跑不起来，不如一次说清楚。
+        result["fix_hint"] = "安装 ffmpeg 并确保在 PATH 里。" + _NEED_DRAWTEXT_HINT
         return result
     result["path"] = path
 
@@ -159,10 +170,7 @@ def probe_drawtext(ffmpeg_path: Optional[str] = None) -> dict:
     filters_text = (filters.stdout + filters.stderr) if filters else ""
     if not re.search(r"^\s*...?\s+drawtext\s", filters_text, re.MULTILINE):
         result["detail"] = "这个 ffmpeg 构建里没有 drawtext 滤镜（缺 libfreetype）"
-        result["fix_hint"] = (
-            "换一个带 libfreetype 的构建：Windows 用 gyan.dev 的 full build，"
-            "macOS 用 brew install ffmpeg（默认带）"
-        )
+        result["fix_hint"] = _NEED_DRAWTEXT_HINT
         return result
     result["has_drawtext"] = True
 

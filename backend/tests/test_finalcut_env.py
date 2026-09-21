@@ -157,6 +157,32 @@ class TestProbeDrawtext:
         assert "drawtext" in result["detail"]
         assert "libfreetype" in result["fix_hint"]
 
+    def test_fix_hint_points_at_a_build_that_actually_has_drawtext(self, monkeypatch):
+        """修复建议必须指向真带 drawtext 的构建。
+
+        这条是防回归：早先写的是「macOS 用 brew install ffmpeg（默认带）」，
+        但 brew 的普通 ffmpeg formula 不含 libfreetype（实测 9.0.2 的编译
+        配置里连 --enable-libfreetype 都没有），带 drawtext 的是另一个
+        keg-only 的 ffmpeg-full。照着原话装完，drawtext 照样缺。
+        """
+        _stub_ffmpeg(monkeypatch, filters_text=_FILTERS_WITHOUT_DRAWTEXT, help_text="")
+        hint = probe_drawtext()["fix_hint"]
+        assert "ffmpeg-full" in hint
+        # keg-only 不 link 就进不了 PATH，不提这句用户装完还是找不到
+        assert "keg-only" in hint
+        assert "brew install ffmpeg（默认带）" not in hint
+
+    def test_ffmpeg_missing_hint_also_points_at_full_build(self, monkeypatch):
+        """「没装 ffmpeg」那条也直接指向带 drawtext 的构建。
+
+        烧字功能上，装一个不带 drawtext 的 ffmpeg 等于没装 —— 不如一次说清，
+        省得用户装完普通版再撞一次同样的墙。
+        """
+        monkeypatch.setattr(finalcut_env, "find_tool", lambda name: None)
+        hint = probe_drawtext()["fix_hint"]
+        assert "PATH" in hint
+        assert "ffmpeg-full" in hint
+
     def test_full_capability(self, monkeypatch):
         _stub_ffmpeg(
             monkeypatch,
