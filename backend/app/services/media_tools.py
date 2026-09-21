@@ -17,9 +17,12 @@
 3. 要读子进程输出的地方一律按字节捕获、自己解码（run_probe / decode_output），
    绝不给 subprocess 传 text=True —— 理由见 decode_output 的注释；
 4. 找到同名可执行文件不等于它就是这个工具，得跑一次 `-version` 自证
-   （verify_tool）—— 理由见 verify_tool 的注释。
+   （verify_tool）—— 理由见 verify_tool 的注释。自证失败还要分清楚是
+   「跑不起来」还是「自称是别的工具」，两者给用户的修复建议不同
+   （见 PROBE_* 常量）。
 """
 
+import errno
 import locale
 import os
 import shutil
@@ -113,17 +116,72 @@ class ProbedOutput(NamedTuple):
     stderr: str
 
 
-def run_probe(
+#: 探测失败的原因码。分成这几档是因为「不可用」有好几种成因，彼此要给的
+#: 修复建议完全不同：架构不匹配要换版本，没权限要 chmod，冒充要换文件。
+#: 笼统报成「找到的同名文件不是 ffmpeg」会把换版本的人往「谁改了我的文件名」
+#: 上带（真实踩过：macOS 26 之后系统不再支持 Intel 版二进制，PATH 里那份
+#: 是好的 ffmpeg，只是跑不起来，提示却说是别的工具改了名）。
+PROBE_OK = ""
+PROBE_MISSING = "missing"  # 压根没给路径
+PROBE_BADARCH = "badarch"  # 架构与本机不符（EBADARCH，macOS 独有）
+PROBE_EACCES = "eacces"  # 没有执行权限
+PROBE_UNSTARTABLE = "unstartable"  # 其它起不来的原因（文件损坏等）
+PROBE_TIMEOUT = "timeout"
+PROBE_NONZERO = "nonzero"  # 跑起来了，但自己报错退出
+PROBE_IMPOSTOR = "impostor"  # 正常退出，却自称是别的工具
+
+#: 起不来时的修复建议，按原因码取。缺的键回落到 PROBE_UNSTARTABLE 那条。
+_UNSTARTABLE_HINTS = {
+    PROBE_BADARCH: (
+        "文件架构与本机不符（Apple Silicon 需要 arm64 版，且 macOS 26 之后"
+        "系统已不再提供 Rosetta）：换一份对应架构的版本，或从包管理器重新安装"
+    ),
+    PROBE_EACCES: "文件没有执行权限：chmod +x 之后重试",
+    PROBE_UNSTARTABLE: "文件跑不起来：确认它是一份完整、可用的程序",
+    PROBE_TIMEOUT: "文件响应超时：确认它不是卡住的脚本或需要交互的程序",
+    PROBE_NONZERO: "文件自检时报错退出：确认它是一份完整、可用的程序",
+}
+
+
+class SpawnResult(NamedTuple):
+    """一次探测的完整结果：跑没跑起来、失败是为什么。
+
+    `run_probe` 只看 `output` 判成败，依赖自检还要看 `code` 决定给什么
+    修复建议，所以原因一并带回来，不必重跑一次子进程。
+    """
+
+    output: Optional[ProbedOutput]
+    code: str  # PROBE_* 之一，成功时是 PROBE_OK
+    message: str  # 失败原因的人话说明，成功时是空串
+
+
+def describe_os_error(exc: OSError) -> str:
+    """把「进程起不来」的 OSError 说成人话。
+
+    架构不匹配在 macOS 上抛的是 `[Errno 86] Bad CPU type in executable`，
+    这是本机最可能撞上的那一种（系统停掉 Rosetta 之后，PATH 里所有 Intel 版
+    二进制都会以这个错报出来），所以单独认出来，别退化成一句 "No such file"。
+    """
+    if exc.errno is not None and exc.errno == getattr(errno, "EBADARCH", None):
+        return "系统不支持这个文件的架构（Bad CPU type in executable）"
+    if exc.errno == errno.EACCES:
+        return "没有执行权限"
+    if exc.errno == errno.ENOENT:
+        return "文件不存在"
+    return exc.strerror or str(exc)
+
+
+def spawn_probe(
     argv: Sequence[str],
     *,
     timeout: float = 30,
     cwd: Optional[str] = None,
-) -> Optional[ProbedOutput]:
-    """跑一次只读探测命令（ffprobe 探测 / `-version` 自检），失败返回 None。
+) -> SpawnResult:
+    """起一次只读探测子进程，连失败原因一起返回。
 
     与执行任务用的 subprocess.Popen 不同：探测命令输出很短、一定会退出，
     所以这里可以 capture_output（不必落文件）。但**不能传 text=True**，
-    理由见 decode_output。进程起不来或超时返回 None（调用方据此降级）。
+    理由见 decode_output。
     """
     try:
         result = subprocess.run(
@@ -134,44 +192,100 @@ def run_probe(
             cwd=cwd,
             env=child_env(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.debug("探测命令执行失败 | %s | %s", argv[0] if argv else "", exc)
-        return None
-    return ProbedOutput(
-        returncode=result.returncode,
-        stdout=decode_output(result.stdout),
-        stderr=decode_output(result.stderr),
+    except subprocess.TimeoutExpired:
+        logger.debug("探测命令超时 | %s", argv[0] if argv else "")
+        return SpawnResult(None, PROBE_TIMEOUT, "")
+    except OSError as exc:
+        logger.debug("探测命令起不来 | %s | %s", argv[0] if argv else "", exc)
+        # 逐个比对而不是拿 errno 当字典键：EBADARCH 只在 macOS 上存在，
+        # 非 macOS 取出的是 None，而 OSError 的 errno 本身也可能是 None，
+        # 拿 None 去查表会把「没有 errno 的错误」错判成架构不匹配。
+        badarch = getattr(errno, "EBADARCH", None)
+        if exc.errno is not None and exc.errno == badarch:
+            code = PROBE_BADARCH
+        elif exc.errno == errno.EACCES:
+            code = PROBE_EACCES
+        else:
+            code = PROBE_UNSTARTABLE
+        return SpawnResult(None, code, describe_os_error(exc))
+    return SpawnResult(
+        ProbedOutput(
+            returncode=result.returncode,
+            stdout=decode_output(result.stdout),
+            stderr=decode_output(result.stderr),
+        ),
+        PROBE_OK,
+        "",
     )
 
 
-def verify_tool(name: str, path: Optional[str]) -> str:
-    """跑一次 `<tool> -version`，确认这个文件真的是它自己，返回版本号。
+def run_probe(
+    argv: Sequence[str],
+    *,
+    timeout: float = 30,
+    cwd: Optional[str] = None,
+) -> Optional[ProbedOutput]:
+    """跑一次只读探测命令（ffprobe 探测 / `-version` 自检），失败返回 None。
+
+    进程起不来或超时返回 None，调用方据此降级 —— 只要成败、不要原因的地方
+    用这个；要按失败原因分岔（依赖自检）用 spawn_probe。
+    """
+    return spawn_probe(argv, timeout=timeout, cwd=cwd).output
+
+
+def verify_tool_detail(name: str, path: Optional[str]) -> Tuple[str, str, str]:
+    """自检一个工具，返回 `(版本号, 失败码, 失败说明)`；版本号非空即为通过。
 
     只在 PATH 里找到同名文件是不够的。真实踩过：`~/.local/bin/ffprobe.exe`
     其实是一个 ffmpeg.exe 的副本（两者 md5 一模一样），名字探测一路通过，
     自检也报「就绪」，直到任务跑起来探测素材规格才炸，报的还是「素材读不出来」。
     这里靠 `-version` 首行的自报名号判定：真 ffprobe 说 `ffprobe version 6.1.1`，
-    冒充者说的是自己原本的名字。跑不起来 / 超时 / 返回码非 0 / 名号对不上，
-    一律返回空串（调用方据此当作「不可用」）。
+    冒充者说的是自己原本的名字。
+
+    失败码是给「怎么修」用的，所以拆得比「能/不能」细：跑不起来（架构不匹配、
+    没权限）和跑得起来却自称是别的工具，修复动作完全不同 —— 前者换版本，
+    后者换文件。调用方只要成败的话用 verify_tool。
     """
     if not path:
-        return ""
-    result = run_probe([path, "-version"], timeout=10)
-    if result is None or result.returncode != 0:
-        logger.warning("工具自检失败（跑不起来）| %s | %s", name, path)
-        return ""
+        return "", PROBE_MISSING, ""
+    spawned = spawn_probe([path, "-version"], timeout=10)
+    if spawned.output is None:
+        logger.warning(
+            "工具自检失败（跑不起来）| %s | %s | %s | %s",
+            name,
+            path,
+            spawned.code,
+            spawned.message,
+        )
+        return "", spawned.code, spawned.message
+    result = spawned.output
+    if result.returncode != 0:
+        logger.warning(
+            "工具自检失败（返回码 %s）| %s | %s", result.returncode, name, path
+        )
+        return "", PROBE_NONZERO, ""
     # 首行形如 `<name> version <版本> ...`；stdout 空时退回 stderr（个别版本走 stderr）
     text = result.stdout.strip() or result.stderr.strip()
     head = text.split()
     if len(head) < 2 or head[0].lower() != name.lower() or head[1].lower() != "version":
+        actual = " ".join(head[:2]) or "（无输出）"
         logger.warning(
             "工具自检失败（自称是别的工具）| 期望=%s | 实际=%s | %s",
             name,
-            " ".join(head[:2]) or "（无输出）",
+            actual,
             path,
         )
-        return ""
-    return head[2] if len(head) > 2 else "unknown"
+        return "", PROBE_IMPOSTOR, actual
+    return (head[2] if len(head) > 2 else "unknown"), PROBE_OK, ""
+
+
+def verify_tool(name: str, path: Optional[str]) -> str:
+    """跑一次 `<tool> -version`，确认这个文件真的是它自己，返回版本号。
+
+    跑不起来 / 超时 / 返回码非 0 / 名号对不上，一律返回空串（调用方据此
+    当作「不可用」）。要看是哪一种失败，用 verify_tool_detail。
+    """
+    return verify_tool_detail(name, path)[0]
 
 
 def dependency_status(
@@ -189,15 +303,36 @@ def dependency_status(
     path / detail / fix_hint。找到同名文件还不够，要 `-version` 自证是它自己，
     否则页面会显示成「就绪」，用户却在任务里撞上「读不出素材规格」。
 
+    自检失败分两种，说明与建议都不一样，所以分开处理：
+    - **跑不起来**（架构不匹配 / 没权限 / 文件损坏）：名字没错，是这份文件在
+      本机执行不了。修复建议按 errno 给（见 _UNSTARTABLE_HINTS）。
+    - **自称是别的工具**：文件能跑，只是它根本不是这个工具。这时才用得上
+      调用方传的 impostor_detail。
+
+    早先这两种都归到 impostor 一档，于是 macOS 停掉 Rosetta 之后，PATH 里那份
+    好好的 ffmpeg 被报成「可能是别的工具的副本被改名」，把用户往查文件名的
+    方向带，而真正该做的是换一份 arm64 版本。
+
     Args:
         purpose: 可用时的说明（页面只在不可用时展示 detail，这条是给自检就绪
             的人看的）。
         missing_detail / missing_hint: PATH 里没有这个工具时的说明与修复建议。
-        impostor_detail / impostor_hint: 找到了但名号对不上时的说明与修复建议；
-            不给就回落到 missing 那两条（对任务的影响是一样的：都用不了）。
+        impostor_detail / impostor_hint: 找到了、跑得起来，但名号对不上时的
+            说明与修复建议；不给就回落到 missing 那两条（对任务的影响一样：
+            都用不了）。
     """
     path = find_tool(name)
-    if path and verify_tool(name, path):
+    if not path:
+        return {
+            "name": name,
+            "ok": False,
+            "path": "",
+            "detail": missing_detail,
+            "fix_hint": missing_hint,
+        }
+
+    version, failure_code, failure_message = verify_tool_detail(name, path)
+    if version:
         return {
             "name": name,
             "ok": True,
@@ -205,7 +340,8 @@ def dependency_status(
             "detail": purpose,
             "fix_hint": "",
         }
-    if path:
+
+    if failure_code == PROBE_IMPOSTOR:
         logger.warning("依赖自检：找到的 %s 不是它自己 | %s", name, path)
         return {
             "name": name,
@@ -214,12 +350,25 @@ def dependency_status(
             "detail": impostor_detail or missing_detail,
             "fix_hint": impostor_hint or missing_hint,
         }
+
+    logger.warning(
+        "依赖自检：%s 跑不起来 | %s | %s | %s",
+        name,
+        path,
+        failure_code,
+        failure_message,
+    )
+    detail = "找到的文件无法执行"
+    if failure_message:
+        detail = f"{detail}：{failure_message}"
     return {
         "name": name,
         "ok": False,
-        "path": "",
-        "detail": missing_detail,
-        "fix_hint": missing_hint,
+        "path": path,
+        "detail": detail,
+        "fix_hint": _UNSTARTABLE_HINTS.get(
+            failure_code, _UNSTARTABLE_HINTS[PROBE_UNSTARTABLE]
+        ),
     }
 
 

@@ -71,11 +71,20 @@ def _stub_tools(monkeypatch):
 
     两个命名空间都要打：runner 用的是 import 进来的名字（mix_runner.find_tool
     / mix_runner.verify_tool），而 probe_environment 走的是 media_tools 里的
-    dependency_status，它调的是**那个模块自己**的 find_tool / verify_tool。
+    dependency_status，它调的是**那个模块自己**的 find_tool。
+
+    自检这一层要按调用方分开打：runner 调 verify_tool（只判成败），
+    dependency_status 调 verify_tool_detail（还要知道失败原因好给修复建议），
+    打在 verify_tool 上挡不住后者。
     """
     for name in (mix_runner, media_tools):
         monkeypatch.setattr(name, "find_tool", lambda tool: f"/fake/{tool}")
-        monkeypatch.setattr(name, "verify_tool", lambda tool, path: "9.9.9")
+    monkeypatch.setattr(mix_runner, "verify_tool", lambda tool, path: "9.9.9")
+    monkeypatch.setattr(
+        media_tools,
+        "verify_tool_detail",
+        lambda name, path: ("9.9.9", media_tools.PROBE_OK, ""),
+    )
     spec = {
         "width": 720, "height": 1280, "fps_num": 30, "fps_den": 1,
         "rotation": 0, "has_audio": True, "duration": 3.5,
