@@ -95,7 +95,13 @@ class FinalcutCopyPhase:
 
 
 class FinalcutCopyJob(Base, JobRemarkMixin):
-    """一键成品的文案生成任务（AI 调用，无子进程无磁盘产物）。"""
+    """一键成品的文案生成任务（AI 调用，无子进程无磁盘产物）。
+
+    `chars_per_second` 是**创建时的语速快照**：列里永远是这次任务实际生效的值
+    （请求里没带就用当时的全局配置）。跑任务时只认这个快照，不再回头看
+    `FINALCUT_CHARS_PER_SECOND` —— 否则事后改一次全局配置，历史任务的字数
+    预算、页面上的秒数就会与当时生成的内容对不上。
+    """
 
     __tablename__ = "finalcut_copy_jobs"
 
@@ -113,6 +119,10 @@ class FinalcutCopyJob(Base, JobRemarkMixin):
     )
     video_duration: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0, comment="视频时长（秒），AI 定量用"
+    )
+    chars_per_second: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0,
+        comment="口播语速快照（字/秒）；0.0 = 升级前的老任务，当时按全局值跑的",
     )
     copy_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=5, comment="要生成几条候选文案"

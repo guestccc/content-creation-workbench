@@ -38,15 +38,17 @@ from app.services.mix_runner import probe_video_spec
 logger = get_logger(__name__)
 
 
-def read_subtitle_material(path: Path) -> str:
-    """读字幕文件并拆解成素材文本（创建校验与 runner 共用同一入口）。
+def read_subtitle_material(path: Path) -> Tuple[str, bool]:
+    """读字幕文件并拆解成素材文本（创建校验、runner、预览接口共用同一入口）。
 
     编码容忍与 media_tools.decode_output 同一套：先 UTF-8 再本地代码页，
     坏字节替换 —— 字幕文件可能来自任意来源，读不出来不该是 UnicodeDecodeError。
+
+    Returns:
+        (素材文本, 是否因超过 FINALCUT_SRT_MAX_CHARS 被截断)。
     """
     text = decode_output(path.read_bytes())
-    material, _truncated = srt_to_material(text)
-    return material
+    return srt_to_material(text)
 
 
 class FinalcutCopyJobService:
@@ -80,6 +82,64 @@ class FinalcutCopyJobService:
         except SQLAlchemyError as exc:
             logger.exception("查询文案任务失败 | id=%s", job_id)
             raise DatabaseError("查询文案任务失败") from exc
+
+    def read_subtitle_preview(self, job_id: int) -> dict:
+        """读一条文案任务用的字幕：原文 + 喂给 AI 的素材（第 ② 步左右对照用）。
+
+        路径**完全由任务记录推导**，不接受任何前端传入的路径片段 —— 同
+        subtitle_job_service.get_subtitle_path 的安全模型。
+
+        素材是**现读现算**的，不是任务执行时的快照：输入可复现（不像
+        raw_response 那份不可复现的 AI 输出，必须留），现算让排队中/进行中/
+        失败/取消/历史任务都能看到这份素材，代价只是「文件在任务后被改写的话
+        会与当时不一致」。素材走 read_subtitle_material —— 与 runner 读的是
+        同一个函数，所以「AI 输入的素材」名副其实。
+
+        Raises:
+            NotFoundError: 任务不存在、字幕文件已不在磁盘上或读不出来。
+            DatabaseError: 查库失败。
+        """
+        job = self.get_job(job_id)
+        path = Path(job.subtitle_path)
+        if not path.is_file():
+            raise NotFoundError(f"字幕文件已不在磁盘上：{path.name}")
+
+        # 素材：与 runner 同一入口（本函数会自己再读一次盘，字幕文件只有几 KB，
+        # 多读一次的代价远小于「两个视图的素材算法各写一份」的维护成本）
+        try:
+            material, material_truncated = read_subtitle_material(path)
+        except OSError as exc:
+            raise NotFoundError(f"字幕文件读不出来：{path.name}（{exc}）") from exc
+
+        # 原文：按字节截断后再解码，避免一次读入超大文件（镜像 subtitle_jobs
+        # 的预览接口）。解码走 decode_output 而不是那里的 utf-8-sig —— 本地
+        # .srt 可能是 GBK，两个视图必须用同一套解码，否则会出现「原文乱码、
+        # 素材正常」。.ass/.vtt 没有空行分块，rfind 返回 -1，退化成硬截断。
+        max_bytes = settings.SUBTITLE_PREVIEW_MAX_BYTES
+        try:
+            size_bytes = path.stat().st_size
+            truncated = size_bytes > max_bytes
+            with path.open("rb") as handle:
+                raw = handle.read(max_bytes + 1 if truncated else max_bytes)
+        except OSError as exc:
+            raise NotFoundError(f"字幕文件读不出来：{path.name}（{exc}）") from exc
+
+        content = decode_output(raw[:max_bytes])
+        if truncated:
+            # 砍掉最后一个可能截断到一半的字幕块，让预览结尾是完整的
+            last_boundary = content.rfind("\n\n")
+            if last_boundary > 0:
+                content = content[:last_boundary]
+
+        return {
+            "path": str(path),
+            "name": path.name,
+            "size_bytes": size_bytes,
+            "content": content,
+            "truncated": truncated,
+            "material": material,
+            "material_truncated": material_truncated,
+        }
 
     def list_jobs(
         self,
@@ -117,7 +177,10 @@ class FinalcutCopyJobService:
     # ------------------------------------------------------------------
 
     def create_job(self, payload: FinalcutCopyJobCreate) -> FinalcutCopyJob:
-        """创建文案生成任务：校验素材、探测时长、落库排队。
+        """创建文案生成任务：校验素材、探测时长、快照语速、落库排队。
+
+        语速（字数预算 = 时长 × 语速）按任务存：请求里带 `chars_per_second`
+        就用它，不带就用当前全局默认值 —— 快照之后不再回头看全局配置。
 
         Raises:
             BadRequestError: 文件不存在 / 视频探不出规格 / 字幕没有可用文本。
@@ -137,11 +200,20 @@ class FinalcutCopyJobService:
             )
 
         try:
-            material = read_subtitle_material(subtitle)
+            material, _truncated = read_subtitle_material(subtitle)
         except OSError as exc:
             raise BadRequestError(f"字幕文件读不出来：{subtitle.name}（{exc}）") from exc
         if not material.strip():
             raise BadRequestError(f"字幕文件里没有可用文本：{subtitle.name}")
+
+        # 语速在创建时**快照**进任务记录：请求带了就用它（这条念快/念慢），
+        # 没带就用当前全局默认值。之后改全局配置不影响已建的任务 ——
+        # 历史任务的预算与页面上算出的秒数必须与当时生成的内容对得上。
+        rate = (
+            payload.chars_per_second
+            if payload.chars_per_second is not None
+            else float(settings.FINALCUT_CHARS_PER_SECOND)
+        )
 
         try:
             with transaction(self.db):
@@ -150,6 +222,7 @@ class FinalcutCopyJobService:
                     subtitle_path=str(subtitle),
                     video_path=str(video),
                     video_duration=float(spec["duration"]),
+                    chars_per_second=rate,
                     copy_count=payload.copy_count,
                     hint=payload.hint,
                     model=settings.AI_MODEL,
@@ -157,8 +230,8 @@ class FinalcutCopyJobService:
                 self.db.add(job)
                 self.db.flush()
             logger.info(
-                "文案任务创建成功 | id=%s | 时长=%.1fs | 条数=%s",
-                job.id, job.video_duration, job.copy_count,
+                "文案任务创建成功 | id=%s | 时长=%.1fs | 语速=%s 字/秒 | 条数=%s",
+                job.id, job.video_duration, job.chars_per_second, job.copy_count,
             )
             return job
         except SQLAlchemyError as exc:

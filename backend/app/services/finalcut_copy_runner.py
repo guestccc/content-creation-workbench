@@ -146,7 +146,7 @@ class FinalcutCopyRunner:
         # ---- read：读字幕并拆解 ----
         self._enter_phase(db, job, FinalcutCopyPhase.READ)
         try:
-            material = read_subtitle_material(Path(job.subtitle_path))
+            material, _truncated = read_subtitle_material(Path(job.subtitle_path))
         except OSError as exc:
             self._fail(db, job, f"字幕文件读不出来：{exc}")
             return
@@ -158,7 +158,17 @@ class FinalcutCopyRunner:
 
         # ---- analyze：调 AI ----
         self._enter_phase(db, job, FinalcutCopyPhase.ANALYZE)
-        budget = char_budget(job.video_duration)
+        # 语速取任务上的快照（创建时落的）；0.0 = 升级前建的老任务，
+        # 补列给了 0.0 而它可能还停在 pending —— recover_interrupted 只管
+        # running 的，重启后照样会被认领跑起来，所以这里的回退是活路径。
+        rate = job.chars_per_second or float(settings.FINALCUT_CHARS_PER_SECOND)
+        budget = char_budget(job.video_duration, rate)
+        # 语速与预算一起记：用户说「预算不对」时，先看这一行是语速没校准
+        # 还是时长算错了，不用去猜（语速是建任务时可在页面上改的值）。
+        logger.info(
+            "字数预算 | id=%s | 时长=%s 秒 × 语速=%s 字/秒 → %s–%s 字",
+            job.id, job.video_duration, rate, *budget,
+        )
         messages = build_copy_messages(
             material, job.video_duration, job.hint, job.copy_count, budget
         )

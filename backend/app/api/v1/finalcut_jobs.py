@@ -10,12 +10,13 @@
 
 接口一览：
 - GET  /finalcut/environment              环境自检（AI / ffmpeg-drawtext / 中文字体）
-- GET  /finalcut/settings                 读 AI 配置（key 只给掩码）
-- PUT  /finalcut/settings                 写 AI 配置（写回 .env 并热同步；key 留空 = 不改）
+- GET  /finalcut/settings                 读 AI 配置与口播语速（key 只给掩码）
+- PUT  /finalcut/settings                 写两者（写回 .env 并热同步；key 留空 / 语速不传 = 不改）
 - GET  /finalcut/sources                  历史产物来源（混剪成片 + 字幕 .srt）
 - POST /finalcut/copy-jobs                创建文案生成任务
 - GET  /finalcut/copy-jobs                历史任务分页列表
 - GET  /finalcut/copy-jobs/{id}           任务详情（轮询进度也用它）
+- GET  /finalcut/copy-jobs/{id}/subtitle-text  字幕原文 + 喂给 AI 的素材（② 左右对照）
 - POST /finalcut/copy-jobs/{id}/cancel    取消任务（结果不落库）
 - PUT  /finalcut/copy-jobs/{id}/remark    更新任务备注（空串 = 清空）
 - POST /finalcut/copy-jobs/batch-delete   批量删除任务记录（无磁盘产物，无 purge）
@@ -31,6 +32,8 @@
 - DELETE /finalcut/render-jobs/{id}       删除合成任务（?purge_files=true 一并清产物）
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, Path as PathParam, Query, Request
 from fastapi.responses import FileResponse, Response
 
@@ -44,6 +47,7 @@ from app.schemas.finalcut_job import (
     FinalcutCopyJobCreate,
     FinalcutCopyJobListData,
     FinalcutCopyJobResponse,
+    FinalcutCopySubtitleText,
     FinalcutEnvironmentResponse,
     FinalcutRenderJobCreate,
     FinalcutRenderJobListData,
@@ -51,7 +55,7 @@ from app.schemas.finalcut_job import (
     FinalcutSourceItem,
     FinalcutSourcesResponse,
 )
-from app.services import ai_settings
+from app.services import ai_settings, finalcut_settings
 from app.services.file_range import ranged_file_response
 from app.services.finalcut_env import probe_environment
 from app.services.media_tools import generate_thumbnail
@@ -65,6 +69,17 @@ logger = get_logger(__name__)
 # --------------------------------------------------------------------------
 
 
+def _settings_payload() -> dict:
+    """「AI 配置与口播语速」的读取模型 = 两个模块的字段合并。
+
+    两个模块的字段名不重叠（语速那三个带 `chars_per_second_` 前缀，见
+    finalcut_settings.read_finalcut_settings 的注释），所以可以直接 update。
+    """
+    payload = ai_settings.read_ai_settings()
+    payload.update(finalcut_settings.read_finalcut_settings())
+    return payload
+
+
 @router.get(
     "/environment",
     response_model=ApiResponse[FinalcutEnvironmentResponse],
@@ -75,44 +90,63 @@ def get_environment(
 ) -> ApiResponse[FinalcutEnvironmentResponse]:
     """探测 AI 配置、ffmpeg 的 drawtext 能力与中文字体，缺什么给什么修复指引。
 
-    顺手做一次「从 .env 同步 AI 配置」：用户手改了 .env 没重启时，
-    点「重新检测」就能捡起来（与字幕提取的重新检测同一语义）。
+    顺手做一次「从 .env 同步 AI 配置与口播语速」：用户手改了 .env 没重启时，
+    点「重新检测」就能捡起来（与字幕提取的重新检测同一语义）。语速必须**先**
+    同步再探测 —— 探测结果里带的就是同步后的值。
     """
     if refresh:
         ai_settings.sync_from_env_file()
+        finalcut_settings.sync_from_env_file()
     return ApiResponse(data=FinalcutEnvironmentResponse(**probe_environment(refresh=refresh)))
 
 
 @router.get(
     "/settings",
     response_model=ApiResponse[AiSettingsResponse],
-    summary="读取 AI 配置",
+    summary="读取 AI 配置与口播语速",
 )
 def get_ai_settings() -> ApiResponse[AiSettingsResponse]:
-    """读当前生效的 AI 配置。API key 只给「有没有 + 掩码」，完整值不出后端。"""
-    return ApiResponse(data=AiSettingsResponse(**ai_settings.read_ai_settings()))
+    """读当前生效的 AI 配置与口播语速。
+
+    API key 只给「有没有 + 掩码」，完整值不出后端；语速是页面算「约念几秒」
+    与字数预算的依据，一并返回省得页面多拉一次接口。
+    """
+    return ApiResponse(data=AiSettingsResponse(**_settings_payload()))
 
 
 @router.put(
     "/settings",
     response_model=ApiResponse[AiSettingsResponse],
-    summary="保存 AI 配置",
+    summary="保存 AI 配置与口播语速",
 )
 def put_ai_settings(payload: AiSettingsUpdate) -> ApiResponse[AiSettingsResponse]:
-    """把 AI 配置写回 backend/.env 并热同步进当前进程。
+    """把 AI 配置与口播语速写回 backend/.env 并热同步进当前进程。
 
     api_key 留空表示保持原值（读接口只给掩码，页面回填不了原值，
-    留空必须等于不动）。`.env` 被编辑器占用时抛 409，提示关闭后重试。
+    留空必须等于不动）；chars_per_second 不传同理。`.env` 被编辑器占用时
+    抛 409，提示关闭后重试。
     """
+    # 语速先校验：下面两处写入是两次独立的原子写，前一次不会因为后一次失败而
+    # 回滚 —— 校验全放到写之前，「报错 = 一个字都没改」才成立（测试钉着这条）。
+    rate: Optional[float] = None
+    if payload.chars_per_second is not None:
+        try:
+            rate = finalcut_settings.normalize_chars_per_second(payload.chars_per_second)
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
     try:
         ai_settings.write_ai_settings(
             base_url=payload.base_url, model=payload.model, api_key=payload.api_key
         )
+        if rate is not None:
+            finalcut_settings.write_chars_per_second(rate)
     except ValueError as exc:
         # 空值或值里带了换行/引号之类写不进 .env 的字符（照字幕设置的先例翻成 400）
         raise BadRequestError(str(exc)) from exc
     ai_settings.sync_from_env_file()
-    return ApiResponse(data=AiSettingsResponse(**ai_settings.read_ai_settings()))
+    if rate is not None:
+        finalcut_settings.sync_from_env_file()
+    return ApiResponse(data=AiSettingsResponse(**_settings_payload()))
 
 
 # --------------------------------------------------------------------------
@@ -193,6 +227,30 @@ def get_copy_job(
     """按 ID 获取任务详情（含生成结果），前端轮询进度也调它。"""
     job = service.get_job(job_id)
     return ApiResponse(data=FinalcutCopyJobResponse.from_model(job))
+
+
+@router.get(
+    "/copy-jobs/{job_id}/subtitle-text",
+    response_model=ApiResponse[FinalcutCopySubtitleText],
+    summary="文案任务的字幕内容（原文 + 喂给 AI 的素材）",
+)
+def get_copy_job_subtitle_text(
+    service: FinalcutCopyJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[FinalcutCopySubtitleText]:
+    """第 ② 步左右对照用：左边看字幕，右边看 AI 写的文案。
+
+    路径只从任务记录取（本接口不接受任何路径参数）—— 文案任务既可能用历史
+    产物、也可能用任意本地文件，记的是创建时校验过的那条路径，与
+    get_subtitle_path 同一套安全模型。
+
+    素材是**现读现算**的，不是任务执行时的快照：如果字幕文件在任务跑完后被
+    改写，这份会与当时喂给模型的不一致（概率极低，且此时用户想看的通常正是
+    当前这份）。任务未跑完、失败、取消、历史任务都取得到 —— 失败时恰恰最
+    需要看「AI 读到的到底是什么」。
+    """
+    data = service.read_subtitle_preview(job_id)
+    return ApiResponse(data=FinalcutCopySubtitleText(**data))
 
 
 @router.post(

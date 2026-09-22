@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.models.finalcut_job import FinalcutCopyJob, FinalcutRenderItem, FinalcutRenderJob
 from app.schemas.common import TimestampMixin, absolutize_path, to_utc_iso
 from app.services.finalcut_render import TEXT_STYLES
+from app.services.finalcut_settings import normalize_chars_per_second
 
 #: 字幕素材允许的扩展名（小写、带点）。
 SUBTITLE_INPUT_EXTENSIONS = (".srt", ".ass", ".vtt")
@@ -46,8 +47,7 @@ class CopyCandidate(BaseModel):
 
     text: str = Field(..., min_length=1, description="文案正文（可含换行）")
     angle: str = Field(default="", description="切入角度（痛点开场/效果对比/价格锚点…）")
-    target_seconds: float = Field(default=0.0, description="按视频时长定的上屏时长")
-    char_count: int = Field(default=0, description="上屏字数（AI 回填，供一眼核对）")
+    char_count: int = Field(default=0, description="口播字数（服务端实测，供一眼核对）")
     why: str = Field(default="", description="为什么这么写（2-3 句）")
     highlights: List[str] = Field(default_factory=list, description="好在哪里（要点列表）")
     breakdown: List[CopyBreakdownPart] = Field(
@@ -101,6 +101,11 @@ class FinalcutCopyJobCreate(BaseModel):
         validate_default=True,
         description="生成几条候选文案；0 = 用系统默认",
     )
+    chars_per_second: Optional[float] = Field(
+        default=None,
+        description="口播语速（字/秒，1.0–15.0）；不传 = 用当前全局默认值，"
+                    "两者都会快照进任务记录",
+    )
     hint: str = Field(default="", description="补充提示（卖点/受众/偏好），可空")
 
     @field_validator("subtitle_path")
@@ -125,6 +130,14 @@ class FinalcutCopyJobCreate(BaseModel):
         if value > settings.FINALCUT_COPY_COUNT_MAX:
             raise ValueError(f"一次最多生成 {settings.FINALCUT_COPY_COUNT_MAX} 条文案")
         return value or settings.FINALCUT_COPY_COUNT_DEFAULT
+
+    @field_validator("chars_per_second")
+    @classmethod
+    def _check_rate(cls, value: Optional[float]) -> Optional[float]:
+        """None 直通（= 用全局默认值），给了值就走与配置弹窗同一套区间校验。"""
+        if value is None:
+            return None
+        return normalize_chars_per_second(value)
 
     @field_validator("hint")
     @classmethod
@@ -233,6 +246,10 @@ class FinalcutCopyJobResponse(TimestampMixin):
     subtitle_path: str = Field(description="字幕素材绝对路径")
     video_path: str = Field(description="成片视频绝对路径")
     video_duration: float = Field(description="视频时长（秒）")
+    chars_per_second: float = Field(
+        description="本次任务实际生效的口播语速（字/秒）；0 = 升级前创建的老任务，"
+                    "当时按全局值跑的、具体值不可考"
+    )
     copy_count: int = Field(description="请求的候选文案条数")
     hint: str = Field(description="用户补充提示")
     model: str = Field(description="实际使用的模型名")
@@ -263,6 +280,7 @@ class FinalcutCopyJobResponse(TimestampMixin):
             subtitle_path=model.subtitle_path,
             video_path=model.video_path,
             video_duration=model.video_duration,
+            chars_per_second=model.chars_per_second,
             copy_count=model.copy_count,
             hint=model.hint,
             model=model.model,
@@ -277,6 +295,36 @@ class FinalcutCopyJobResponse(TimestampMixin):
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
+
+
+class FinalcutCopySubtitleText(BaseModel):
+    """一条文案任务的字幕内容（第 ② 步左右对照用：左列看素材，右列看 AI 产物）。
+
+    单独一个端点、而不是塞进任务响应：任务是轮询着拉的，字幕可能有几百 KB，
+    塞进去会把轮询打死（与 SubtitleJobResponse.from_model(include_items=False)
+    同一考虑）。
+
+    两个视图来自同一次读盘：
+    - `content` 是**磁盘上那份字幕的原文**（带序号与时间轴，超上限时截断）；
+    - `material` 是**喂给 AI 的素材**（去序号/时间轴、合并连续重复行、剥 ASS
+      标签，按 FINALCUT_SRT_MAX_CHARS 截断）—— 前端那份「去时间轴」的文本
+      变换与它不等价，别拿前端算的冒充 AI 输入。
+    """
+
+    path: str = Field(description="字幕文件绝对路径（取自任务记录，不接受前端传入）")
+    name: str = Field(description="文件名")
+    size_bytes: int = Field(description="文件大小（字节）")
+    content: str = Field(description="字幕原文（超上限时只给开头一段）")
+    truncated: bool = Field(
+        description="原文是否被截断（文件超过 SUBTITLE_PREVIEW_MAX_BYTES，只显示了开头）"
+    )
+    material: str = Field(description="喂给 AI 的素材文本")
+    material_truncated: bool = Field(
+        description=(
+            "素材是否被截断（超过 FINALCUT_SRT_MAX_CHARS 上限，"
+            "AI 当时也只读到了这些）"
+        )
+    )
 
 
 class FinalcutRenderItemResponse(BaseModel):
@@ -479,11 +527,14 @@ class FinalcutEnvironmentResponse(BaseModel):
     copy_count_default: int = Field(description="默认生成的候选文案条数")
     copy_count_max: int = Field(description="一次最多生成的候选文案条数")
     max_items: int = Field(description="单个合成任务最多几条成片")
+    chars_per_second: float = Field(
+        description="口播语速（字/秒），页面据此算「约念几秒」与字数预算"
+    )
     warnings: List[str] = Field(default_factory=list, description="非致命问题提醒")
 
 
 class AiSettingsResponse(BaseModel):
-    """「AI 配置」弹窗的读取模型（key 只给掩码）。"""
+    """「AI 配置与口播语速」弹窗的读取模型（key 只给掩码；语速一同返回）。"""
 
     base_url: str = Field(description="生效的 API 端点")
     model: str = Field(description="生效的模型名")
@@ -491,14 +542,26 @@ class AiSettingsResponse(BaseModel):
     api_key_masked: str = Field(description="API key 掩码")
     shadowed_keys: List[str] = Field(default_factory=list, description="被环境变量占据的键")
     warning: str = Field(default="", description="环境变量遮盖 .env 时的提醒")
+    chars_per_second: float = Field(description="生效的口播语速（字/秒）")
+    chars_per_second_default: float = Field(description="语速的出厂默认值（页面「恢复默认」用）")
+    chars_per_second_warning: str = Field(
+        default="", description="语速被环境变量遮盖时的提醒"
+    )
 
 
 class AiSettingsUpdate(BaseModel):
-    """「AI 配置」弹窗的保存请求。api_key 留空 = 保持原值不动。"""
+    """「AI 配置与口播语速」弹窗的保存请求。
+
+    api_key 留空 = 保持原值不动；chars_per_second 不传 = 不改（两者同一套语义：
+    读接口回填不了原值 / 老调用方不带这个字段，都必须能保存成功）。
+    """
 
     base_url: str = Field(..., min_length=1, max_length=500, description="OpenAI 兼容端点")
     model: str = Field(..., min_length=1, max_length=100, description="模型名")
     api_key: str = Field(default="", max_length=200, description="新 API key；留空表示不改")
+    chars_per_second: Optional[float] = Field(
+        default=None, description="口播语速（字/秒，1.0–15.0）；不传表示不改"
+    )
 
 
 class FinalcutSourceItem(BaseModel):
@@ -508,6 +571,12 @@ class FinalcutSourceItem(BaseModel):
     name: str = Field(description="展示名（来源任务 + 文件名）")
     origin: str = Field(description="来源模块：mix（混剪成片）/ subtitle（字幕提取）")
     job_id: int = Field(description="来源任务 id")
+    index: int = Field(
+        default=0, description="条目在来源任务内的序号（从 1 开始）"
+    )
+    remark: str = Field(
+        default="", description="来源任务的备注（空串表示没写）"
+    )
     duration_seconds: Optional[float] = Field(default=None, description="时长（秒）")
     size_bytes: int = Field(default=0, description="文件大小（字节）")
     video_url: str = Field(default="", description="预览播放地址（视频来源才有）")

@@ -20,7 +20,12 @@ import type { UseApiMessageResult } from '../../hooks/useApiMessage'
 export interface UseFinalcutEnvOptions {
   /** 提示接口，直接传 useApiMessage() 的返回值 */
   api: UseApiMessageResult
-  /** 探测成功后的回调，页面用它回填默认产物目录 */
+  /**
+   * 探测成功后的回调（可选）。
+   *
+   * 目前没有调用方在用：它原本是页面回填「默认产物目录」的入口，烧录从页面
+   * 摘掉后那个目录控件也没了。保留是为了不把 useAsyncData 的通用能力砍掉。
+   */
   onLoaded?: (env: FinalcutEnvironment) => void
 }
 

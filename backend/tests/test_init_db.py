@@ -17,10 +17,14 @@ from app.db import init_db as init_db_module
 
 @pytest.fixture()
 def old_db(tmp_path, monkeypatch):
-    """造一个「升级前」的库：表结构齐全，但 scene_jobs 少三个新列。
+    """造一个「升级前」的库：表结构齐全，但两张表各少几个新列。
 
-    做法是先用当前模型建好表（此时列是齐的），再 DROP 掉那三个新列 ——
+    做法是先用当前模型建好表（此时列是齐的），再 DROP 掉那几个新列 ——
     这样表结构、索引、外键都与老库一致，比手写 DDL 更贴近现实。
+
+    - `scene_jobs` 少 `current_phase` / `current_total_clips` / `remark`；
+    - `finalcut_copy_jobs` 少 `chars_per_second`（文案任务的语速快照列，
+      见 models/finalcut_job.py）。
     """
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     Base.metadata.create_all(bind=engine)
@@ -32,6 +36,7 @@ def old_db(tmp_path, monkeypatch):
         conn.execute(text("ALTER TABLE scene_jobs DROP COLUMN current_total_clips"))
         # remark 来自 JobRemarkMixin：六个任务表都是后加的，同属「升级要补的列」
         conn.execute(text("ALTER TABLE scene_jobs DROP COLUMN remark"))
+        conn.execute(text("ALTER TABLE finalcut_copy_jobs DROP COLUMN chars_per_second"))
         # 塞一行老数据，验证补列不会动存量行
         conn.execute(
             text(
@@ -46,6 +51,17 @@ def old_db(tmp_path, monkeypatch):
                 " '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
             )
         )
+        conn.execute(
+            text(
+                "INSERT INTO finalcut_copy_jobs "
+                "(status, subtitle_path, video_path, video_duration, copy_count, "
+                " hint, model, raw_response, tokens_used, current_phase, "
+                " progress_percent, error_message, created_at, updated_at, remark) "
+                "VALUES ('success', '/in.srt', '/in.mp4', 36.294, 5, "
+                " '', 'deepseek-chat', '', 0, '', 0, '', "
+                " '2026-01-01 00:00:00', '2026-01-01 00:00:00', '')"
+            )
+        )
 
     monkeypatch.setattr(init_db_module, "engine", engine)
     return engine
@@ -57,10 +73,14 @@ class TestAddMissingColumns:
     def test_adds_the_new_columns(self, old_db):
         """补列后新列可查可写。"""
         added = init_db_module._add_missing_columns()
-        assert added == 3
+        assert added == 4
 
         columns = {col["name"] for col in inspect(old_db).get_columns("scene_jobs")}
         assert {"current_phase", "current_total_clips", "remark"} <= columns
+        copy_columns = {
+            col["name"] for col in inspect(old_db).get_columns("finalcut_copy_jobs")
+        }
+        assert "chars_per_second" in copy_columns
 
     def test_existing_rows_survive_with_defaults(self, old_db):
         """存量行一条不少，新列取到声明的默认值（不然非空约束会把它们顶掉）。"""
@@ -71,15 +91,21 @@ class TestAddMissingColumns:
                 text("SELECT current_video, current_clips, current_phase, "
                      "current_total_clips, remark FROM scene_jobs")
             ).one()
+            copy_row = conn.execute(
+                text("SELECT video_duration, chars_per_second FROM finalcut_copy_jobs")
+            ).one()
         assert row.current_video == "a.mp4"     # 老数据原样保留
         assert row.current_clips == 3
         assert row.current_phase == ""          # 默认值，不是 NULL
         assert row.current_total_clips == 0
         assert row.remark == ""                 # 老任务没有备注，补成空串
+        # 老文案任务：时长还在，语速补成 0.0（= 当时按全局值跑的，值不可考）
+        assert copy_row.video_duration == pytest.approx(36.294)
+        assert copy_row.chars_per_second == 0.0
 
     def test_is_idempotent(self, old_db):
         """可以反复执行：第二次一条都不用补，也不会报错。"""
-        assert init_db_module._add_missing_columns() == 3
+        assert init_db_module._add_missing_columns() == 4
         assert init_db_module._add_missing_columns() == 0
 
     def test_init_db_runs_the_backfill(self, old_db):
@@ -88,6 +114,10 @@ class TestAddMissingColumns:
 
         columns = {col["name"] for col in inspect(old_db).get_columns("scene_jobs")}
         assert {"current_phase", "current_total_clips", "remark"} <= columns
+        copy_columns = {
+            col["name"] for col in inspect(old_db).get_columns("finalcut_copy_jobs")
+        }
+        assert "chars_per_second" in copy_columns
 
 
 class TestRenderDefault:

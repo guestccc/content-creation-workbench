@@ -16,7 +16,9 @@ from app.models.finalcut_job import (
     FinalcutCopyPhase,
 )
 from app.services.ai_client import AiError, ChatResult
+from app.core.config import settings
 from app.services.finalcut_copy import (
+    _segment_plan,
     build_copy_messages,
     char_budget,
     parse_copy_payload,
@@ -28,6 +30,18 @@ from app.services.finalcut_copy_runner import (
     recover_interrupted_copy_jobs,
 )
 from tests.conftest import TestingSessionLocal
+
+
+@pytest.fixture()
+def cps(monkeypatch):
+    """把全局语速固定成 5.0 字/秒。
+
+    预算公式吃的是**任务上的语速快照**（页面上每条任务可改），全局值只在
+    任务快照是 0.0（升级前的老任务）时兜底 —— 本夹具钉住的就是那条回退路径
+    的期望值。不钉的话开发机 `.env` 里恰好有值，断言就随环境飘。
+    """
+    monkeypatch.setattr(settings, "FINALCUT_CHARS_PER_SECOND", 5.0)
+    return 5.0
 
 
 def _payload(copies: list, **analysis_overrides) -> str:
@@ -46,7 +60,6 @@ def _copy_entry(text: str, **overrides) -> dict:
     entry = {
         "text": text,
         "angle": "痛点开场",
-        "target_seconds": 15,
         "char_count": len(text.replace("\n", "")),
         "why": "先抛痛点再给方案，前 3 秒留住人。",
         "highlights": ["口语化", "有对比"],
@@ -143,27 +156,91 @@ class TestSrtToMaterial:
 
 
 # ---------------------------------------------------------------------------
-# char_budget：视频时长 → 上屏字数预算
+# char_budget / _segment_plan：视频时长 → 口播稿字数预算
 # ---------------------------------------------------------------------------
 
 
 class TestCharBudget:
+    """语速是**入参**（任务快照），所以这里一律显式传值，不碰 settings。
+
+    runner 侧「任务是 0.0 时回退全局」的那条路径在 TestCopyRunner 里单独钉。
+    """
+
     def test_fifteen_seconds_matches_documented_example(self):
-        """15s × 4.5 字/秒 ≈ 47–68 字（函数 docstring 里钉的样例）。"""
-        assert char_budget(15.0) == (47, 68)
+        """15 秒 × 5.0 字/秒 = 75 字 → ±10% 得 68–82（函数 docstring 里钉的样例）。"""
+        assert char_budget(15.0, 5.0) == (68, 82)
+
+    def test_tolerance_is_ten_percent(self):
+        """用户真实场景钉成回归：36.294 秒的视频、实测语速 5.8 字/秒 → 189–232。"""
+        assert char_budget(36.294, 5.8) == (189, 232)
+
+    def test_one_minute(self):
+        """60 秒 × 5.0 = 300 字 → 270–330（银行家舍入：round(82.5)=82、round(67.5)=68）。"""
+        assert char_budget(60.0, 5.0) == (270, 330)
+
+    def test_slow_rate_short_video_hits_both_floors(self):
+        """1.0 字/秒 + 2 秒 = 2 字：下限抬到 10、跨度至少 5，两个保底都要生效。"""
+        assert char_budget(2.0, 1.0) == (10, 15)
 
     def test_zero_duration_has_floor(self):
         """时长为 0 也要有下限兜底：预算不能是 (0, 0)。"""
-        low, high = char_budget(0.0)
-        assert low == 10
-        assert high > low
+        assert char_budget(0.0, 5.0) == (10, 15)
 
     def test_negative_duration_treated_as_zero(self):
-        assert char_budget(-3.0) == char_budget(0.0)
+        assert char_budget(-3.0, 5.0) == char_budget(0.0, 5.0)
 
     def test_budget_grows_with_duration(self):
-        assert char_budget(60.0)[1] > char_budget(15.0)[1]
-        assert char_budget(60.0)[0] > char_budget(15.0)[0]
+        assert char_budget(60.0, 5.0)[1] > char_budget(15.0, 5.0)[1]
+        assert char_budget(60.0, 5.0)[0] > char_budget(15.0, 5.0)[0]
+
+    def test_budget_tracks_rate(self):
+        """语速是每条任务各自的值（同一个视频，念快就得多写字）。"""
+        fast = char_budget(36.294, 8.0)
+        slow = char_budget(36.294, 5.8)
+        assert fast[0] > slow[0]
+
+    def test_budget_ignores_global_setting(self, monkeypatch):
+        """全局配置不再是预算的来源 —— 它只是新任务的默认值。
+
+        改它不该影响已按任务语速算出来的预算，否则历史任务的展示会漂。
+        """
+        monkeypatch.setattr(settings, "FINALCUT_CHARS_PER_SECOND", 12.0)
+        assert char_budget(36.294, 5.8) == (189, 232)
+
+
+class TestSegmentPlan:
+    def test_four_segments_for_normal_target(self):
+        plan = _segment_plan(210)
+        assert [name for name, _, _ in plan] == [
+            "开头钩子（一句话抓住人）",
+            "痛点或场景（说中观众自己的处境）",
+            "卖点与证据（凭什么值得买，2-3 个具体的点）",
+            "价格与行动号召（怎么买、为什么现在买）",
+        ]
+
+    def test_segment_sums_fall_inside_budget(self):
+        """把「控总量」降成「控四小段」的前提：分段之和必须仍在整体预算里。
+
+        否则模型照着每段写足了，总数反而冲出预算 —— 那比不给骨架更糟。
+        """
+        low, high = char_budget(36.294, 5.8)  # (189, 232)
+        target = round((low + high) / 2)  # 210
+        plan = _segment_plan(target)
+        assert sum(seg_low for _, seg_low, _ in plan) >= low
+        assert sum(seg_high for _, _, seg_high in plan) <= high
+
+    def test_short_copy_uses_three_segments(self):
+        """目标 75 字时四段每段只剩十几字，模型写不出东西 —— 改三段。"""
+        plan = _segment_plan(75)
+        assert len(plan) == 3
+        names = [name for name, _, _ in plan]
+        assert "开头钩子（一句话抓住人）" in names
+        assert not any("痛点" in name for name in names)
+
+    def test_short_target_boundary_is_inclusive_of_four_segments(self):
+        """正好 120 字仍走四段骨架（阈值是「低于」才切）。"""
+        assert len(_segment_plan(120)) == 4
+        assert len(_segment_plan(119)) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -173,31 +250,65 @@ class TestCharBudget:
 
 class TestBuildCopyMessages:
     def test_user_message_carries_duration_budget_count_and_material(self):
-        messages = build_copy_messages("素材正文", 15.0, "", 5, (47, 68))
+        messages = build_copy_messages("素材正文", 15.0, "", 5, (68, 82))
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         user = messages[1]["content"]
         assert "15.0 秒" in user
-        assert "47–68 字" in user
+        assert "68–82 字" in user
         assert "5 条" in user
         assert "素材正文" in user
 
+    def test_user_message_gives_a_single_target_number(self):
+        """模型把区间当上限用（给 189–232 就写 180 出头），必须另给一个目标数。
+
+        目标 = 区间中点：必然落在预算内，模型才有贴着写的锚点。
+        """
+        user = build_copy_messages("素材", 36.294, "", 5, (189, 232))[1]["content"]
+        assert "按 210 字左右来写" in user  # round((189+232)/2) = 210（银行家舍入）
+        assert "189–232 字" in user  # 区间仍要给：告诉它能上下浮动多少
+
+    def test_user_message_carries_segment_plan(self):
+        """分段骨架是「控总量」的手段，缺了它就只剩一句空泛的总字数要求。"""
+        user = build_copy_messages("素材", 15.0, "", 5, (68, 82))[1]["content"]
+        assert "分段骨架" in user
+        # 目标 75 字走三段骨架（< 120）
+        assert "开头钩子（一句话抓住人）：约 21–24 字" in user
+        assert "卖点与证据（凭什么值得买）：约 32–35 字" in user
+        assert "价格与行动号召（怎么买）：约 18–20 字" in user
+
+    def test_user_message_carries_material_char_count(self):
+        """素材字数是天然锚点（素材就是这段视频原本的口播），要报给模型。"""
+        user = build_copy_messages("一二三四五", 15.0, "", 5, (68, 82))[1]["content"]
+        assert "共约 5 字" in user
+
+    def test_target_is_midpoint_of_any_budget(self):
+        """目标数与区间是同时给出的，不是二选一。"""
+        user = build_copy_messages("素材", 60.0, "", 5, (270, 330))[1]["content"]
+        assert "按 300 字左右来写" in user
+        assert "270–330 字" in user
+
     def test_default_system_prompt_mentions_json(self):
         """DeepSeek 开 response_format=json_object 时要求提示词里出现「JSON」。"""
-        messages = build_copy_messages("素材", 15.0, "", 5, (47, 68))
+        messages = build_copy_messages("素材", 15.0, "", 5, (68, 82))
         assert "JSON" in messages[0]["content"]
 
+    def test_default_system_prompt_treats_char_count_as_hard_rule(self):
+        """旧提示词「1-3 行、每行 ≤15 字」与字数预算打架（3×15=45 上限 vs 一百多字
+        下限），模型两头占不住、五条全写成 87 字。行长必须明确让位于总字数。"""
+        system = build_copy_messages("素材", 15.0, "", 5, (68, 82))[0]["content"]
+        assert "行数不限" in system
+        assert "唯一的硬指标" in system
+
     def test_hint_included_only_when_present(self):
-        with_hint = build_copy_messages("素材", 15.0, "主打性价比", 5, (47, 68))
+        with_hint = build_copy_messages("素材", 15.0, "主打性价比", 5, (68, 82))
         assert "补充要求：主打性价比" in with_hint[1]["content"]
-        without = build_copy_messages("素材", 15.0, "", 5, (47, 68))
+        without = build_copy_messages("素材", 15.0, "", 5, (68, 82))
         assert "补充要求" not in without[1]["content"]
 
     def test_custom_system_prompt_overrides_default(self, monkeypatch):
-        from app.core.config import settings
-
         monkeypatch.setattr(settings, "AI_SYSTEM_PROMPT", "自定义提示词")
-        messages = build_copy_messages("素材", 15.0, "", 5, (47, 68))
+        messages = build_copy_messages("素材", 15.0, "", 5, (68, 82))
         assert messages[0]["content"] == "自定义提示词"
 
 
@@ -280,6 +391,19 @@ class TestParseCopyPayload:
             parse_copy_payload('[{"text": "数组不是契约形状"}]')
         assert exc_info.value.kind == "bad_response"
 
+    def test_legacy_payload_with_target_seconds_still_parses(self):
+        """老任务的 result 里残留着 target_seconds（已删字段）。
+
+        模型过去会在 JSON 里回填它、并落进历史任务的 result；CopyCandidate 没开
+        extra='forbid'，pydantic v2 默认忽略未知键 —— 历史任务照常打开，
+        不需要数据库迁移。回归护栏，不是「顺手保留一个字段」。
+        """
+        entry = _copy_entry("老文案")
+        entry["target_seconds"] = 36.3
+        _, copies = parse_copy_payload(_payload([entry]))
+        assert copies[0]["text"] == "老文案"
+        assert "target_seconds" not in copies[0]
+
 
 # ---------------------------------------------------------------------------
 # runner 全流程（注入 chat_fn，主线程同步跑）
@@ -353,7 +477,14 @@ class TestCopyRunner:
         assert len(job.result["copies"]) == 2
         assert "大一倍" in job.raw_response
 
-    def test_prompt_carries_duration_and_budget(self, tmp_path):
+    def test_prompt_carries_duration_and_budget(self, tmp_path, cps):
+        """runner 必须用**当次生效的**语速算预算，而不是某个写死的常量。
+
+        这条走的正是「老任务」路径：`_insert_job` 不传语速 → 列上是 0.0 →
+        回退全局值（cps 钉成 5.0）。这条路不是摆设：升级时停在 pending 的
+        老任务 `recover_interrupted_copy_jobs` 不管（它只收拾 running），
+        重启后照样被认领执行，带着 0.0 进 runner。
+        """
         job_id = _insert_job(tmp_path)
         captured = []
 
@@ -366,8 +497,29 @@ class TestCopyRunner:
 
         user = captured[1]["content"]
         assert "15.0 秒" in user
-        assert "47–68 字" in user
+        assert "68–82 字" in user  # 15 × 5.0 = 75 字 ±10%
+        assert "分段骨架" in user
         assert "收纳神器" in user  # 字幕拆解出的素材进了提示词
+
+    def test_task_rate_wins_over_global(self, tmp_path, cps):
+        """任务上的语速快照优先于全局配置 —— 「这条念快些」就靠它。
+
+        cps fixture 把全局钉在 5.0；任务自己带 5.8，预算必须是按 5.8 算的
+        （15 × 5.8 = 87 字 ±10% → 78–96），不能被全局值盖掉。
+        """
+        job_id = _insert_job(tmp_path, chars_per_second=5.8)
+        captured = []
+
+        def spy_chat(messages):
+            captured.extend(messages)
+            return _success_chat(messages)
+
+        runner = FinalcutCopyRunner(session_factory=TestingSessionLocal, chat_fn=spy_chat)
+        runner.run_job(job_id)
+
+        user = captured[1]["content"]
+        assert "78–96 字" in user
+        assert "68–82 字" not in user  # 不是全局 5.0 算出来的
 
     def test_auth_error_lands_user_message(self, tmp_path):
         """401 的 error_message 要能引导用户去改 key，而不是堆栈。"""

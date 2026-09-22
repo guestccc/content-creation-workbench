@@ -34,7 +34,7 @@ from app.models.finalcut_job import (
     FinalcutRenderJobStatus,
 )
 from app.models.mix_job import MixJob, MixJobItem, MixOutputStatus
-from app.models.subtitle_job import SubtitleJobItem, SubtitleJobItemStatus
+from app.models.subtitle_job import SubtitleJob, SubtitleJobItem, SubtitleJobItemStatus
 from app.schemas.common import JobRemarkUpdate
 from app.schemas.finalcut_job import FinalcutRenderJobCreate
 from app.services.finalcut_env import detect_font
@@ -87,16 +87,19 @@ class FinalcutRenderJobService:
 
         只收「任务成功且文件还在磁盘上」的条目，按任务倒序、条数封顶。
         返回绝对路径 —— 前端拿去创建任务，创建时再走一遍完整校验。
+
+        备注（remark）挂在**任务表**上，产物表没有这一列，所以两条查询都要
+        join 回各自的任务表把它带出来：同一条任务跑出的多个产物共用一条备注。
         """
         videos: List[dict] = []
         rows = self.db.execute(
-            select(MixJobItem, MixJob.id)
+            select(MixJobItem, MixJob.id, MixJob.remark)
             .join(MixJob, MixJobItem.job_id == MixJob.id)
             .where(MixJobItem.status == MixOutputStatus.SUCCESS)
             .order_by(MixJob.id.desc(), MixJobItem.index.asc())
             .limit(_SOURCES_LIMIT * 2)  # 文件可能已被删，多取一些再过滤
         ).all()
-        for item, job_id in rows:
+        for item, job_id, remark in rows:
             if len(videos) >= _SOURCES_LIMIT:
                 break
             path = Path(item.output_path or "")
@@ -108,8 +111,10 @@ class FinalcutRenderJobService:
                     "name": f"混剪 #{job_id} / {item.output_name}",
                     "origin": "mix",
                     "job_id": job_id,
+                    "index": item.index,
                     "duration_seconds": item.duration_seconds,
                     "size_bytes": item.size_bytes,
+                    "remark": remark or "",
                     "video_url": f"/api/v1/mix/jobs/{job_id}/outputs/{item.index}/video",
                     "thumb_url": f"/api/v1/mix/jobs/{job_id}/outputs/{item.index}/thumb",
                 }
@@ -117,15 +122,16 @@ class FinalcutRenderJobService:
 
         subtitles: List[dict] = []
         rows = self.db.execute(
-            select(SubtitleJobItem)
+            select(SubtitleJobItem, SubtitleJob.remark)
+            .join(SubtitleJob, SubtitleJob.id == SubtitleJobItem.job_id)
             .where(
                 SubtitleJobItem.status == SubtitleJobItemStatus.SUCCESS,
                 SubtitleJobItem.subtitle_exists.is_(True),
             )
             .order_by(SubtitleJobItem.id.desc())
             .limit(_SOURCES_LIMIT * 2)
-        ).scalars().all()
-        for item in rows:
+        ).all()
+        for item, remark in rows:
             if len(subtitles) >= _SOURCES_LIMIT:
                 break
             path = Path(item.output_path or "")
@@ -137,8 +143,10 @@ class FinalcutRenderJobService:
                     "name": f"字幕 #{item.job_id} / {path.name}",
                     "origin": "subtitle",
                     "job_id": item.job_id,
+                    "index": item.index,
                     "duration_seconds": item.duration_seconds,
                     "size_bytes": item.file_size,
+                    "remark": remark or "",
                     "video_url": "",
                     "thumb_url": "",
                 }

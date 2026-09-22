@@ -12,6 +12,7 @@ import type {
   CopyJobPayload,
   FinalcutCopyJob,
   FinalcutCopyJobListData,
+  FinalcutCopySubtitleText,
   FinalcutEnvironment,
   FinalcutRenderJob,
   FinalcutRenderJobListData,
@@ -71,6 +72,16 @@ export function fetchCopyJobs(params: {
 /** 文案任务详情（轮询进度也用它） */
 export function fetchCopyJob(jobId: number): Promise<FinalcutCopyJob> {
   return get<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}`)
+}
+
+/**
+ * 文案任务用的字幕内容：原文 + 喂给 AI 的素材（第 ② 步左右对照）。
+ *
+ * 只传任务 id —— 路径由后端从任务记录推导，不接受前端传路径（与字幕提取的
+ * 预览接口同一套安全模型）。
+ */
+export function fetchCopyJobSubtitleText(jobId: number): Promise<FinalcutCopySubtitleText> {
+  return get<FinalcutCopySubtitleText>(`/finalcut/copy-jobs/${jobId}/subtitle-text`)
 }
 
 /** 取消文案任务（在途的 AI 请求会跑完再丢弃，结果不落库） */

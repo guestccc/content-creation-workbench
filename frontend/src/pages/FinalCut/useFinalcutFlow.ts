@@ -1,9 +1,13 @@
 /**
  * 一键成品页面的主流程状态（单页私有，不进公共 hooks）。
  *
- * 三步状态机：① 选素材（字幕 + 成片）→ ② AI 文案（生成 / 勾选 / 改字）→
- * ③ 框选与合成。文案任务的生命周期复用公共的 useJobRunner；候选文案的
- * 勾选状态、用户改过的字、每条的框/样式/字号都在这里 —— 页面只编排。
+ * 两步状态机：① 选素材（字幕 + 成片）→ ② AI 文案（生成 / 改字 / 复制）。
+ * 文案任务的生命周期复用公共的 useJobRunner；候选文案用户改过的字在这里 ——
+ * 页面只编排。
+ *
+ * **烧录（原第 ③ 步）已从页面摘掉**：文案生成完就结束，用户拿着复制出来的
+ * 稿子回剪映人工烧字 + 配音。后端 render 接口/表/服务都还在（只摘页面），
+ * 所以这里删掉的渲染半边不会再被页面用到，也不影响接口。
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react'
@@ -11,30 +15,23 @@ import { useEffect } from 'react'
 
 import {
   batchDeleteCopyJobs,
-  batchDeleteRenderJobs,
   cancelCopyJob,
-  cancelRenderJob,
   createCopyJob,
-  createRenderJob,
   deleteCopyJob,
-  deleteRenderJob,
   fetchCopyJob,
+  fetchCopyJobSubtitleText,
   fetchFinalcutSources,
-  fetchRenderJob,
 } from '../../api/finalcut'
+import { describeError } from '../../api/client'
 import { useJobRunner } from '../../hooks/useJobRunner'
 import type {
-  BoxSpec,
   CopyJobPayload,
   FinalcutCopyJob,
-  FinalcutRenderJob,
+  FinalcutCopySubtitleText,
   FinalcutSources,
-  RenderJobPayload,
-  TextStyleKey,
 } from '../../types/finalcut'
 import { isTerminalStatus } from '../../types/finalcut'
 import type { UseApiMessageResult } from '../../hooks/useApiMessage'
-import type { UsePurgeFilesResult } from '../../hooks/usePurgeFiles'
 
 /** 一份已选定的素材（字幕或成片） */
 export interface SelectedMaterial {
@@ -48,41 +45,32 @@ export interface SelectedMaterial {
   size_bytes: number
 }
 
-/** 一条候选文案在页面上的状态（AI 产物 + 用户的勾选与改动） */
+/** 一条候选文案在页面上的状态（AI 产物 + 用户改过的字） */
 export interface CandidateState {
   /** 对应 copyJob.result.copies 的下标 */
   key: number
-  checked: boolean
   /** 文案正文（用户可改字；初始为 AI 给的原文） */
   text: string
-  /** 框选区域（归一化）；boxSet=false 时这只是默认值，第三步要真框一次 */
-  box: BoxSpec
-  /** 是否已经在视频上框过位置（第三步的完成标记） */
-  boxSet: boolean
-  style: TextStyleKey
-  /** 0 = 自动字号 */
-  fontSize: number
 }
 
-/** 新候选的默认框：画面下方居中的一条横带（带货文案最常见的位置） */
-const DEFAULT_BOX: BoxSpec = { x: 0.1, y: 0.72, w: 0.8, h: 0.16 }
-
 export interface UseFinalcutFlowResult {
-  /** 当前在第几步（0 选素材 / 1 AI 文案 / 2 框选与合成） */
+  /** 当前在第几步（0 选素材 / 1 AI 文案） */
   step: number
   subtitle: SelectedMaterial | null
   video: SelectedMaterial | null
-  /** 产物目录（空串 = 后端默认 materials/finalcut/） */
-  outputDir: string
   selectSubtitle: (item: SelectedMaterial) => void
   selectVideo: (item: SelectedMaterial) => void
   clearSubtitle: () => void
   clearVideo: () => void
-  setOutputDir: (dir: string) => void
-  /** 环境自检回填默认产物目录（用户没手选过才生效） */
-  fillDefaultOutputDir: (dir: string) => void
   /** 第 ① 步的校验：空串表示可以生成文案 */
   validationError: string
+  /**
+   * 语速输入框的值（三态）：null = 跟随全局默认（提交时不带字段，后端按
+   * 当前全局值快照）；数字 = 这条任务念快/念慢的覆盖值；清空输入框回到 null。
+   * 它只是「下一次任务」的值 —— 已建任务生效的是 copyJob.chars_per_second。
+   */
+  rateOverride: number | null
+  setRateOverride: (value: number | null) => void
   /** 历史产物清单（选素材弹窗用） */
   sources: FinalcutSources | null
   sourcesLoading: boolean
@@ -90,28 +78,28 @@ export interface UseFinalcutFlowResult {
 
   /** 开始生成文案（建 copy job 并进入第 ② 步）；已在跑时会先被拒 */
   startCopyJob: () => Promise<void>
-  /** 回到上一步（状态保留，素材与勾选不清空） */
+  /** 回到上一步（状态保留，素材不清空） */
   goBack: () => void
   copyJob: FinalcutCopyJob | null
   copyJobRunning: boolean
   copyJobSubmitting: boolean
+  /**
+   * 当前文案任务用的字幕内容（第 ② 步左列）。
+   *
+   * 与任务状态无关：排队中/失败/取消时也有 —— 失败时恰恰最需要看
+   * 「AI 读到的到底是什么」。任务被删或还没建时为 null。
+   */
+  subtitleText: FinalcutCopySubtitleText | null
+  subtitleTextLoading: boolean
+  /** 取字幕失败的原因（空串 = 正常）；由卡片内 Alert 呈现，不弹提示 */
+  subtitleTextError: string
   cancelCurrentCopyJob: () => Promise<void>
   /** 「换一批」：同素材再建一个文案任务 */
   regenerate: () => Promise<void>
 
-  /** 候选文案（AI 产物 + 勾选状态 + 用户改过的字） */
+  /** 候选文案（AI 产物 + 用户改过的字） */
   candidates: CandidateState[]
-  toggleCandidate: (key: number) => void
   updateCandidateText: (key: number, text: string) => void
-  updateCandidateStyle: (key: number, style: TextStyleKey) => void
-  updateCandidateFontSize: (key: number, fontSize: number) => void
-  updateCandidateBox: (key: number, box: BoxSpec) => void
-  /** 把某条的样式/字号套到全部候选（同一条视频通常统一风格） */
-  applyStyleToAll: (style: TextStyleKey, fontSize: number) => void
-  /** 勾选的候选数（进入第 ③ 步的门槛） */
-  checkedCount: number
-  /** 进入第 ③ 步（至少勾一条才放行，由页面先校验 checkedCount） */
-  goToBoxStep: () => void
   /** 从历史列表点开一条文案任务：回填候选并进入第 ② 步 */
   openCopyJob: (jobId: number) => Promise<void>
   /** 删除文案任务记录（磁盘无产物，只删记录） */
@@ -120,29 +108,11 @@ export interface UseFinalcutFlowResult {
   removeCopyJobs: (ids: number[]) => Promise<boolean>
   /** 取消任意一条文案任务（历史列表用），返回更新后的任务 */
   cancelCopyJobById: (jobId: number) => Promise<FinalcutCopyJob | null>
-
-  /** 开始合成：勾选的候选一条一个 item，提交合成任务 */
-  startRenderJob: () => Promise<void>
-  renderJob: FinalcutRenderJob | null
-  renderJobRunning: boolean
-  renderJobSubmitting: boolean
-  cancelCurrentRenderJob: () => Promise<void>
-  /** 取消任意一条合成任务（历史列表用） */
-  cancelRenderJobById: (jobId: number) => Promise<FinalcutRenderJob | null>
-  /** 读一条合成任务详情（历史「查看」用，不动当前任务） */
-  readRenderJob: (jobId: number) => Promise<FinalcutRenderJob | null>
-  /** 删除合成任务记录（purge 勾选由页面的 usePurgeFiles 经 options 传入） */
-  removeRenderJob: (jobId: number) => Promise<boolean>
-  removeRenderJobs: (ids: number[]) => Promise<boolean>
 }
 
 export interface UseFinalcutFlowOptions {
   /** 文案任务有增删改时回调（页面拿它刷新历史列表） */
   onCopyJobChanged?: () => void
-  /** 合成任务有增删改时回调（页面拿它刷新合成历史列表） */
-  onRenderJobChanged?: () => void
-  /** 合成任务删除确认框的 purge 勾选（文案任务磁盘无产物，不需要） */
-  purge?: UsePurgeFilesResult
 }
 
 export function useFinalcutFlow(
@@ -155,26 +125,19 @@ export function useFinalcutFlow(
   const [step, setStep] = useState(0)
   const [subtitle, setSubtitle] = useState<SelectedMaterial | null>(null)
   const [video, setVideo] = useState<SelectedMaterial | null>(null)
-  const [outputDir, setOutputDirState] = useState('')
-  const [outputDirTouched, setOutputDirTouched] = useState(false)
 
   const [sources, setSources] = useState<FinalcutSources | null>(null)
   const [sourcesLoading, setSourcesLoading] = useState(false)
+
+  // 语速覆盖值（字/秒）：null = 跟随全局默认。范围与后端 normalize 同一套
+  // （1.0–15.0），提交前在本地拦 —— 后端 422 经统一异常处理只剩「请求参数
+  // 校验失败」，具体越界原因到不了提示条。
+  const [rateOverride, setRateOverride] = useState<number | null>(null)
 
   const selectSubtitle = useCallback((item: SelectedMaterial) => setSubtitle(item), [])
   const selectVideo = useCallback((item: SelectedMaterial) => setVideo(item), [])
   const clearSubtitle = useCallback(() => setSubtitle(null), [])
   const clearVideo = useCallback(() => setVideo(null), [])
-
-  const setOutputDir = useCallback((dir: string) => {
-    setOutputDirTouched(true)
-    setOutputDirState(dir)
-  }, [])
-
-  // 用户没手选过才回填默认值：环境异步到达不能盖掉用户已经选好的目录
-  const fillDefaultOutputDir = useCallback((dir: string) => {
-    setOutputDirState((current) => (current || outputDirTouched ? current : dir))
-  }, [outputDirTouched])
 
   const validationError = useMemo(() => {
     if (!subtitle) {
@@ -199,7 +162,7 @@ export function useFinalcutFlow(
   }, [api])
 
   // ------------------------------------------------------------------
-  // 第 ② 步：AI 文案任务生命周期 + 候选勾选
+  // 第 ② 步：AI 文案任务生命周期
   // ------------------------------------------------------------------
   const [candidates, setCandidates] = useState<CandidateState[]>([])
 
@@ -212,17 +175,7 @@ export function useFinalcutFlow(
   /** 按任务结果重建候选列表（跑完回填 / 从历史点开 共用） */
   const rebuildCandidates = useCallback((job: FinalcutCopyJob) => {
     const copies = job.status === 'success' ? (job.result?.copies ?? []) : []
-    setCandidates(
-      copies.map((copy, index) => ({
-        key: index,
-        checked: false,
-        text: copy.text,
-        box: DEFAULT_BOX,
-        boxSet: false,
-        style: 'white_box' as TextStyleKey,
-        fontSize: 0,
-      })),
-    )
+    setCandidates(copies.map((copy, index) => ({ key: index, text: copy.text })))
     return copies.length
   }, [])
 
@@ -257,6 +210,9 @@ export function useFinalcutFlow(
       }
       copyRunner.setJob(job)
       rebuildCandidates(job)
+      // 语速框回填这条任务的值（老任务是 0 = 不可考，回落「跟随默认」）：
+      // 在这里「换一批」延续上次的手调值，比每次都重置成全局默认顺手。
+      setRateOverride(job.chars_per_second > 0 ? job.chars_per_second : null)
       setStep(1)
     },
     [copyRunner, rebuildCandidates],
@@ -275,15 +231,22 @@ export function useFinalcutFlow(
     if (!subtitle || !video || copyRunner.running) {
       return
     }
+    // InputNumber 的 min/max 拦不住手输后失焦的越界值（typed 场景），提交前
+    // 自己再拦一遍 —— 区间与后端 normalize_chars_per_second 一致。
+    if (rateOverride != null && (rateOverride < 1 || rateOverride > 15)) {
+      api.message.error('口播语速请在 1.0–15.0 字/秒之间')
+      return
+    }
     const created = await copyRunner.submit({
       subtitle_path: subtitle.path,
       video_path: video.path,
+      ...(rateOverride != null ? { chars_per_second: rateOverride } : {}),
     })
     if (created) {
       setCandidates([])
       setStep(1)
     }
-  }, [subtitle, video, copyRunner])
+  }, [subtitle, video, copyRunner, rateOverride, api])
 
   const regenerate = useCallback(async () => {
     // 换一批 = 同素材再跑一个任务；上一个任务保留在历史里，不删
@@ -302,138 +265,79 @@ export function useFinalcutFlow(
     [copyRunner],
   )
 
+  // ------------------------------------------------------------------
+  // 第 ② 步左列：当前任务用的字幕（原文 + 喂给 AI 的素材）
+  // ------------------------------------------------------------------
+  const [subtitleText, setSubtitleText] = useState<FinalcutCopySubtitleText | null>(null)
+  const [subtitleTextLoading, setSubtitleTextLoading] = useState(false)
+  const [subtitleTextError, setSubtitleTextError] = useState('')
+
+  // 依赖只写任务 id（CLAUDE.md 第 5 条）：以整个任务对象为依赖的话，轮询每刷
+  // 一次进度都会重下一遍字幕（可能有几百 KB）。
+  const copyJobId = copyRunner.job?.id ?? null
+  useEffect(() => {
+    if (copyJobId === null) {
+      setSubtitleText(null)
+      setSubtitleTextError('')
+      return
+    }
+
+    // 换任务时旧请求仍可能返回，用标志位丢掉它 —— 否则慢的那条会盖掉新的
+    let cancelled = false
+    setSubtitleTextLoading(true)
+    setSubtitleTextError('')
+    fetchCopyJobSubtitleText(copyJobId)
+      .then((data) => {
+        if (!cancelled) {
+          setSubtitleText(data)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setSubtitleText(null)
+          // 不弹提示：这是「任务一变就自动拉」的隐式加载，不是用户主动点的，
+          // 而历史任务的字幕文件常已被搬走 —— 每点开一次弹个红条是噪音。
+          // 文案本身照常可看，只在卡片里说明字幕读不到。
+          setSubtitleTextError(describeError(error, '读取字幕素材失败'))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSubtitleTextLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [copyJobId])
+
   const goBack = useCallback(() => {
+    // 只退步数：语速覆盖值**刻意不清** —— 输入框就在按钮上方、值始终可见，
+    // 换素材时被悄悄重置回全局默认，比「沿用上次的手调值」更恼人。
     setStep((current) => Math.max(0, current - 1))
   }, [])
 
-  const goToBoxStep = useCallback(() => {
-    setStep(2)
-  }, [])
-
   // ------------------------------------------------------------------
-  // 候选文案的勾选与编辑
+  // 候选文案的编辑（只有正文可改：复制出去的是这段文字本身）
   // ------------------------------------------------------------------
-  const patchCandidate = useCallback((key: number, patch: Partial<CandidateState>) => {
+  const updateCandidateText = useCallback((key: number, text: string) => {
     setCandidates((list) =>
-      list.map((item) => (item.key === key ? { ...item, ...patch } : item)),
+      list.map((item) => (item.key === key ? { ...item, text } : item)),
     )
   }, [])
-
-  const toggleCandidate = useCallback(
-    (key: number) => {
-      setCandidates((list) =>
-        list.map((item) => (item.key === key ? { ...item, checked: !item.checked } : item)),
-      )
-    },
-    [],
-  )
-
-  const updateCandidateText = useCallback(
-    (key: number, text: string) => patchCandidate(key, { text }),
-    [patchCandidate],
-  )
-  const updateCandidateStyle = useCallback(
-    (key: number, style: TextStyleKey) => patchCandidate(key, { style }),
-    [patchCandidate],
-  )
-  const updateCandidateFontSize = useCallback(
-    (key: number, fontSize: number) => patchCandidate(key, { fontSize }),
-    [patchCandidate],
-  )
-  const updateCandidateBox = useCallback(
-    (key: number, box: BoxSpec) => patchCandidate(key, { box, boxSet: true }),
-    [patchCandidate],
-  )
-  const applyStyleToAll = useCallback((style: TextStyleKey, fontSize: number) => {
-    setCandidates((list) => list.map((item) => ({ ...item, style, fontSize })))
-  }, [])
-
-  const checkedCount = useMemo(
-    () => candidates.filter((item) => item.checked).length,
-    [candidates],
-  )
-
-  // ------------------------------------------------------------------
-  // 第 ③ 步：合成任务生命周期（勾选的候选一条一个成片）
-  // ------------------------------------------------------------------
-  const renderRunner = useJobRunner<FinalcutRenderJob, RenderJobPayload>({
-    create: createRenderJob,
-    cancel: cancelRenderJob,
-    remove: (jobId) => deleteRenderJob(jobId, options?.purge?.take() ?? false),
-    batchRemove: (ids) => batchDeleteRenderJobs(ids, options?.purge?.take() ?? false),
-    fetchJob: fetchRenderJob,
-    isTerminal: (job) => isTerminalStatus(job.status),
-    fail: api.fail,
-    onChanged: options?.onRenderJobChanged,
-    onFinished: (job) => {
-      if (job.status === 'success' || job.status === 'partial') {
-        apiRef.current.message.success(
-          `合成完成：${job.completed_items}/${job.total_items} 条成片`,
-        )
-      }
-    },
-  })
-
-  const startRenderJob = useCallback(async () => {
-    if (!video || renderRunner.running) {
-      return
-    }
-    const copies = copyRunner.job?.result?.copies ?? []
-    const items = candidates
-      .filter((item) => item.checked)
-      .map((item) => ({
-        copy_text: item.text,
-        angle: copies[item.key]?.angle || undefined,
-        style: item.style,
-        box: item.box,
-        font_size: item.fontSize,
-      }))
-    if (items.length === 0) {
-      return
-    }
-    await renderRunner.submit({
-      video_path: video.path,
-      copy_job_id: copyRunner.job?.id ?? undefined,
-      items,
-      output_dir: outputDir || undefined,
-    })
-  }, [video, candidates, copyRunner.job, outputDir, renderRunner])
-
-  const cancelCurrentRenderJob = useCallback(async () => {
-    if (renderRunner.job) {
-      await renderRunner.cancel(renderRunner.job.id)
-    }
-  }, [renderRunner])
-
-  const cancelRenderJobById = useCallback(
-    (jobId: number) => renderRunner.cancel(jobId),
-    [renderRunner],
-  )
-  const readRenderJob = useCallback(
-    (jobId: number) => renderRunner.read(jobId),
-    [renderRunner],
-  )
-  const removeRenderJob = useCallback(
-    (jobId: number) => renderRunner.remove(jobId),
-    [renderRunner],
-  )
-  const removeRenderJobs = useCallback(
-    (ids: number[]) => renderRunner.removeMany(ids),
-    [renderRunner],
-  )
 
   return {
     step,
     subtitle,
     video,
-    outputDir,
     selectSubtitle,
     selectVideo,
     clearSubtitle,
     clearVideo,
-    setOutputDir,
-    fillDefaultOutputDir,
     validationError,
+    rateOverride,
+    setRateOverride,
     sources,
     sourcesLoading,
     loadSources,
@@ -442,30 +346,17 @@ export function useFinalcutFlow(
     copyJob: copyRunner.job,
     copyJobRunning: copyRunner.running,
     copyJobSubmitting: copyRunner.submitting,
+    subtitleText,
+    subtitleTextLoading,
+    subtitleTextError,
     cancelCurrentCopyJob,
     regenerate,
     candidates,
-    toggleCandidate,
     updateCandidateText,
-    updateCandidateStyle,
-    updateCandidateFontSize,
-    updateCandidateBox,
-    applyStyleToAll,
-    checkedCount,
-    goToBoxStep,
     openCopyJob,
     removeCopyJob,
     removeCopyJobs,
     cancelCopyJobById,
-    startRenderJob,
-    renderJob: renderRunner.job,
-    renderJobRunning: renderRunner.running,
-    renderJobSubmitting: renderRunner.submitting,
-    cancelCurrentRenderJob,
-    cancelRenderJobById,
-    readRenderJob,
-    removeRenderJob,
-    removeRenderJobs,
   }
 }
 

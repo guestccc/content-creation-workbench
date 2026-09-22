@@ -229,5 +229,8 @@ def probe_environment(*, refresh: bool = False) -> dict:
         "copy_count_default": settings.FINALCUT_COPY_COUNT_DEFAULT,
         "copy_count_max": settings.FINALCUT_COPY_COUNT_MAX,
         "max_items": settings.FINALCUT_MAX_ITEMS,
+        # 页面算「约念几秒」与字数预算要它；它是实测校准值，不是探测结果，
+        # 放在这里是因为页面进第②步时手上只有这份 env（见 api 的 /environment）。
+        "chars_per_second": float(settings.FINALCUT_CHARS_PER_SECOND),
         "warnings": warnings,
     }

@@ -1,19 +1,20 @@
-"""一键成品接口测试：环境自检、AI 配置读写、文案任务的信封与状态机契约。
+"""一键成品接口测试：环境自检、AI 配置与口播语速读写、文案任务的信封与状态机契约。
 
 执行层（runner 调 AI 的全流程）在 test_finalcut_copy.py —— 这里只钉接口层：
 创建校验（路径/后缀/存在性 → 422/400）、轮询、取消、删除与批量删除。
 
-AI 配置的写接口会**真的读写 .env**：autouse 夹具把 ai_settings._ENV_PATH 指到
-tmp，绝不能碰开发机上的 backend/.env（里面是用户自己的 key）。
+AI 配置与语速的写接口会**真的读写 .env**：autouse 夹具把 ai_settings 与
+finalcut_settings 的 _ENV_PATH 都指到 tmp，绝不能碰开发机上的 backend/.env
+（里面是用户自己的 key）。
 """
 
 from pathlib import Path
 
 import pytest
 
-from app.core.config import settings
+from app.core.config import default_chars_per_second, settings
 from app.schemas.common import MAX_JOB_REMARK_LENGTH
-from app.services import ai_settings
+from app.services import ai_settings, finalcut_settings
 
 #: 假探测返回的视频规格（与 mix_runner.probe_video_spec 的键形状一致）。
 _FAKE_SPEC = {
@@ -61,28 +62,42 @@ _FAKE_ENV = {
     "copy_count_default": 5,
     "copy_count_max": 10,
     "max_items": 10,
+    "chars_per_second": 5.8,
     "warnings": [],
 }
 
 
 @pytest.fixture(autouse=True)
 def _isolate_ai_settings(monkeypatch, tmp_path):
-    """把 AI 配置的持久化与运行态全隔离掉（与字幕设置的隔离夹具同一套理由）。
+    """把 AI 配置与口播语速的持久化与运行态全隔离掉（与字幕设置的隔离夹具同一套理由）。
 
-    - `.env` 指到 tmp：写接口会真的读写这个文件；
+    - `.env` 指到 tmp：两个写接口会真的读写这个文件（两个模块各有一个
+      `_ENV_PATH`，都要指过去）；
     - settings 单例做快照：接口里的赋值是裸赋值，monkeypatch 拦不住写入本身，
       只能靠 teardown 恢复；
     - 清掉同名环境变量：它会盖过 .env，让断言取决于开发机的 shell；
-    - setup 时把单例的 AI_API_KEY 清空：它可能带着开发机 .env 里配好的真
-      key 进进程，「未配置 key」的断言否则取决于机器状态（真机踩过）。
+    - setup 时把单例的 AI_API_KEY 清空、语速复位成默认值：它们可能带着开发机
+      .env 里配好的值进进程，否则断言取决于机器状态（真机踩过）。
     """
     monkeypatch.setattr(ai_settings, "_ENV_PATH", tmp_path / ".env")
-    for key in ("AI_BASE_URL", "AI_MODEL", "AI_API_KEY"):
+    monkeypatch.setattr(finalcut_settings, "_ENV_PATH", tmp_path / ".env")
+    for key in ("AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "FINALCUT_CHARS_PER_SECOND"):
         monkeypatch.delenv(key, raising=False)
-    originals = (settings.AI_BASE_URL, settings.AI_MODEL, settings.AI_API_KEY)
+    originals = (
+        settings.AI_BASE_URL,
+        settings.AI_MODEL,
+        settings.AI_API_KEY,
+        settings.FINALCUT_CHARS_PER_SECOND,
+    )
     settings.AI_API_KEY = ""
+    settings.FINALCUT_CHARS_PER_SECOND = default_chars_per_second()
     yield
-    settings.AI_BASE_URL, settings.AI_MODEL, settings.AI_API_KEY = originals
+    (
+        settings.AI_BASE_URL,
+        settings.AI_MODEL,
+        settings.AI_API_KEY,
+        settings.FINALCUT_CHARS_PER_SECOND,
+    ) = originals
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +154,8 @@ class TestEnvironment:
         assert data["ffmpeg"]["has_drawtext"] is True
         assert data["font"]["family"] == "微软雅黑"
         assert data["text_styles"][0]["key"] == "white_box"
+        # 语速：页面算「约念几秒」与字数预算的依据，必须随环境一起给
+        assert data["chars_per_second"] == 5.8
 
     def test_environment_not_ready_carries_fix_hints(self, client, monkeypatch):
         env = dict(_FAKE_ENV)
@@ -168,6 +185,25 @@ class TestEnvironment:
         assert response.status_code == 200
         assert settings.AI_API_KEY == "sk-fromenv123456"
 
+    def test_refresh_syncs_rate_into_settings(self, client, monkeypatch, tmp_path):
+        """手改 .env 里的语速后点「重新检测」：热同步要捡起来，且必须是 float。
+
+        同步发生在探测**之前** —— 探测结果里的 chars_per_second 就是新值。
+        """
+        monkeypatch.setattr(
+            "app.api.v1.finalcut_jobs.probe_environment", lambda refresh=False: dict(_FAKE_ENV)
+        )
+        (tmp_path / ".env").write_text(
+            "FINALCUT_CHARS_PER_SECOND=6.2\n", encoding="utf-8"
+        )
+
+        response = client.get("/api/v1/finalcut/environment", params={"refresh": "true"})
+
+        assert response.status_code == 200
+        assert settings.FINALCUT_CHARS_PER_SECOND == 6.2
+        # 字符串直接 setattr 会让「时长 × 语速」在任务跑起来才炸
+        assert isinstance(settings.FINALCUT_CHARS_PER_SECOND, float)
+
 
 # ---------------------------------------------------------------------------
 # AI 配置读写
@@ -184,6 +220,16 @@ class TestAiSettings:
         assert data["api_key_present"] is False
         assert data["api_key_masked"] == ""
         assert "api_key" not in data  # 完整 key 字段根本不存在
+        # 语速跟 AI 三键同一个读取接口：页面打开弹窗时一次拿全
+        assert data["chars_per_second"] == default_chars_per_second()
+        assert data["chars_per_second_default"] == default_chars_per_second()
+        assert data["chars_per_second_warning"] == ""
+
+    def test_get_returns_calibrated_rate(self, client):
+        """用户校准过的语速要如实回填（弹窗打开时回填的就是这个值）。"""
+        settings.FINALCUT_CHARS_PER_SECOND = 5.8
+        data = client.get("/api/v1/finalcut/settings").json()["data"]
+        assert data["chars_per_second"] == 5.8
 
     def test_get_masks_configured_key(self, client):
         settings.AI_API_KEY = "sk-abcdef123456"
@@ -199,6 +245,7 @@ class TestAiSettings:
                 "base_url": "https://api.deepseek.com/v1/",
                 "model": "deepseek-chat",
                 "api_key": "sk-newkey98765",
+                "chars_per_second": 5.8,
             },
         )
         assert response.status_code == 200, response.text
@@ -206,13 +253,70 @@ class TestAiSettings:
         env_text = (tmp_path / ".env").read_text(encoding="utf-8")
         assert "AI（一键成品的文案生成）" in env_text  # 段头
         assert "AI_API_KEY=sk-newkey98765" in env_text
+        assert "# ---------- 一键成品（口播语速） ----------" in env_text  # 自己一段
+        assert "FINALCUT_CHARS_PER_SECOND=5.8" in env_text
+        # 段头判定是子串匹配，两个段头不能互相命中：语速键必须在自己的段头之后
+        lines = env_text.splitlines()
+        assert lines.index("# ---------- 一键成品（口播语速） ----------") < lines.index(
+            "FINALCUT_CHARS_PER_SECOND=5.8"
+        )
         # 写盘只保证下次启动生效，当前进程靠原地改单例立刻生效
         assert settings.AI_API_KEY == "sk-newkey98765"
         assert settings.AI_BASE_URL == "https://api.deepseek.com/v1"  # 尾斜杠被剥掉
+        assert settings.FINALCUT_CHARS_PER_SECOND == 5.8
+        assert isinstance(settings.FINALCUT_CHARS_PER_SECOND, float)
 
         data = response.json()["data"]
         assert data["api_key_present"] is True
         assert "sk-newkey98765" not in response.text  # 响应里只有掩码
+        assert data["chars_per_second"] == 5.8
+
+    def test_put_out_of_range_rate_returns_400_and_changes_nothing(
+        self, client, tmp_path
+    ):
+        """越界 → 400，**且一个字都没改**。
+
+        语速先校验、再写两处：两次写是两次独立的原子写（.env 是纯文本，不做跨段
+        事务），把校验前置才能兑现「报错 = 没改」这条承诺。
+        """
+        settings.AI_API_KEY = "sk-existing0000"
+        settings.AI_MODEL = "deepseek-chat"
+
+        response = client.put(
+            "/api/v1/finalcut/settings",
+            json={
+                "base_url": "https://api.deepseek.com/v1",
+                "model": "改过的模型",
+                "api_key": "sk-newkey98765",
+                "chars_per_second": 99,
+            },
+        )
+
+        assert response.status_code == 400
+        assert "语速" in response.text
+        assert not (tmp_path / ".env").exists()  # 连 AI 那段也没写出去
+        assert settings.AI_MODEL == "deepseek-chat"
+        assert settings.AI_API_KEY == "sk-existing0000"
+        assert settings.FINALCUT_CHARS_PER_SECOND == default_chars_per_second()
+
+    def test_put_without_rate_keeps_existing(self, client, tmp_path):
+        """不带语速 = 不改（与 api_key 留空同一套语义）：老调用方照常能保存。"""
+        settings.FINALCUT_CHARS_PER_SECOND = 5.8
+        (tmp_path / ".env").write_text(
+            "FINALCUT_CHARS_PER_SECOND=5.8\n", encoding="utf-8"
+        )
+
+        response = client.put(
+            "/api/v1/finalcut/settings",
+            json={"base_url": "https://example.com/v1", "model": "别的模型"},
+        )
+        assert response.status_code == 200, response.text
+
+        assert response.json()["data"]["chars_per_second"] == 5.8
+        assert settings.FINALCUT_CHARS_PER_SECOND == 5.8
+        assert "FINALCUT_CHARS_PER_SECOND=5.8" in (tmp_path / ".env").read_text(
+            encoding="utf-8"
+        )
 
     def test_put_empty_key_keeps_existing(self, client, tmp_path):
         """只想改模型时 key 留空 = 不动它（读接口只给掩码，回填不了原值）。"""
@@ -274,6 +378,52 @@ class TestCreateCopyJob:
         assert data["model"] == settings.AI_MODEL
         assert data["result"] is None
         assert data["progress_percent"] == 0.0
+
+    def test_rate_from_request_is_snapshotted(self, client, media_files):
+        """请求里带的语速进任务记录 —— 「这条念快些」就是靠它。"""
+        created = _create_job(client, media_files, chars_per_second=5.8)
+        assert created["chars_per_second"] == 5.8
+
+        # 详情接口读的是同一个快照（列表/轮询都靠它展示秒数）
+        detail = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}").json()["data"]
+        assert detail["chars_per_second"] == 5.8
+
+    def test_rate_defaults_to_current_global(self, client, media_files):
+        """不带语速 = 用当前全局默认值，并且**当场固化**，之后改全局不影响它。"""
+        created = _create_job(client, media_files)
+        assert created["chars_per_second"] == default_chars_per_second()
+
+        settings.FINALCUT_CHARS_PER_SECOND = 4.0
+        later = _create_job(client, media_files)
+        assert later["chars_per_second"] == 4.0  # 新任务跟新默认值
+
+        # 已建的那条不受影响：历史任务的预算必须与当时生成的内容对得上
+        detail = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}").json()["data"]
+        assert detail["chars_per_second"] == default_chars_per_second()
+
+    def test_rate_out_of_range_422(self, client, media_files):
+        """区间与配置弹窗同一套（1.0–15.0），越界在创建时就被挡下。"""
+        for bad in (0.5, 99):
+            response = client.post(
+                "/api/v1/finalcut/copy-jobs",
+                json={
+                    "subtitle_path": str(media_files[0]),
+                    "video_path": str(media_files[1]),
+                    "chars_per_second": bad,
+                },
+            )
+            assert response.status_code == 422, response.text
+
+    def test_rate_not_a_number_422(self, client, media_files):
+        response = client.post(
+            "/api/v1/finalcut/copy-jobs",
+            json={
+                "subtitle_path": str(media_files[0]),
+                "video_path": str(media_files[1]),
+                "chars_per_second": "很快",
+            },
+        )
+        assert response.status_code == 422
 
     def test_relative_path_422(self, client):
         response = client.post(
@@ -391,6 +541,45 @@ class TestCopyJobLifecycle:
         data = listing.json()["data"]
         assert data["total"] == 1
         assert data["items"][0]["id"] == created["id"]
+
+    def test_detail_opens_legacy_result_with_target_seconds(self, client, db_session, tmp_path):
+        """历史任务的 result 里残留 target_seconds（已删字段）→ 详情照常返回。
+
+        页面上「点开一条老任务」走的就是这条接口。CopyCandidate 没开
+        extra='forbid'，pydantic v2 默认忽略未知键 —— 老任务不会因为字段退场
+        而打不开，也不需要数据库迁移。
+        """
+        from app.models.finalcut_job import FinalcutCopyJob
+
+        job = FinalcutCopyJob(
+            status="success",
+            subtitle_path=str(tmp_path / "字幕.srt"),
+            video_path=str(tmp_path / "成片.mp4"),
+            video_duration=36.294, copy_count=5, hint="", model="deepseek-chat",
+            result={
+                "analysis": {"topic": "厨房收纳"},
+                "copies": [
+                    {
+                        "text": "老文案",
+                        "angle": "痛点开场",
+                        "target_seconds": 36.3,
+                        "char_count": 87,
+                        "why": "",
+                        "highlights": [],
+                        "breakdown": [],
+                    }
+                ],
+            },
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        response = client.get(f"/api/v1/finalcut/copy-jobs/{job.id}")
+        assert response.status_code == 200, response.text
+        copy = response.json()["data"]["result"]["copies"][0]
+        assert copy["text"] == "老文案"
+        assert copy["char_count"] == 87
+        assert "target_seconds" not in copy
 
     def test_list_status_filter(self, client, media_files):
         created = _create_job(client, media_files)
@@ -531,6 +720,163 @@ class TestCopyJobRemark:
         )
         assert response.status_code == 404
         assert response.json()["success"] is False
+
+
+class TestCopyJobSubtitleText:
+    """第 ② 步的字幕对照：原文（磁盘产物）+ 素材（喂给 AI 的那份）。
+
+    这条接口的意义是让用户看出「AI 是没读懂素材，还是读懂了但写得差」，
+    所以**任务的状态不影响能不能取**：失败与取消时恰恰最需要看 AI 读到了什么。
+    """
+
+    def test_returns_content_and_material(self, client, media_files):
+        subtitle, _ = media_files
+        created = _create_job(client, media_files)
+
+        response = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}/subtitle-text")
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+
+        assert body["path"] == str(subtitle)
+        assert body["name"] == subtitle.name
+        assert body["size_bytes"] == subtitle.stat().st_size
+        # 原文是磁盘上那份：带序号与时间轴
+        assert "00:00:00,000 --> 00:00:02,000" in body["content"]
+        assert "这个收纳架真的绝了" in body["content"]
+        # 素材是喂给 AI 的那份：时间轴与序号都剥掉了
+        assert "-->" not in body["material"]
+        assert body["material"] == "这个收纳架真的绝了"
+        assert body["truncated"] is False
+        assert body["material_truncated"] is False
+
+    def test_material_is_deduped_and_ass_stripped(self, client, db_session, tmp_path):
+        """素材视图必须走后端拆解：连续重复行合并、ASS 行内标签与非 Events 段剥掉。
+
+        前端那份「去时间轴」的文本变换做不到这些，所以这个视图只能由后端给。
+        """
+        from app.models.finalcut_job import FinalcutCopyJob
+
+        ass = tmp_path / "口播.ass"
+        ass.write_text(
+            "[Script Info]\nTitle: 带货口播\n\n"
+            "[V4+ Styles]\nStyle: Default,微软雅黑\n\n"
+            "[Events]\n"
+            "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\an8}这个收纳架真的绝了\n"
+            "Dialogue: 0,0:00:02.00,0:00:04.00,Default,,0,0,0,,这个收纳架真的绝了\n"
+            "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,一放就整整齐齐\n",
+            encoding="utf-8",
+        )
+        job = FinalcutCopyJob(
+            status="failed", subtitle_path=str(ass), video_path=str(tmp_path / "成片.mp4"),
+            video_duration=15.0, copy_count=5, hint="", model="deepseek-chat",
+            error_message="AI 调用失败",
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        body = client.get(f"/api/v1/finalcut/copy-jobs/{job.id}/subtitle-text").json()["data"]
+
+        assert body["material"] == "这个收纳架真的绝了\n一放就整整齐齐"
+        assert "Dialogue:" not in body["material"]
+        assert "{" not in body["material"]
+        assert "Style:" not in body["material"]
+        # 原文视图保持磁盘上的原文，不做任何加工
+        assert "Dialogue: 0,0:00:00.00" in body["content"]
+        assert "[Script Info]" in body["content"]
+
+    def test_content_truncates_at_block_boundary(
+        self, client, media_files, monkeypatch, tmp_path
+    ):
+        """原文超上限：截断 + 标记，且结尾不剩半个字幕块。"""
+        monkeypatch.setattr(settings, "SUBTITLE_PREVIEW_MAX_BYTES", 60)
+        subtitle = tmp_path / "长字幕.srt"
+        subtitle.write_text(
+            "".join(
+                f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\n第 {i} 句口播内容\n\n"
+                for i in range(1, 9)
+            ),
+            encoding="utf-8",
+        )
+        _, video = media_files
+        created = _create_job(client, media_files, subtitle_path=str(subtitle))
+
+        body = client.get(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/subtitle-text"
+        ).json()["data"]
+
+        assert body["truncated"] is True
+        assert body["size_bytes"] > 60
+        # 结尾是完整的一句，没有半截的时间轴行
+        assert body["content"].endswith("第 1 句口播内容")
+        # 原文被截断**不影响**素材：素材按整份文件拆解，这里是完整的八句
+        assert body["material"].splitlines()[0] == "第 1 句口播内容"
+        assert body["material"].splitlines()[-1] == "第 8 句口播内容"
+        assert body["material_truncated"] is False
+        assert video.is_file()  # 成片没被这件事动过
+
+    def test_material_truncated_flag(self, client, media_files, monkeypatch):
+        """素材超上限：AI 当时也只读到了这些（与原文超限是两回事）。"""
+        monkeypatch.setattr(settings, "FINALCUT_SRT_MAX_CHARS", 5)
+        created = _create_job(client, media_files)
+
+        body = client.get(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/subtitle-text"
+        ).json()["data"]
+
+        assert body["material_truncated"] is True
+        assert "已省略" in body["material"]
+        assert body["truncated"] is False
+
+    @pytest.mark.parametrize("status", ["pending", "running", "success", "cancelled"])
+    def test_any_status_can_be_read(self, client, media_files, db_session, status):
+        """任务没跑完 / 被取消 / 已成功，都取得到字幕 —— 状态不参与判断。"""
+        from app.models.finalcut_job import FinalcutCopyJob
+
+        subtitle, video = media_files
+        job = FinalcutCopyJob(
+            status=status, subtitle_path=str(subtitle), video_path=str(video),
+            video_duration=15.0, copy_count=5, hint="", model="deepseek-chat",
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        response = client.get(f"/api/v1/finalcut/copy-jobs/{job.id}/subtitle-text")
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["material"] == "这个收纳架真的绝了"
+
+    def test_ignores_path_query_param(self, client, media_files, tmp_path):
+        """路径只认任务记录里的那条：带 ?path= 也不读第二个文件。
+
+        本接口是「按任务 id 取字幕」的窄口子，放开读任意路径就是任意文件读取。
+        """
+        other = tmp_path / "别人的字幕.srt"
+        other.write_text("1\n00:00:00,000 --> 00:00:01,000\n不该被读到\n", encoding="utf-8")
+        created = _create_job(client, media_files)
+
+        response = client.get(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/subtitle-text",
+            params={"path": str(other)},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()["data"]
+        assert body["path"] == str(media_files[0])
+        assert "不该被读到" not in body["content"]
+
+    def test_deleted_file_404(self, client, media_files):
+        """字幕文件被搬走：404 而不是 500（页面上由卡片内提示呈现）。"""
+        created = _create_job(client, media_files)
+        media_files[0].unlink()
+
+        response = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}/subtitle-text")
+        assert response.status_code == 404
+        assert response.json()["success"] is False
+
+    def test_missing_job_404(self, client):
+        response = client.get("/api/v1/finalcut/copy-jobs/9999/subtitle-text")
+        assert response.status_code == 404
+
+    def test_job_id_zero_422(self, client):
+        assert client.get("/api/v1/finalcut/copy-jobs/0/subtitle-text").status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1348,7 @@ class TestSources:
         mix = MixJob(
             status="success", opening=[], middle=[], ending=[], count=1,
             output_dir=str(tmp_path), seed=1, target={}, total_outputs=1,
+            remark="客户 A 那版",
         )
         db_session.add(mix)
         db_session.flush()
@@ -1025,6 +1372,7 @@ class TestSources:
         srt.write_text("1\n00:00:00,000 --> 00:00:02,000\n字幕\n", encoding="utf-8")
         sub = SubtitleJob(
             status="success", input_path=str(tmp_path), output_dir=str(tmp_path),
+            remark="口播初版",
         )
         db_session.add(sub)
         db_session.flush()
@@ -1043,9 +1391,98 @@ class TestSources:
         assert entry["path"] == str(video)
         assert entry["origin"] == "mix"
         assert entry["video_url"].endswith(f"/mix/jobs/{mix.id}/outputs/1/video")
+        # 备注挂在任务表上，产物清单要 join 回任务表把它带出来 —— 清单里几条
+        # 「字幕 #12 / a.srt」长得一模一样，备注才是用户认得出的标记。
+        assert entry["remark"] == "客户 A 那版"
+
         assert len(data["subtitles"]) == 1
         assert data["subtitles"][0]["origin"] == "subtitle"
         assert data["subtitles"][0]["video_url"] == ""
+        assert data["subtitles"][0]["remark"] == "口播初版"
+        assert data["subtitles"][0]["index"] == 1
+
+    def test_source_index_actually_previews_that_subtitle(
+        self, client, db_session, tmp_path
+    ):
+        """清单里的 index 要能直接喂给字幕预览接口。
+
+        这是两个接口之间的契约：清单用 (job_id, index) 描述一份字幕，预览接口
+        也用 (job_id, index) 取内容。index 写错（0 起算、或按「清单里的位置」
+        重排）**不会报错**，只会静默预览到别人的字幕。
+
+        所以第一条刻意造成**失败**（进不了清单，但仍在任务里占着序号 1）：
+        清单里第二条的位置是 1，而它的真实序号是 2 —— 只写「位置」的实现会
+        预览到 1.srt 去。
+        """
+        from app.models.subtitle_job import (
+            SubtitleJob,
+            SubtitleJobItem,
+            SubtitleJobItemStatus,
+        )
+
+        sub = SubtitleJob(
+            status="success", input_path=str(tmp_path), output_dir=str(tmp_path),
+        )
+        db_session.add(sub)
+        db_session.flush()
+        paths = []
+        for index in (1, 2):
+            srt = tmp_path / f"{index}.srt"
+            srt.write_text(
+                f"1\n00:00:00,000 --> 00:00:02,000\n第{index}条\n", encoding="utf-8"
+            )
+            paths.append(srt)
+            ok = index == 2
+            db_session.add(
+                SubtitleJobItem(
+                    job_id=sub.id, index=index, source_path=str(tmp_path),
+                    source_name=f"视频{index}.mp4", output_path=str(srt),
+                    status=(
+                        SubtitleJobItemStatus.SUCCESS if ok
+                        else SubtitleJobItemStatus.FAILED
+                    ),
+                    subtitle_exists=ok, file_size=20,
+                )
+            )
+        db_session.commit()
+
+        sources = client.get("/api/v1/finalcut/sources").json()["data"]["subtitles"]
+        assert [item["path"] for item in sources] == [str(paths[1])]
+        entry = sources[0]
+        assert entry["index"] == 2  # 真实序号，不是它在清单里的位置
+
+        preview = client.get(
+            f"/api/v1/subtitle/jobs/{sub.id}/subtitles/{entry['index']}"
+        ).json()["data"]
+        assert "第2条" in preview["content"]
+        assert preview["name"] == "2.srt"
+
+    def test_sources_without_remark_gives_empty_string(self, client, db_session, tmp_path):
+        """没写备注的任务 → 空串（而不是缺键）：前端按「空串 = 没写」判断。"""
+        from app.models.subtitle_job import (
+            SubtitleJob,
+            SubtitleJobItem,
+            SubtitleJobItemStatus,
+        )
+
+        srt = tmp_path / "无备注.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\n字幕\n", encoding="utf-8")
+        sub = SubtitleJob(
+            status="success", input_path=str(tmp_path), output_dir=str(tmp_path),
+        )
+        db_session.add(sub)
+        db_session.flush()
+        db_session.add(
+            SubtitleJobItem(
+                job_id=sub.id, index=1, source_path=str(srt), source_name="成片.mp4",
+                output_path=str(srt), status=SubtitleJobItemStatus.SUCCESS,
+                subtitle_exists=True, file_size=20,
+            )
+        )
+        db_session.commit()
+
+        entry = client.get("/api/v1/finalcut/sources").json()["data"]["subtitles"][0]
+        assert entry["remark"] == ""
 
     def test_sources_empty(self, client):
         data = client.get("/api/v1/finalcut/sources").json()["data"]

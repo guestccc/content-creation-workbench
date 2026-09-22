@@ -73,6 +73,21 @@ def default_voicebox_base_url() -> str:
     return "http://127.0.0.1:17493"
 
 
+def default_chars_per_second() -> float:
+    """一键成品「口播语速」的默认值（字/秒）。
+
+    注意语义是**口播**而不是阅读：文案是拿去 TTS 配音、同时人工烧成字幕的稿子，
+    要念满整个视频时长。4.5 是当初按「观众一秒读几个字」定的，拿来算念稿就偏慢。
+
+    5.0（≈ 每分钟 300 字）是个常见口播基准；默认值只影响用户第一次打开页面时的
+    预算，页面上按自己的音色实测一次（87 字念了 15 秒 → 5.8）就校准成自己的值。
+
+    公开而非私有，是因为 services/finalcut_settings.py 在「用户把 .env 里那行
+    整个删掉」或「值被改坏」时要拿它当回退值 —— 默认值必须只有这一个来源。
+    """
+    return 5.0
+
+
 class Settings(BaseSettings):
     """全局配置对象。
 
@@ -256,8 +271,10 @@ class Settings(BaseSettings):
     # 单次 HTTP 请求的超时（秒）。这也是「取消文案任务」的延迟上界：
     # 在途请求无法即时中断，runner 只能在相位边界弃结果。
     AI_TIMEOUT_SECONDS: int = 120
-    # 生成内容的最大 token 数（5 条文案 + 拆解的量，4096 足够宽裕）。
-    AI_MAX_TOKENS: int = 4096
+    # 生成内容的最大 token 数。5 条文案各含正文 + 逐段拆解，而拆解里的
+    # content 就是正文原文（等于每条正文输出两遍），一分钟以上的视频会用到
+    # 3000+；90 秒视频约 4700，4096 会把 JSON 截断成不可解析的残片。给一倍余量。
+    AI_MAX_TOKENS: int = 8192
     # 超时 / 5xx / 429 时的重试次数（4xx 其它错误不重试，重试也不会变好）。
     AI_MAX_RETRIES: int = 1
     # 自定义 system 提示词，留空用内置的（services/finalcut_copy.py）。
@@ -287,8 +304,10 @@ class Settings(BaseSettings):
     FINALCUT_HINT_MAX_CHARS: int = 500
     # 烧字用的字体文件绝对路径，留空表示自动探测（见 services/finalcut_env.py）。
     FINALCUT_FONT_FILE: str = ""
-    # 语速估算：每秒上屏字数，用于「视频时长 → 文案字数预算」的换算。
-    FINALCUT_CHARS_PER_SECOND: float = 4.5
+    # 口播语速：每秒念几个字，用于「视频时长 → 文案字数预算」的换算。
+    # 这是用户实测校准出来的值（见 services/finalcut_settings.py），
+    # 默认值见 default_chars_per_second() —— 别在这里写第二个数。
+    FINALCUT_CHARS_PER_SECOND: float = default_chars_per_second()
     # 烧字编码质量与速度档（与混剪同一套取值理由）。
     FINALCUT_RENDER_CRF: int = 20
     FINALCUT_RENDER_PRESET: str = "veryfast"
