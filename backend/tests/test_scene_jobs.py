@@ -284,6 +284,51 @@ class TestCancelAndDelete:
         response = client.post("/api/v1/scene/jobs/99999/cancel")
         assert response.status_code == 404, response.text
 
+    def test_cancel_while_queued_marks_items_skipped(self, client, video_dir, tmp_path):
+        """排队中就被取消：条目不能留在「等待中」。
+
+        认领要求 status == pending，任务一旦置成 cancelled 就再也不会被认领，
+        留在 pending 的条目既不会被执行、也不计入 failed / skipped。
+        """
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+
+        data = client.post(f"/api/v1/scene/jobs/{created['id']}/cancel").json()["data"]
+        assert data["status"] == SceneJobStatus.CANCELLED
+        assert [item["status"] for item in data["items"]] == ["skipped", "skipped"]
+        assert "已取消" in data["items"][0]["error_message"]
+        assert data["skipped_videos"] == 2
+        assert data["failed_videos"] == 0 and data["completed_videos"] == 0
+
+    def test_cancelled_while_queued_can_be_retried(self, client, video_dir, tmp_path):
+        """回归：排队中被取消的任务必须能单条重试。
+
+        条目若留在 pending，重试会被 409 拒掉（「只有失败或跳过的条目才能重试」），
+        而页面上一个重试入口都不会出现。
+        """
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        client.post(f"/api/v1/scene/jobs/{created['id']}/cancel")
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/1/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == SceneJobStatus.PENDING
+        # 只有被点名的那条回队，另一条保持「已跳过」
+        assert [item["status"] for item in data["items"]] == ["pending", "skipped"]
+
+    def test_cancelled_while_queued_can_be_retried_all(self, client, video_dir, tmp_path):
+        """回归：整批取消后「一键全部重试」要有候选，不能一条都找不到。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        client.post(f"/api/v1/scene/jobs/{created['id']}/cancel")
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == SceneJobStatus.PENDING
+        assert all(item["status"] == "pending" for item in data["items"])
+
     def test_delete_pending_job_conflict(self, client, video_dir, tmp_path):
         """未结束的任务不允许删除 → 409。"""
         source, _ = video_dir

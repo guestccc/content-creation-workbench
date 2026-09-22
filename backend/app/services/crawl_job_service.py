@@ -274,6 +274,11 @@ class CrawlJobService:
         并跑一遍创建时的全部校验，MC 被挪走 / 知乎补丁没打时**点击即 400** ——
         这正是想要的「失败要快」。
 
+        刻意**沿用 create_job 的钳制**（`min(max_notes, CRAWL_MAX_NOTES_LIMIT)`、
+        并发同理）：今天的环境上限说了算，而不是把旧任务里可能已经越界的数字
+        原样搬过来重跑一遍。代价是管理员调低过上限时，重试的抓取量会跟着变小 ——
+        新任务行的 expected_count 会如实反映这一点。
+
         Raises:
             NotFoundError: 任务不存在。
             BadRequestError: 旧任务的参数按今天的规则不再合法（工具没了、补丁没了、

@@ -278,12 +278,31 @@ class MixJobService:
     # ------------------------------------------------------------------
 
     def cancel_job(self, job_id: int) -> MixJob:
-        """取消任务（与镜头分割同一套做法）。"""
+        """取消任务（与镜头分割同一套做法）。
+
+        与镜头分割一样，排队中（还没被认领）的任务要顺手把条目一起标成
+        skipped —— 它们再也不会被执行，留着 pending 只会让详情页出现
+        「任务已取消，里面却躺着一堆等待中」，并且 failed / skipped 计数恒为 0、
+        连「重试」入口都不出现。
+        """
         try:
             with transaction(self.db):
                 job = self._get_job_or_404(job_id)
                 if job.status in MixJobStatus.TERMINAL:
                     raise ConflictError(f"任务已是终态（{job.status}），无法取消")
+
+                if job.status == MixJobStatus.PENDING:
+                    # 认领要求 status == pending：置成 cancelled 之后谁也认领不了它
+                    for output in job.outputs:
+                        if output.status == MixOutputStatus.PENDING:
+                            output.status = MixOutputStatus.SKIPPED
+                            output.error_message = "任务已取消，未执行"
+                            output.finished_at = utcnow()
+                    # 这个任务不会再被认领，_finalize 也就永远不会跑，计数只能在这儿写
+                    job.skipped_outputs = sum(
+                        1 for output in job.outputs if output.status == MixOutputStatus.SKIPPED
+                    )
+
                 job.status = MixJobStatus.CANCELLED
                 job.finished_at = utcnow()
                 self.db.flush()

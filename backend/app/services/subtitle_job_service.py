@@ -266,7 +266,8 @@ class SubtitleJobService:
     def cancel_job(self, job_id: int) -> SubtitleJob:
         """取消任务。
 
-        pending 任务：直接置 cancelled，工作线程认领时会跳过；
+        pending 任务：直接置 cancelled，工作线程认领时会跳过；排队中的条目一并
+        标成 skipped（见下面的注释）；
         running 任务：置 cancelled 后由执行线程在下一次 tick（≤0.5 秒）发现，
         杀掉当前子进程组、把未执行的条目标记为 skipped。
 
@@ -281,6 +282,23 @@ class SubtitleJobService:
 
                 if job.status in SubtitleJobStatus.TERMINAL:
                     raise ConflictError(f"任务已是终态（{job.status}），无法取消")
+
+                if job.status == SubtitleJobStatus.PENDING:
+                    # 还没被工作线程认领（认领要求 status == pending），条目全在排队里。
+                    # 一并标成「已跳过」，与 recover_interrupted_jobs 对未执行条目的
+                    # 处理一致：否则详情页会出现「任务已取消，里面却躺着一堆等待中」
+                    # 的自相矛盾；更要紧的是这些条目再也不会被认领，failed /
+                    # skipped 计数恒为 0，用户连「重试」入口都看不到 ——
+                    # 重试的候选正是 failed | skipped。
+                    for item in job.items:
+                        if item.status == SubtitleJobItemStatus.PENDING:
+                            item.status = SubtitleJobItemStatus.SKIPPED
+                            item.error_message = "任务已取消，未执行"
+                            item.finished_at = utcnow()
+                    # 这个任务不会再被认领，_finalize 也就永远不会跑，计数只能在这儿写
+                    job.skipped_videos = sum(
+                        1 for item in job.items if item.status == SubtitleJobItemStatus.SKIPPED
+                    )
 
                 job.status = SubtitleJobStatus.CANCELLED
                 job.finished_at = utcnow()
@@ -504,28 +522,18 @@ class SubtitleJobService:
            _finalize 只重算 failed / skipped / subtitle_count，所以这里必须按
            条目状态数一遍再写。之后重跑的条目会在执行时各自 +1，收尾时
            failed / skipped 再由 _finalize 数回来，总数自洽。
-        2. **上一轮的字幕文件要删掉**。输出路径按条目定死（重名已加后缀），
-           留着旧 .srt 会让「字幕存在」这个判据失真 —— 用户看到的会是上一轮的
-           文本，而不是这一轮的结果。
+        2. **上一轮的字幕文件不删，subtitle_exists / file_size / segment_count
+           也不清零**。被取消的条目**可能确实有产物**：执行器发现 .srt 已经写完
+           时会特意告诉用户「任务已取消，但字幕已生成（已保留在输出目录）」
+           （subtitle_runner 里 aborted == "cancelled" 那一支）。既然答应保留了，
+           重试就不能反手删掉它 —— 用户手里那份字幕会凭空消失。
+           这三个字段不清也不会失真：条目重跑完 _collect_result 会按新文件的
+           实际大小重新推导它们（新文件覆盖旧的，失败则 size=0 → False）。
         3. **child_pid 必须清**：它是取消 / 孤儿回收共用的唯一依据，留着旧 PID
            有误杀无关进程的风险。
         """
         for item in items:
-            # 正常情况下 failed / skipped 的条目本来就没有字幕文件，这里是
-            # 防御性清理（上一轮写了一半、或用户手工放进来的同名文件）。
-            stale = Path(item.output_path)
-            try:
-                if stale.is_file():
-                    stale.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "清理重试前的残留字幕失败，跳过该文件 | %s | %s", stale, exc
-                )
-
             item.status = SubtitleJobItemStatus.PENDING
-            item.subtitle_exists = False
-            item.file_size = 0
-            item.segment_count = 0
             item.duration_seconds = None
             item.exit_code = None
             item.elapsed_seconds = 0

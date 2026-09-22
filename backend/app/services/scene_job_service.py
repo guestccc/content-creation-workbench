@@ -317,7 +317,8 @@ class SceneJobService:
     def cancel_job(self, job_id: int) -> SceneJob:
         """取消任务。
 
-        pending 任务：直接置 cancelled，工作线程认领时会跳过；
+        pending 任务：直接置 cancelled，工作线程认领时会跳过；排队中的条目一并
+        标成 skipped（见下面的注释）；
         running 任务：置 cancelled 后由执行线程在下一次 tick（≤0.5 秒）发现，
         杀掉当前子进程组、把未执行的条目标记为 skipped。
 
@@ -332,6 +333,23 @@ class SceneJobService:
 
                 if job.status in SceneJobStatus.TERMINAL:
                     raise ConflictError(f"任务已是终态（{job.status}），无法取消")
+
+                if job.status == SceneJobStatus.PENDING:
+                    # 还没被工作线程认领（认领要求 status == pending），条目全在排队里。
+                    # 一并标成「已跳过」，与 recover_interrupted_jobs 对未执行条目的
+                    # 处理一致：否则详情页会出现「任务已取消，里面却躺着一堆等待中」
+                    # 的自相矛盾；更要紧的是这些条目再也不会被认领，failed /
+                    # skipped 计数恒为 0，用户连「重试」入口都看不到 ——
+                    # 重试的候选正是 failed | skipped。
+                    for item in job.items:
+                        if item.status == SceneJobItemStatus.PENDING:
+                            item.status = SceneJobItemStatus.SKIPPED
+                            item.error_message = "任务已取消，未执行"
+                            item.finished_at = utcnow()
+                    # 这个任务不会再被认领，_finalize 也就永远不会跑，计数只能在这儿写
+                    job.skipped_videos = sum(
+                        1 for item in job.items if item.status == SceneJobItemStatus.SKIPPED
+                    )
 
                 job.status = SceneJobStatus.CANCELLED
                 job.finished_at = utcnow()

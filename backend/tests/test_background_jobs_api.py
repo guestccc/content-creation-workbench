@@ -322,6 +322,54 @@ class TestCancel:
     def test_cancel_unknown_is_404(self, client):
         assert client.post("/api/v1/background/jobs/999/cancel").status_code == 404
 
+    def test_cancel_while_queued_marks_items_skipped(self, client, image_dir, background):
+        """排队中就被取消：条目不能留在「等待中」。
+
+        认领要求 status == pending，任务一旦置成 cancelled 就再也不会被认领，
+        留在 pending 的条目既不会被执行、也不计入 failed / skipped ——
+        详情页会出现「任务已取消，里面却躺着一堆等待中」。
+        """
+        job = _create(client, image_dir, background)
+        data = client.post(f"/api/v1/background/jobs/{job['id']}/cancel").json()["data"]
+
+        assert data["status"] == "cancelled"
+        assert [it["status"] for it in data["items"]] == ["skipped"] * 3
+        assert "已取消" in data["items"][0]["error_message"]
+        # 这个任务不会再被认领，_finalize 也就永远不会跑：计数只能在取消时写
+        assert data["skipped_images"] == 3
+        assert data["failed_images"] == 0
+        assert data["completed_images"] == 0
+
+    def test_cancelled_while_queued_can_be_retried(self, client, image_dir, background):
+        """回归：排队中被取消的任务必须能重试。
+
+        「传完一批图，还没轮到就点了取消」是最常见的一条都没跑的情形。
+        条目若留在 pending，单条与批量重试都会被 409 拒掉
+        （「只有失败或跳过的条目才能重试」/「没有可重试的条目」），
+        而页面上一个重试入口都不会出现。
+        """
+        job = _create(client, image_dir, background)
+        client.post(f"/api/v1/background/jobs/{job['id']}/cancel")
+
+        single = client.post(f"/api/v1/background/jobs/{job['id']}/items/1/retry")
+        assert single.status_code == 200, single.text
+        data = single.json()["data"]
+        assert data["status"] == "pending"
+        # 只有被点名的那一张回队，另外两张保持「已跳过」
+        assert [it["status"] for it in data["items"]] == ["pending", "skipped", "skipped"]
+
+    def test_cancelled_while_queued_can_be_retried_all(self, client, image_dir, background):
+        """回归：整批取消后「一键全部重试」要有候选，不能一条都找不到。"""
+        job = _create(client, image_dir, background)
+        client.post(f"/api/v1/background/jobs/{job['id']}/cancel")
+
+        response = client.post(f"/api/v1/background/jobs/{job['id']}/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == "pending"
+        assert [it["status"] for it in data["items"]] == ["pending"] * 3
+        assert data["completed_images"] == 0
+
 
 class TestRemark:
     def test_set_and_clear(self, client, image_dir, background):
@@ -662,3 +710,5 @@ class TestRetryWithRunner:
         assert refreshed.status == BackgroundJobStatus.SUCCESS
         assert refreshed.completed_images == 3
         assert refreshed.failed_images == 0
+
+

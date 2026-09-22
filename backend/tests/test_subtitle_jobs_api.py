@@ -479,6 +479,50 @@ class TestCancelAndDelete:
         response = client.delete(f"/api/v1/subtitle/jobs/{data['id']}")
         assert response.status_code == 409
 
+    def test_cancel_while_queued_marks_items_skipped(self, client, video_dir, tmp_path):
+        """排队中就被取消：条目不能留在「等待中」。
+
+        认领要求 status == pending，任务一旦置成 cancelled 就再也不会被认领，
+        留在 pending 的条目既不会被执行、也不计入 failed / skipped。
+        """
+        source, _ = video_dir
+        data = _create_job(client, source, tmp_path / "字幕")
+
+        cancelled = client.post(f"/api/v1/subtitle/jobs/{data['id']}/cancel").json()["data"]
+        assert cancelled["status"] == "cancelled"
+        assert all(item["status"] == "skipped" for item in cancelled["items"])
+        assert "已取消" in cancelled["items"][0]["error_message"]
+        assert cancelled["skipped_videos"] == len(cancelled["items"])
+        assert cancelled["failed_videos"] == 0 and cancelled["completed_videos"] == 0
+
+    def test_cancelled_while_queued_can_be_retried(self, client, video_dir, tmp_path):
+        """回归：排队中被取消的任务必须能单条重试。
+
+        条目若留在 pending，重试会被 409 拒掉（「只有失败或跳过的条目才能重试」），
+        而页面上一个重试入口都不会出现。
+        """
+        source, _ = video_dir
+        data = _create_job(client, source, tmp_path / "字幕")
+        client.post(f"/api/v1/subtitle/jobs/{data['id']}/cancel")
+
+        response = client.post(f"/api/v1/subtitle/jobs/{data['id']}/items/1/retry")
+        assert response.status_code == 200, response.text
+        retried = response.json()["data"]
+        assert retried["status"] == "pending"
+        assert next(it for it in retried["items"] if it["index"] == 1)["status"] == "pending"
+
+    def test_cancelled_while_queued_can_be_retried_all(self, client, video_dir, tmp_path):
+        """回归：整批取消后「一键全部重试」要有候选，不能一条都找不到。"""
+        source, _ = video_dir
+        data = _create_job(client, source, tmp_path / "字幕")
+        client.post(f"/api/v1/subtitle/jobs/{data['id']}/cancel")
+
+        response = client.post(f"/api/v1/subtitle/jobs/{data['id']}/retry")
+        assert response.status_code == 200, response.text
+        retried = response.json()["data"]
+        assert retried["status"] == "pending"
+        assert all(item["status"] == "pending" for item in retried["items"])
+
 
 class TestBatchDelete:
     """批量删除：整批成功或整批失败（POST /jobs/batch-delete）。"""
@@ -714,18 +758,41 @@ class TestRetry:
     def test_unknown_job_is_404(self, client):
         assert client.post("/api/v1/subtitle/jobs/999/items/1/retry").status_code == 404
 
-    def test_stale_subtitle_is_removed(self, client, db_session, video_dir, tmp_path):
-        """重试前清掉这条的旧 .srt：产物路径按条目定死，留着会让判据失真 ——
-        用户看到的会是上一轮的文本，而不是这一轮的结果。"""
+    def test_retained_subtitle_is_kept(self, client, db_session, video_dir, tmp_path):
+        """重试不删上一轮已经写好的字幕。
+
+        被取消的条目**可能确实有产物**：执行器写完 .srt 才发现被取消时，会特意
+        告诉用户「任务已取消，但字幕已生成（已保留在输出目录）」
+        （subtitle_runner 里 aborted == "cancelled" 那一支）。既然答应保留了，
+        重试就不能反手把它删掉 —— 用户手里那份字幕会凭空消失。
+        三个派生字段（subtitle_exists / file_size / segment_count）同样保留：
+        条目重跑完 _collect_result 会按新文件的实际情况重新推导，不会失真。
+        """
         source, _ = video_dir
         job = _create_job(client, source, tmp_path / "字幕")
-        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.SKIPPED})
+        # 手工摆出「字幕已写好、随后被取消」的形状：_collect_result 先写
+        # subtitle_exists，_skip_item 再改状态（_settle 只给成功的条目写文件）
         item = db_session.get(SubtitleJob, job["id"]).items[0]
-        stale = Path(item.output_path)
-        stale.write_text("上一轮写了一半", encoding="utf-8")
+        kept = Path(item.output_path)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_text(DEFAULT_SRT, encoding="utf-8")
+        item.subtitle_exists = True
+        item.file_size = kept.stat().st_size
+        item.segment_count = 2
+        item.error_message = "任务已取消，但字幕已生成（已保留在输出目录）"
+        db_session.commit()
 
-        client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/1/retry")
-        assert not stale.exists()
+        data = client.post(
+            f"/api/v1/subtitle/jobs/{job['id']}/items/1/retry"
+        ).json()["data"]
+
+        assert kept.is_file(), "重试不该删掉已经保留给用户的字幕"
+        retried = next(it for it in data["items"] if it["index"] == 1)
+        assert retried["status"] == "pending"
+        assert retried["subtitle_exists"] is True
+        # 字幕还在，计数就该照旧算它一份
+        assert data["subtitle_count"] == 2
 
     def test_counts_are_recounted(self, client, db_session, video_dir, tmp_path):
         """completed / subtitle_count 都是执行器 += 1 出来的、收尾不会重算，

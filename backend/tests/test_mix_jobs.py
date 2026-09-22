@@ -305,6 +305,48 @@ class TestJobLifecycle:
         # 终态不能再取消
         assert client.post(f"/api/v1/mix/jobs/{job['id']}/cancel").status_code == 409
 
+    def test_cancel_while_queued_marks_outputs_skipped(self, client, materials):
+        """排队中就被取消：成片条目不能留在「等待中」。
+
+        认领要求 status == pending，任务一旦置成 cancelled 就再也不会被认领，
+        留在 pending 的条目既不会被执行、也不计入 failed / skipped。
+        """
+        job = self._create(client, materials, count=2)
+        data = client.post(f"/api/v1/mix/jobs/{job['id']}/cancel").json()["data"]
+
+        assert data["status"] == "cancelled"
+        assert [out["status"] for out in data["outputs"]] == ["skipped", "skipped"]
+        assert "已取消" in data["outputs"][0]["error_message"]
+        assert data["skipped_outputs"] == 2
+        assert data["failed_outputs"] == 0 and data["completed_outputs"] == 0
+
+    def test_cancelled_while_queued_can_be_retried(self, client, materials):
+        """回归：排队中被取消的任务必须能单条重试。
+
+        条目若留在 pending，重试会被 409 拒掉（「只有失败或跳过的条目才能重试」），
+        而页面上一个重试入口都不会出现。
+        """
+        job = self._create(client, materials, count=2)
+        client.post(f"/api/v1/mix/jobs/{job['id']}/cancel")
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == "pending"
+        # 只有被点名的那条回队，另一条保持「已跳过」
+        assert [out["status"] for out in data["outputs"]] == ["skipped", "pending"]
+
+    def test_cancelled_while_queued_can_be_retried_all(self, client, materials):
+        """回归：整批取消后「一键全部重试」要有候选，不能一条都找不到。"""
+        job = self._create(client, materials, count=2)
+        client.post(f"/api/v1/mix/jobs/{job['id']}/cancel")
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == "pending"
+        assert all(out["status"] == "pending" for out in data["outputs"])
+
     def test_delete_terminal_job_keeps_files(self, client, materials, tmp_path):
         job = self._create(client, materials)
         client.post(f"/api/v1/mix/jobs/{job['id']}/cancel")
