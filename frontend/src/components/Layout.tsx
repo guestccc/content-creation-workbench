@@ -3,6 +3,7 @@ import {
   DashboardOutlined,
   FileTextOutlined,
   FontSizeOutlined,
+  PictureOutlined,
   RocketOutlined,
   ScissorOutlined,
   SoundOutlined,
@@ -60,6 +61,7 @@ const NAV_ITEMS: (NavLeaf | NavGroup)[] = [
     children: [
       { key: '/crawl', label: '素材抓取', icon: <CloudDownloadOutlined /> },
       { key: '/creators', label: '创作者主页', icon: <TeamOutlined /> },
+      { key: '/background', label: '一键换背景', icon: <PictureOutlined /> },
     ],
   },
 ]

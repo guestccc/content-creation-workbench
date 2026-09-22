@@ -189,6 +189,8 @@ export interface FsEntry {
   path: string
   is_dir: boolean
   is_video: boolean
+  /** 是否为可处理的图片文件（换背景页据此挑原图）；白名单与视频分开，一张图不会同时被标成视频 */
+  is_image: boolean
   size_bytes: number | null
 }
 
@@ -201,6 +203,8 @@ export interface FsListData {
   entries: FsEntry[]
   truncated: boolean
   video_count: number
+  /** 当前目录下（不含子目录）的图片文件数 */
+  image_count: number
 }
 
 /** 收藏的一个目录 */

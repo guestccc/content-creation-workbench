@@ -177,12 +177,24 @@ function copyJobColumns(
     {
       title: '操作',
       key: 'actions',
-      width: 180,
+      width: 220,
       render: (_, record) => (
         <Space size={4}>
           <Button type="link" style={{ padding: 0 }} onClick={() => void flow.openCopyJob(record.id)}>
             查看
           </Button>
+          {/* 文案任务没有条目级状态，重试 = 按原参数另起一条新任务（新 id）。
+              只有没跑出结果的才给点：跑成功的重跑一遍没有意义 */}
+          {isTerminalStatus(record.status) &&
+            (record.status === 'failed' || record.status === 'cancelled') && (
+              <Button
+                type="link"
+                style={{ padding: 0 }}
+                onClick={() => void flow.retryCopyJobById(record.id)}
+              >
+                重试
+              </Button>
+            )}
           {!isTerminalStatus(record.status) ? (
             <Button
               type="link"
@@ -708,13 +720,13 @@ export default function FinalCut() {
         )}
       </Modal>
 
-      {/* 本地文件选择（DirectoryPicker 的文件模式：传了 fileExtensions 才列出文件） */}
+      {/* 本地文件选择（DirectoryPicker 的文件模式：传了 fileExtensions 才列出文件；
+          这种用途只选文件，不必给 onSelect） */}
       <DirectoryPicker
         open={picker.active === 'subtitleFile'}
         title="选择字幕文件"
         fileExtensions={SUBTITLE_EXTENSIONS}
         onSelectFile={(path) => flow.selectSubtitle(localFileToMaterial(path))}
-        onSelect={() => undefined}
         onClose={picker.close}
       />
       <DirectoryPicker
@@ -722,7 +734,6 @@ export default function FinalCut() {
         title="选择成片视频"
         fileExtensions={VIDEO_EXTENSIONS}
         onSelectFile={(path) => flow.selectVideo(localFileToMaterial(path))}
-        onSelect={() => undefined}
         onClose={picker.close}
       />
 

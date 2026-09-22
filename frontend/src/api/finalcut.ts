@@ -89,6 +89,17 @@ export function cancelCopyJob(jobId: number): Promise<FinalcutCopyJob> {
   return post<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}/cancel`)
 }
 
+/**
+ * 重试整条文案任务：后端按原参数**新建一条任务**并返回它（新 id、新一批文案）。
+ *
+ * 文案任务没有条目级状态（一次 AI 调用产出一批文案），所以只有整任务重跑这一种
+ * 形态；而必须是新建 —— 一条任务的产物就是「那一批文案」，就地重跑会把上一批
+ * 覆盖掉，历史记录与产物再也对不上。语速照抄当时快照的值，不跟今天的全局默认。
+ */
+export function retryCopyJob(jobId: number): Promise<FinalcutCopyJob> {
+  return post<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}/retry`)
+}
+
 /** 更新文案任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
 export function updateCopyJobRemark(jobId: number, remark: string): Promise<FinalcutCopyJob> {
   return put<FinalcutCopyJob>(`/finalcut/copy-jobs/${jobId}/remark`, { remark })

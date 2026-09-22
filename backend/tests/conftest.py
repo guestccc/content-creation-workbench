@@ -115,6 +115,19 @@ def _fake_mc_installed(monkeypatch, tmp_path):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_background_worker(monkeypatch):
+    """一键换背景的后台线程在测试里一律不启动。
+
+    与 CRAWL_WORKER_ENABLED 同一个理由：worker 一旦起来就会去认领真实数据库里
+    的 pending 任务并真的跑抠图，测试会变成「看运气」。需要验证 worker 行为的
+    用例自己构造 BackgroundJobWorker 并注入假依赖，不走这个开关。
+    """
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "BACKGROUND_WORKER_ENABLED", False)
+
+
 @pytest.fixture()
 def _isolate_crawl_output(monkeypatch, tmp_path):
     """把爬虫任务的输出目录指到 tmp（materials/crawl 在开发机上是真实目录）。

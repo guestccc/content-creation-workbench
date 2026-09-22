@@ -54,6 +54,7 @@ import DirectoryPicker from '../components/DirectoryPicker'
 import HistoryCard from '../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../components/JobProgressCard'
 import JobRemarkModal from '../components/JobRemarkModal'
+import RetryAllButton from '../components/RetryAllButton'
 import SourceDirCard from '../components/SourceDirCard'
 import VideoPreviewModal from '../components/VideoPreviewModal'
 import {
@@ -88,6 +89,7 @@ import {
   fetchSceneSummary,
   fetchSceneTemplates,
   retrySceneItem,
+  retrySceneJob,
   updateSceneJobRemark,
 } from '../api/scene'
 import {
@@ -306,18 +308,39 @@ export default function SceneSplit() {
   }
 
   /**
-   * 重试单条失败的视频：条目重置回 pending、任务重新入队。
-   *
-   * 返回的是整个任务的新状态，两处都要对上号地刷新：进度卡那条（页面的
-   * 当前任务）和历史弹窗里正在看的那条 —— 对不上号的保持原样，互不干扰。
+   * 重试接口返回的是**整条任务**的新状态，三处状态源都要对上号地刷新：
+   * 页面上方那张当前任务卡、历史「查看」弹窗里那条、历史列表的行。
+   * 对不上号的保持原样，互不干扰。
+   */
+  const applyRetried = (updated: SceneJob) => {
+    runner.setJob((current) => (current?.id === updated.id ? updated : current))
+    setDetailJob((current) => (current?.id === updated.id ? updated : current))
+    history.reload()
+  }
+
+  /**
+   * 重试单条没有产出的视频（失败 / 跳过）：条目重置回 pending、任务重新入队。
    */
   const retryItem = async (target: SceneJob, item: SceneJobItem) => {
     try {
-      const updated = await retrySceneItem(target.id, item.index)
-      runner.setJob((current) => (current?.id === updated.id ? updated : current))
-      setDetailJob((current) => (current?.id === updated.id ? updated : current))
-      history.reload()
+      applyRetried(await retrySceneItem(target.id, item.index))
       message.success(`已重新入队：${item.source_name}`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
+  /**
+   * 重试全部未完成的视频。
+   *
+   * 走一条批量接口而不是循环调单条：第一次调用就把任务置回 pending，循环里
+   * 第二次会撞上「任务尚未结束」的 409 而半途而废。
+   */
+  const retryAll = async (target: SceneJob) => {
+    const count = target.failed_videos + target.skipped_videos
+    try {
+      applyRetried(await retrySceneJob(target.id))
+      message.success(`已重新入队 ${count} 条`)
     } catch (error) {
       fail(error, '重试失败')
     }
@@ -684,19 +707,28 @@ export default function SceneSplit() {
           outputDir={job.output_dir}
         >
           {/* 每个视频的处理明细；片段结果统一在这里/历史弹窗里下钻查看，
-              不再在页面上铺开一整个网格；失败的条目可单独重试 */}
+              不再在页面上铺开一整个网格；没有产出的条目可单独重试或一键全补 */}
           {job.items.length > 0 && (
-            <Table
-              style={{ marginTop: 12 }}
-              rowKey="id"
-              pagination={false}
-              dataSource={job.items}
-              columns={buildItemColumns(
-                job,
-                (item) => void openItemDetail(job, item),
-                (item) => void retryItem(job, item),
+            <>
+              {isTerminalStatus(job.status) && (
+                <Flex justify="flex-end" style={{ marginTop: 12 }}>
+                  <RetryAllButton
+                    count={job.failed_videos + job.skipped_videos}
+                    onRetry={() => void retryAll(job)}
+                  />
+                </Flex>
               )}
-            />
+              <Table
+                rowKey="id"
+                pagination={false}
+                dataSource={job.items}
+                columns={buildItemColumns(
+                  job,
+                  (item) => void openItemDetail(job, item),
+                  (item) => void retryItem(job, item),
+                )}
+              />
+            </>
           )}
         </JobProgressCard>
       )}
@@ -784,6 +816,7 @@ export default function SceneSplit() {
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
           onEditRemark: remark.open,
+          onRetry: (target) => void retryAll(target),
           purge,
         })}
         dataSource={history.items}
@@ -863,16 +896,24 @@ export default function SceneSplit() {
               )}
 
               {/* 还在跑的时候这个弹窗自己会轮询，进度列是活的 */}
+              {isTerminalStatus(detailJob.status) && (
+                <Flex justify="flex-end">
+                  <RetryAllButton
+                    count={detailJob.failed_videos + detailJob.skipped_videos}
+                    onRetry={() => void retryAll(detailJob)}
+                  />
+                </Flex>
+              )}
               <Table
                 rowKey="id"
                 pagination={false}
                 dataSource={detailJob.items}
                 locale={{ emptyText: <Empty description="这条任务没有视频明细" /> }}
                 columns={buildItemColumns(
-                detailJob,
-                (item) => void openItemDetail(detailJob, item),
-                (item) => void retryItem(detailJob, item),
-              )}
+                  detailJob,
+                  (item) => void openItemDetail(detailJob, item),
+                  (item) => void retryItem(detailJob, item),
+                )}
               />
             </Space>
           )
@@ -1082,7 +1123,7 @@ function renderItemProgress(record: SceneJobItem, job: SceneJob | null): ReactNo
  * 视频清单的列定义：页面上的进度卡和「查看」弹窗共用一套。
  *
  * 传了 onView / onRetry 才多一列「操作」—— 有结果（片段或切点）的行给
- * 下钻入口；任务已终态且条目失败时给重试入口。
+ * 下钻入口；任务已终态且条目没有产出（失败 / 跳过）时给重试入口。
  */
 function buildItemColumns(
   job: SceneJob | null,
@@ -1151,9 +1192,14 @@ function buildItemColumns(
       title: '操作',
       width: 96,
       render: (_: unknown, record: SceneJobItem) => {
-        // 任务还在跑时重跑没有意义（后端也会拒），只留查看
+        // 任务还在跑时重跑没有意义（后端也会拒），只留查看。
+        // 可重试 = 「没有产出」：failed 是跑了但失败，skipped 是被取消 /
+        // 服务重启时压根没轮到 —— 后者在重启恢复后是最常见的情形。
         const retryable =
-          onRetry !== undefined && record.status === 'failed' && job !== null && isTerminalStatus(job.status)
+          onRetry !== undefined &&
+          (record.status === 'failed' || record.status === 'skipped') &&
+          job !== null &&
+          isTerminalStatus(job.status)
         const viewable = record.clip_count > 0 || (record.scenes?.length ?? 0) > 0
         if (!retryable && !viewable) {
           // 没东西可看的（还没轮到、单镜头）别给一排点了没反应的链接
@@ -1297,6 +1343,7 @@ function historyColumns(handlers: {
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
   onEditRemark: (job: SceneJob) => void
+  onRetry: (job: SceneJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<SceneJob> {
   return [
@@ -1320,6 +1367,9 @@ function historyColumns(handlers: {
       onDelete: handlers.onDelete,
       deleteDescription: '删除后不可恢复。',
       purge: handlers.purge,
+      // 列表接口不带逐条明细，只能靠行上的计数判断还有没有没产出的
+      onRetry: handlers.onRetry,
+      canRetry: (job) => job.failed_videos + job.skipped_videos > 0,
     }),
   ]
 }

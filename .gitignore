@@ -85,7 +85,8 @@ cli/.venv/
 # 同样被挡住。
 #
 # 但目录骨架与说明要留在仓库里：README.md 讲清楚每一段放什么，
-# 各分段（source / clips / subtitle / output / crawl / dubbing）各带一个 .gitkeep 占位 ——
+# 各分段（source / clips / subtitle / output / crawl / finalcut / dubbing /
+# background）各带一个 .gitkeep 占位 ——
 # git 不跟踪空目录，没有占位文件新克隆下来就只剩一个空文件夹。
 # 后端启动时也会按 app/core/materials.py 的规划补建，两边互为兜底。
 #
@@ -103,8 +104,12 @@ materials/**
 !materials/output/.gitkeep
 !materials/crawl/
 !materials/crawl/.gitkeep
+!materials/finalcut/
+!materials/finalcut/.gitkeep
 !materials/dubbing/
 !materials/dubbing/.gitkeep
+!materials/background/
+!materials/background/.gitkeep
 
 # ==========================================================================
 # doubao/（豆包素材目录：图片 / 视频 / 规范文档）

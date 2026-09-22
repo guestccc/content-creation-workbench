@@ -64,6 +64,10 @@ class SubtitleJobItemStatus:
     ALL: tuple = (PENDING, RUNNING, SUCCESS, FAILED, SKIPPED)
     TERMINAL: tuple = (SUCCESS, FAILED, SKIPPED)
 
+    # 可重试 = 「没产出」的那两种：failed 是跑了但失败，skipped 是压根没轮到
+    # （取消 / 服务重启）。成功的重跑没有意义，pending / running 的正在被跑。
+    RETRYABLE: tuple = (FAILED, SKIPPED)
+
 
 class SubtitleJob(Base, JobRemarkMixin):
     """字幕提取任务表。"""

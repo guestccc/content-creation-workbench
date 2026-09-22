@@ -14,9 +14,10 @@
        └──取消──> cancelled（running 中取消：当前条目标记后同样落到 cancelled）
 
 终态（success / partial / failed / cancelled）只能通过删除记录清理，
-不自动重试 —— 视频文件损坏是确定性错误，自动重跑只会再浪费几分钟；
-但提供**单条视频的手动重试**（retry_item）：把 failed 条目重置回 pending、
-任务重新入队，由用户决定哪条值得再跑一次。
+不提供**自动**重试 —— 视频文件损坏是确定性错误，自动重跑只会再浪费几分钟；
+但用户手动点「重试」要能做（见 retry_item / retry_items）：把 failed / skipped
+的条目重置回 pending、任务重新入队 —— 取消 / 服务重启之后剩下的那几条是
+skipped，没有这个入口就只能整条任务重来、成功的白跑一遍。
 """
 
 import shutil
@@ -31,7 +32,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, DatabaseError, NotFoundError
 from app.core.logging import get_logger
-from app.core import video_files
+from app.core import media_files
 from app.core.scene_templates import resolve_params
 from app.db.session import transaction
 from app.models.content import utcnow
@@ -57,10 +58,10 @@ logger = get_logger(__name__)
 def is_video_file(name: str) -> bool:
     """按后端配置的扩展名白名单判断是否为可处理的视频文件。
 
-    实现在 core/video_files.py（字幕提取要用同一套规则），这里只是把
+    实现在 core/media_files.py（字幕提取与换背景要用同一套规则），这里只是把
     扩展名白名单填上本功能的配置 —— 调用方（含 api/v1/fs.py）保持原样。
     """
-    return video_files.is_video_file(name, settings.SCENE_INPUT_EXTENSIONS)
+    return media_files.is_media_file(name, settings.SCENE_INPUT_EXTENSIONS)
 
 
 def enumerate_videos(
@@ -68,9 +69,9 @@ def enumerate_videos(
 ) -> List[Path]:
     """把输入路径展开成一份确定的视频清单（白名单与批量上限取本功能的配置）。
 
-    规则与异常见 core/video_files.enumerate_videos —— 那里是唯一实现。
+    规则与异常见 core/media_files.enumerate_videos —— 那里是唯一实现。
     """
-    return video_files.enumerate_videos(
+    return media_files.enumerate_videos(
         input_path,
         recursive=recursive,
         files=files,
@@ -436,88 +437,23 @@ class SceneJobService:
         return job_ids
 
     def retry_item(self, job_id: int, item_index: int) -> SceneJob:
-        """重试单条失败的视频：条目重置回 pending，任务重新入队。
+        """重试单条「没产出」的视频：条目重置回 pending，任务重新入队。
 
-        前置条件：任务已终态、条目状态是 failed —— 正在跑的任务没法重试，
-        成功/跳过的条目也没有重跑的意义（要重跑就新建任务）。
-
-        条目的输出目录会先清空：进度按目录里片段文件数统计、结果按目录
-        里片段文件数收集（见 scene_runner），上次的残留会把重跑的进度和
-        产物数全部污染。目录本身归属该条目独占，清空不会误伤别的视频。
-
-        计数口径：completed_videos 重置为「除被重试条目外已终态的条目数」，
-        failed/skipped 清零 —— 它们会在重跑过程中由执行器按条目重新累计，
-        收尾时 _finalize 再按条目状态重算一遍。
+        前置条件：任务已终态、且该条目是 failed 或 skipped —— 正在跑的任务没法
+        重试（工作线程正拿着它），已成功的条目重跑没有意义（要重跑就新建任务）。
 
         Raises:
             NotFoundError: 任务或条目不存在。
-            ConflictError: 任务未结束，或条目不是 failed 状态。
+            ConflictError: 任务未结束，或该条目不是 failed / skipped。
             DatabaseError: 写库失败（事务已回滚）。
         """
         try:
             with transaction(self.db):
                 job = self._get_job_or_404(job_id)
-
-                if job.status not in SceneJobStatus.TERMINAL:
-                    raise ConflictError(f"任务尚未结束（{job.status}），无法重试")
-
-                item = next(
-                    (entry for entry in job.items if entry.index == item_index), None
-                )
-                if item is None:
-                    raise NotFoundError(
-                        f"任务条目不存在：job={job_id}, index={item_index}"
-                    )
-                if item.status != SceneJobItemStatus.FAILED:
-                    raise ConflictError(
-                        f"只有失败的条目才能重试（当前状态：{item.status}）"
-                    )
-
-                out_dir = Path(item.output_dir)
-                if out_dir.is_dir():
-                    for stale in out_dir.iterdir():
-                        try:
-                            if stale.is_dir():
-                                shutil.rmtree(stale, ignore_errors=True)
-                            else:
-                                stale.unlink()
-                        except OSError as exc:
-                            logger.warning(
-                                "清理重试前的残留产物失败，跳过该文件 | %s | %s", stale, exc
-                            )
-                out_dir.mkdir(parents=True, exist_ok=True)
-
-                item.status = SceneJobItemStatus.PENDING
-                item.error_message = ""
-                item.exit_code = None
-                item.started_at = None
-                item.finished_at = None
-                item.elapsed_seconds = 0
-                item.scene_count = 0
-                item.scenes = None
-                item.clip_count = 0
-                item.clip_names = []
-                item.failed_clip_count = 0
-                item.single_shot = False
-
-                job.status = SceneJobStatus.PENDING
-                job.error_message = ""
-                job.started_at = None
-                job.finished_at = None
-                job.child_pid = None
-                job.current_index = 0
-                job.current_video = ""
-                job.current_clips = 0
-                job.current_clip_names = []
-                job.current_phase = ""
-                job.current_total_clips = 0
-                job.completed_videos = sum(
-                    1
-                    for entry in job.items
-                    if entry.status == SceneJobItemStatus.SUCCESS
-                )
-                job.failed_videos = 0
-                job.skipped_videos = 0
+                self._ensure_terminal_for_retry(job)
+                item = self._find_item_or_404(job, item_index)
+                self._ensure_item_retryable(item)
+                self._reset_items_for_retry(job, [item])
                 self.db.flush()
 
             logger.info(
@@ -530,6 +466,140 @@ class SceneJobService:
         except SQLAlchemyError as exc:
             logger.exception("重试镜头分割条目失败 | job=%s | item=%s", job_id, item_index)
             raise DatabaseError("重试镜头分割条目失败") from exc
+
+    def retry_items(self, job_id: int) -> SceneJob:
+        """一键重试：把该任务**所有** failed / skipped 的条目一起重新入队。
+
+        批量必须走这一个方法、不能在前端循环调 retry_item —— 第一次调用就把
+        任务置回 pending，第二次会撞上「任务尚未结束」的终态校验。所以终态校验
+        在循环之外只做一次，任务级字段也只在所有条目都重置完之后写一遍。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            ConflictError: 任务未结束，或没有可重试的条目。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                self._ensure_terminal_for_retry(job)
+
+                pending = [
+                    entry
+                    for entry in job.items
+                    if entry.status in SceneJobItemStatus.RETRYABLE
+                ]
+                if not pending:
+                    raise ConflictError(
+                        f"任务 #{job_id} 没有可重试的条目（{job.failed_videos} 条失败、"
+                        f"{job.skipped_videos} 条跳过）"
+                    )
+
+                self._reset_items_for_retry(job, pending)
+                self.db.flush()
+
+            logger.info(
+                "镜头分割任务批量重试入队 | job=%s | 条目数=%s", job_id, len(pending)
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量重试镜头分割任务失败 | job=%s", job_id)
+            raise DatabaseError("批量重试镜头分割任务失败") from exc
+
+    def _ensure_terminal_for_retry(self, job: SceneJob) -> None:
+        """重试的公共前置：任务必须已经结束。
+
+        Raises:
+            ConflictError: 任务还在排队 / 正在跑。
+        """
+        if job.status not in SceneJobStatus.TERMINAL:
+            raise ConflictError(f"任务尚未结束（{job.status}），无法重试")
+
+    def _find_item_or_404(self, job: SceneJob, item_index: int) -> SceneJobItem:
+        """按任务内序号找条目，找不到就 404。
+
+        Raises:
+            NotFoundError: 该序号不在任务里。
+        """
+        item: Optional[SceneJobItem] = next(
+            (entry for entry in job.items if entry.index == item_index), None
+        )
+        if item is None:
+            raise NotFoundError(f"任务条目不存在：job={job.id}, index={item_index}")
+        return item
+
+    @staticmethod
+    def _ensure_item_retryable(item: SceneJobItem) -> None:
+        """只有「没产出」的条目能重试：failed 与 skipped 都是没切出片段。
+
+        skipped 是取消 / 服务重启时压根没轮到的那些 —— 重启恢复的提示语里写着
+        「可直接重新发起」，只放宽 failed 的话那句话兑不了现。
+
+        Raises:
+            ConflictError: 条目是 pending / running / success。
+        """
+        if item.status not in SceneJobItemStatus.RETRYABLE:
+            raise ConflictError(
+                f"只有失败或跳过的条目才能重试（当前状态：{item.status}）"
+            )
+
+    def _reset_items_for_retry(self, job: SceneJob, items: List[SceneJobItem]) -> None:
+        """把给定条目重置回 pending，并把任务重新入队（单条 / 批量共用）。
+
+        条目的输出目录会先清空：进度按目录里片段文件数统计、结果按目录里片段
+        文件数收集（见 scene_runner），上次的残留会把重跑的进度和产物数全部污染。
+        目录本身归属该条目独占，清空不会误伤别的视频。
+
+        计数口径：completed_videos 按条目状态重数（它是执行器 += 1 出来的、
+        收尾的 _finalize 不会重算），failed / skipped 清零 —— 它们会在重跑过程中
+        由执行器按条目重新累计，收尾时 _finalize 再按条目状态重算一遍。
+        """
+        for item in items:
+            out_dir = Path(item.output_dir)
+            if out_dir.is_dir():
+                for stale in out_dir.iterdir():
+                    try:
+                        if stale.is_dir():
+                            shutil.rmtree(stale, ignore_errors=True)
+                        else:
+                            stale.unlink()
+                    except OSError as exc:
+                        logger.warning(
+                            "清理重试前的残留产物失败，跳过该文件 | %s | %s", stale, exc
+                        )
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            item.status = SceneJobItemStatus.PENDING
+            item.error_message = ""
+            item.exit_code = None
+            item.started_at = None
+            item.finished_at = None
+            item.elapsed_seconds = 0
+            item.scene_count = 0
+            item.scenes = None
+            item.clip_count = 0
+            item.clip_names = []
+            item.failed_clip_count = 0
+            item.single_shot = False
+
+        job.status = SceneJobStatus.PENDING
+        job.error_message = ""
+        job.started_at = None
+        job.finished_at = None
+        job.child_pid = None
+        job.current_index = 0
+        job.current_video = ""
+        job.current_clips = 0
+        job.current_clip_names = []
+        job.current_phase = ""
+        job.current_total_clips = 0
+        job.completed_videos = sum(
+            1 for entry in job.items if entry.status == SceneJobItemStatus.SUCCESS
+        )
+        job.failed_videos = 0
+        job.skipped_videos = 0
 
     # ------------------------------------------------------------------
     # 结果汇总

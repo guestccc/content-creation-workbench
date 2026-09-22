@@ -65,11 +65,14 @@ import {
   fetchMixJobs,
   fetchMixLibrary,
   removeMixSource,
+  retryMixJob,
+  retryMixOutput,
   updateMixJobRemark,
 } from '../api/mix'
 import DirectoryPicker from '../components/DirectoryPicker'
 import HistoryCard from '../components/HistoryCard'
 import JobRemarkModal from '../components/JobRemarkModal'
+import RetryAllButton from '../components/RetryAllButton'
 import VideoPreviewModal from '../components/VideoPreviewModal'
 import { jobRemarkColumn, jobStatusColumn } from '../components/jobColumns'
 import {
@@ -606,6 +609,48 @@ export default function MixCut() {
 
   const job = runner.job
 
+  /**
+   * 重试接口返回的是**整条任务**的新状态，三处状态源都要对上号地刷新：
+   * 页面上方那张当前任务卡、历史「查看」弹窗里那条、历史列表的行。
+   * 对不上号的保持原样，互不干扰（重试不经 useJobRunner，列表得手动重载）。
+   */
+  const applyRetried = (updated: MixJob) => {
+    runner.setJob((current) => (current?.id === updated.id ? updated : current))
+    setHistoryDetail((current) => (current?.id === updated.id ? updated : current))
+    history.reload()
+  }
+
+  /**
+   * 重试单条失败 / 跳过的成片。
+   *
+   * ⚠️ 比第一次慢：失败收尾会把归一化好的片段（`.tmp/mix_<id>/norm/`）删掉，
+   * 重试要从归一化开始重跑，那才是耗时大头 —— 接口的 docstring 里写了同一件事。
+   */
+  const retryOutput = async (target: MixJob, output: MixOutputItem) => {
+    try {
+      applyRetried(await retryMixOutput(target.id, output.index))
+      message.success(`已重新入队：第 ${output.index} 条（要重新归一化素材，比第一次慢）`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
+  /**
+   * 重试全部未完成的成片。
+   *
+   * 走一条批量接口而不是循环调单条：第一次调用就把任务置回 pending，循环里
+   * 第二次会撞上「任务尚未结束」的 409 而半途而废。
+   */
+  const retryAll = async (target: MixJob) => {
+    const count = target.failed_outputs + target.skipped_outputs
+    try {
+      applyRetried(await retryMixJob(target.id))
+      message.success(`已重新入队 ${count} 条（要重新归一化素材，比第一次慢）`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
   // ---------- 渲染：选片弹窗 ----------
   /**
    * 给某一段挑素材的弹窗。
@@ -998,9 +1043,19 @@ export default function MixCut() {
     }
     return (
       <Flex vertical gap={12}>
-        <Title level={5} style={{ margin: 0 }}>
-          成片（{target.completed_outputs}/{target.total_outputs}）
-        </Title>
+        {/* 「重试全部」贴着标题摆：这个函数同时给页面上的当前任务和历史详情
+            弹窗渲染，摆在标题行两处自动都有；没跑完时不给点（后端也会 409 挡住） */}
+        <Flex align="center" justify="space-between" gap={12}>
+          <Title level={5} style={{ margin: 0 }}>
+            成片（{target.completed_outputs}/{target.total_outputs}）
+          </Title>
+          {isTerminalStatus(target.status) && (
+            <RetryAllButton
+              count={target.failed_outputs + target.skipped_outputs}
+              onRetry={() => void retryAll(target)}
+            />
+          )}
+        </Flex>
         <div
           style={{
             display: 'grid',
@@ -1063,13 +1118,28 @@ export default function MixCut() {
                     </Tooltip>
                   </>
                 ) : (
-                  output.error_message && (
-                    <Tooltip title={output.error_message}>
-                      <Text type="danger" style={{ fontSize: 12 }} ellipsis>
-                        {output.error_message.split('\n')[0]}
-                      </Text>
-                    </Tooltip>
-                  )
+                  <>
+                    {output.error_message && (
+                      <Tooltip title={output.error_message}>
+                        <Text type="danger" style={{ fontSize: 12 }} ellipsis>
+                          {output.error_message.split('\n')[0]}
+                        </Text>
+                      </Tooltip>
+                    )}
+                    {/* 补跑这一条：可重试 = 「没有产出」——failed 是拼了但失败，
+                        skipped 是被取消 / 服务重启时压根没轮到。任务还在跑时不给点
+                        （后端也会以 409 挡住） */}
+                    {(output.status === 'failed' || output.status === 'skipped') &&
+                      isTerminalStatus(target.status) && (
+                        <Button
+                          type="link"
+                          style={{ padding: 0, fontSize: 12, alignSelf: 'flex-start' }}
+                          onClick={() => void retryOutput(target, output)}
+                        >
+                          重试
+                        </Button>
+                      )}
+                  </>
                 )}
 
                 {/* 这条成片到底拼了哪些片段、什么顺序 —— 多条成片的差别只在中间段，

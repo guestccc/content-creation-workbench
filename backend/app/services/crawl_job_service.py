@@ -15,6 +15,9 @@
 创建时的校验要点（预期内的错误在点击时就报，而不是排队后炸）：
 - 工具没装 / 知乎 creator 没打补丁 / cookie 登录没给 cookie；
 - 模式专属参数：search 要关键词，detail/creator 要非空列表。
+
+重试：本模块**没有条目级状态**（一条任务就是一个 MC 子进程），所以「重试」只有
+整任务重跑一种形态，而且是**新建一条任务**（见 retry_job）。
 """
 
 from pathlib import Path
@@ -247,6 +250,61 @@ class CrawlJobService:
         except SQLAlchemyError as exc:
             logger.exception("素材抓取任务创建失败 | 平台=%s", payload.platform)
             raise DatabaseError("素材抓取任务创建失败") from exc
+
+    # ------------------------------------------------------------------
+    # 重试
+    # ------------------------------------------------------------------
+
+    def retry_job(self, job_id: int) -> CrawlJob:
+        """整任务重跑：拿旧任务的参数**新建一条任务**并返回它。
+
+        为什么是「新建」而不是「就地重跑」：
+
+        1. 输出目录按任务 id 定死（`<materials>/crawl/job_<id>`），就地重跑要么
+           覆盖上一轮的产物、要么多出一套目录归属说不清的任务记录；
+        2. MediaCrawler 的 jsonl 是 **append** 语义、`count_notes` 按行数统计且
+           不去重（services/crawl_results.py）—— 就地重跑会让
+           note_count / crawled_count 虚高一倍，用户看到的数字直接失真。
+
+        为什么必须在服务端做：`login_cookies` 只存在于数据库行里，任何响应
+        schema 都不会带上它（cookie 是登录凭据）—— 前端重建不出「cookie 登录」
+        的任务，只有后端拿得到。
+
+        代价（与新建任务完全一致，不额外说明）：会重新 `probe_environment()`
+        并跑一遍创建时的全部校验，MC 被挪走 / 知乎补丁没打时**点击即 400** ——
+        这正是想要的「失败要快」。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            BadRequestError: 旧任务的参数按今天的规则不再合法（工具没了、补丁没了、
+                参数越界等）—— 由 create_job 抛出。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        source = self.get_job(job_id)
+        params = dict(source.params or {})
+
+        # 只挑 CrawlJobCreate 认的键：params 是 JSON 列，历史任务里可能留着
+        # 已经改名的旧键，多传一个未知键会直接 422。
+        payload = CrawlJobCreate(
+            platform=source.platform,
+            crawler_type=source.crawler_type,
+            login_type=source.login_type,
+            cookies=source.login_cookies or "",
+            keywords=params.get("keywords"),
+            ids=params.get("ids"),
+            creators=params.get("creators"),
+            start_page=params.get("start_page", 1),
+            max_notes=params.get("max_notes", 20),
+            get_comments=params.get("get_comments", True),
+            get_sub_comments=params.get("get_sub_comments", False),
+            max_comments=params.get("max_comments", 10),
+            headless=params.get("headless", False),
+            max_concurrency=params.get("max_concurrency", 1),
+        )
+
+        job = self.create_job(payload)
+        logger.info("素材抓取任务重试（新建） | 原任务=%s | 新任务=%s", job_id, job.id)
+        return job
 
     # ------------------------------------------------------------------
     # 状态流转

@@ -675,6 +675,68 @@ class TestCopyJobLifecycle:
 # ---------------------------------------------------------------------------
 
 
+class TestCopyJobRetry:
+    """重试：按旧任务的参数**新建一条任务**（POST /copy-jobs/{id}/retry）。
+
+    文案任务没有条目级状态（一次 AI 调用产出一批文案），所以只能整任务重跑；
+    而重跑必须是新建 —— 一条任务的产物就是「那一批文案」，就地重跑会把上一批
+    覆盖掉，历史记录与产物再也对不上。
+    """
+
+    def test_retry_creates_a_new_job(self, client, media_files):
+        """返回 201 + 一条全新的 pending 任务，素材与参数原样带过去。"""
+        created = _create_job(client, media_files, copy_count=3, hint="走痛点")
+
+        response = client.post(f"/api/v1/finalcut/copy-jobs/{created['id']}/retry")
+        assert response.status_code == 201, response.text
+        new = response.json()["data"]
+
+        assert new["id"] != created["id"]
+        assert new["status"] == "pending"
+        assert new["subtitle_path"] == created["subtitle_path"]
+        assert new["video_path"] == created["video_path"]
+        assert new["video_duration"] == created["video_duration"]
+        assert new["copy_count"] == 3
+        assert new["hint"] == "走痛点"
+        assert new["result"] is None and new["error_message"] == ""
+
+    def test_old_job_is_not_touched(self, client, media_files):
+        """旧任务原样留档：用户要靠它对比两批文案。"""
+        created = _create_job(client, media_files)
+        client.post(f"/api/v1/finalcut/copy-jobs/{created['id']}/cancel")
+
+        client.post(f"/api/v1/finalcut/copy-jobs/{created['id']}/retry")
+
+        detail = client.get(f"/api/v1/finalcut/copy-jobs/{created['id']}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["data"]["status"] == "cancelled"
+        assert client.get("/api/v1/finalcut/copy-jobs").json()["data"]["total"] == 2
+
+    def test_rate_is_taken_from_the_snapshot_not_todays_global(self, client, media_files):
+        """重试照抄当时快照的语速，而不是今天的全局默认值。"""
+        created = _create_job(client, media_files, chars_per_second=5.8)
+        settings.FINALCUT_CHARS_PER_SECOND = 4.0
+
+        new = client.post(
+            f"/api/v1/finalcut/copy-jobs/{created['id']}/retry"
+        ).json()["data"]
+
+        assert new["chars_per_second"] == 5.8
+
+    def test_missing_subtitle_fails_fast_400(self, client, media_files, tmp_path):
+        """素材已删时点击即 400，且不留下半条任务记录。"""
+        created = _create_job(client, media_files)
+        (tmp_path / "字幕.srt").unlink()
+
+        response = client.post(f"/api/v1/finalcut/copy-jobs/{created['id']}/retry")
+        assert response.status_code == 400, response.text
+        assert "字幕文件不存在" in response.json()["error"]["message"]
+        assert client.get("/api/v1/finalcut/copy-jobs").json()["data"]["total"] == 1
+
+    def test_unknown_job_is_404(self, client):
+        assert client.post("/api/v1/finalcut/copy-jobs/9999/retry").status_code == 404
+
+
 class TestCopyJobRemark:
     """备注是给用户自己看的标记：写过之后详情与列表都要回显。"""
 

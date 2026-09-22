@@ -382,6 +382,105 @@ class TestRetryItem:
         response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/99/retry")
         assert response.status_code == 404, response.text
 
+    def test_retry_skipped_item_too(self, client, video_dir, tmp_path, db_session):
+        """取消 / 服务重启留下的 skipped 也能重来 —— 它同样「没有产出」。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        job = db_session.get(SceneJob, created["id"])
+        job.items[0].status = SceneJobItemStatus.SUCCESS
+        job.items[1].status = SceneJobItemStatus.SKIPPED
+        job.status = SceneJobStatus.CANCELLED
+        db_session.commit()
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        items = {item["index"]: item for item in response.json()["data"]["items"]}
+        assert items[2]["status"] == "pending"
+        assert items[1]["status"] == "success"
+
+
+class TestRetryAll:
+    """一键重试：失败 + 跳过的条目一起重新入队，成功的原样不动。"""
+
+    @staticmethod
+    def _settle(db_session, job_id: int, statuses: dict, *, job_status: str) -> None:
+        """把任务摆成「跑完了、但有几条没成」的样子。"""
+        job = db_session.get(SceneJob, job_id)
+        for item in job.items:
+            item.status = statuses.get(item.index, SceneJobItemStatus.SUCCESS)
+            if item.status == SceneJobItemStatus.SUCCESS:
+                item.clip_count = 2
+                item.clip_names = [f"c{item.index:03d}.mp4"]
+            else:
+                item.error_message = f"第 {item.index} 条失败了"
+        job.status = job_status
+        job.completed_videos = len(job.items)
+        job.failed_videos = sum(
+            1 for it in job.items if it.status == SceneJobItemStatus.FAILED
+        )
+        job.skipped_videos = sum(
+            1 for it in job.items if it.status == SceneJobItemStatus.SKIPPED
+        )
+        db_session.commit()
+
+    @staticmethod
+    def _create_three(client, video_dir, tmp_path) -> dict:
+        """建一条 3 条视频的任务：批量重试要同时覆盖「成功保留 + 失败 + 跳过」。"""
+        source, _ = video_dir
+        (source / "口播C.mp4").write_bytes(b"fake-video-c")
+        return _create_split_job(client, source, tmp_path / "输出")
+
+    def test_every_unfinished_item_is_requeued(self, client, video_dir, tmp_path, db_session):
+        created = self._create_three(client, video_dir, tmp_path)
+        self._settle(
+            db_session,
+            created["id"],
+            {2: SceneJobItemStatus.FAILED, 3: SceneJobItemStatus.SKIPPED},
+            job_status=SceneJobStatus.CANCELLED,
+        )
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert data["status"] == "pending"
+        assert [item["status"] for item in data["items"]] == [
+            "success", "pending", "pending",
+        ]
+        assert data["completed_videos"] == 1
+        assert data["failed_videos"] == 0 and data["skipped_videos"] == 0
+
+    def test_second_call_is_409(self, client, video_dir, tmp_path, db_session):
+        """第一次调用就把任务置回 pending，第二次必须 409 —— 这正是「批量不能
+        在前端循环调单条」要防的场景（循环会在第二次 409 时半途而废）。"""
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        self._settle(
+            db_session, created["id"], {2: SceneJobItemStatus.FAILED},
+            job_status=SceneJobStatus.PARTIAL,
+        )
+
+        assert client.post(f"/api/v1/scene/jobs/{created['id']}/retry").status_code == 200
+        second = client.post(f"/api/v1/scene/jobs/{created['id']}/retry")
+        assert second.status_code == 409, second.text
+        assert "尚未结束" in second.json()["error"]["message"]
+
+    def test_nothing_to_retry_is_409(self, client, video_dir, tmp_path, db_session):
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        self._settle(db_session, created["id"], {}, job_status=SceneJobStatus.SUCCESS)
+
+        response = client.post(f"/api/v1/scene/jobs/{created['id']}/retry")
+        assert response.status_code == 409, response.text
+        assert "没有可重试的条目" in response.json()["error"]["message"]
+
+    def test_unfinished_job_cannot_be_retried(self, client, video_dir, tmp_path):
+        source, _ = video_dir
+        created = _create_split_job(client, source, tmp_path / "输出")
+        assert client.post(f"/api/v1/scene/jobs/{created['id']}/retry").status_code == 409
+
+    def test_unknown_job_is_404(self, client):
+        assert client.post("/api/v1/scene/jobs/9999/retry").status_code == 404
+
 
 class TestTemplatesAndEnvironment:
     """模板与环境自检接口。"""

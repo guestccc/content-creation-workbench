@@ -102,6 +102,13 @@ export interface CrawlNote {
   /** 相对任务输出目录的本地图片路径（走 /media 接口取） */
   local_images: string[]
   local_videos: string[]
+  /**
+   * 本地图片所在目录的绝对路径；没有本地图片时为空串。
+   *
+   * 给「一键换背景」用：那边要的是「一个原图目录 + 一批文件名」，
+   * 而 local_images 是相对路径，换不过去。
+   */
+  local_image_dir: string
   source_keyword: string
 }
 

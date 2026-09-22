@@ -265,10 +265,12 @@ class TestLocalMedia:
         video_dir.mkdir(parents=True)
         (video_dir / "v.mp4").write_bytes(b"video")
 
-        images, videos = crawl_results.local_media(tmp_path, "xhs", "n1")
+        images, videos, image_dir = crawl_results.local_media(tmp_path, "xhs", "n1")
         # 排序保证顺序稳定（前端图片墙按这个顺序渲染）
         assert images == ["xhs/images/n1/1.webp", "xhs/images/n1/2.jpg"]
         assert videos == ["xhs/videos/n1/v.mp4"]
+        # 图片目录是绝对路径（下游换背景拿它当原图目录），视频目录不在其中
+        assert Path(image_dir) == folder
 
     def test_dy_uses_long_dir_name(self, tmp_path):
         """jsonl 目录用短名 dy，媒体目录是长名 douyin。"""
@@ -276,16 +278,17 @@ class TestLocalMedia:
         folder.mkdir(parents=True)
         (folder / "0.jpeg").write_bytes(b"img")
 
-        images, videos = crawl_results.local_media(tmp_path, "dy", "a1")
+        images, videos, image_dir = crawl_results.local_media(tmp_path, "dy", "a1")
         assert images == ["douyin/images/a1/0.jpeg"]
         assert videos == []
+        assert Path(image_dir) == folder
 
     def test_weibo_flat_layout_not_associated(self, tmp_path):
         """微博图片平铺无 note_id 目录：按笔记关联无意义，返回空。"""
         folder = tmp_path / "weibo" / "images"
         folder.mkdir(parents=True)
         (folder / "pic1.jpg").write_bytes(b"img")
-        assert crawl_results.local_media(tmp_path, "wb", "w1") == ([], [])
+        assert crawl_results.local_media(tmp_path, "wb", "w1") == ([], [], "")
 
     def test_collect_results_attaches_media(self, tmp_path):
         _write_jsonl(tmp_path, "xhs", "search_contents_a.jsonl", [mc_note("n1")])
@@ -296,6 +299,15 @@ class TestLocalMedia:
         notes = crawl_results.collect_results(tmp_path, "xhs")
         assert notes[0]["local_images"] == ["xhs/images/n1/1.webp"]
         assert notes[0]["local_videos"] == []
+        assert Path(notes[0]["local_image_dir"]) == folder
+
+    def test_collect_results_without_local_images_has_empty_dir(self, tmp_path):
+        """没下载媒体时目录是空串而不是一个不存在的路径 —— 前端据此禁用入口。"""
+        _write_jsonl(tmp_path, "xhs", "search_contents_a.jsonl", [mc_note("n1")])
+
+        notes = crawl_results.collect_results(tmp_path, "xhs")
+        assert notes[0]["local_images"] == []
+        assert notes[0]["local_image_dir"] == ""
 
 
 class TestMediaFileGate:

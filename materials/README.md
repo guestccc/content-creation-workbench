@@ -15,7 +15,8 @@ materials/
 ├── crawl/      ④ 素材抓取产物：每次任务一个 job_<id>/ 子目录（小红书图文）
 ├── finalcut/   ⑤ 一键成品产物：每次合成一个 finalcut-<时间戳>/ 子目录
 ├── dubbing/    ⑥ 智能配音产物：每次生成一份 <名字>.wav
-└── output/     ⑦ 成片，待发布
+├── background/ ⑦ 一键换背景产物：每次任务一个 background-<时间戳>/ 子目录
+└── output/     ⑧ 成片，待发布
 ```
 
 | 分段 | 放什么 | 谁写进来的 |
@@ -26,6 +27,7 @@ materials/
 | `crawl/` | 从小红书等平台抓来的图文素材 | 后端。素材抓取页每次任务建 `job_<id>/` 子目录 |
 | `finalcut/` | 一键成品：成片 + 逐字稿 + 过程产物 | 后端。一键成品页每次合成建 `finalcut-<时间戳>/` 子目录 |
 | `dubbing/` | 智能配音产物（.wav 等音频） | 后端。智能配音页每次生成一份 `<名字>.wav`，重名时追加 `-2`、`-3` |
+| `background/` | 一键换背景产物（换好底的整图 PNG） | 后端。换背景页每次任务建 `background-<时间戳>/` 子目录 |
 | `output/` | 拼好待发布的成片 | 后续的合成/导出流程 |
 
 **根目录本身不放东西。** 原片进 `source/`，产物进各自的分段目录 —— 这样
@@ -58,4 +60,4 @@ SCENE_MATERIALS_DIR=/Volumes/素材盘/workbench-materials
 ```
 
 支持 `~` 开头。指到哪儿，`source` / `clips` / `subtitle` / `crawl` / `finalcut` /
-`dubbing` / `output` 就建在哪儿，页面的默认输入/输出目录也跟着走。
+`dubbing` / `background` / `output` 就建在哪儿，页面的默认输入/输出目录也跟着走。

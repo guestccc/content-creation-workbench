@@ -65,9 +65,14 @@ export function updateSceneJobRemark(jobId: number, remark: string): Promise<Sce
   return put<SceneJob>(`/scene/jobs/${jobId}/remark`, { remark })
 }
 
-/** 重试单条失败的视频：条目重置回 pending，任务重新入队（其余条目结果不动） */
+/** 重试单条失败 / 跳过的视频：条目重置回 pending，任务重新入队（其余条目结果不动） */
 export function retrySceneItem(jobId: number, itemIndex: number): Promise<SceneJob> {
   return post<SceneJob>(`/scene/jobs/${jobId}/items/${itemIndex}/retry`)
+}
+
+/** 重试全部失败 / 跳过的视频：一条请求搞定，返回重置后的整条任务 */
+export function retrySceneJob(jobId: number): Promise<SceneJob> {
+  return post<SceneJob>(`/scene/jobs/${jobId}/retry`)
 }
 
 /** 删除任务记录；purgeFiles=true 时连同磁盘上的切片产物一起删除 */

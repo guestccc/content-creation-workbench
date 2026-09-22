@@ -21,6 +21,7 @@ import {
   fetchCopyJob,
   fetchCopyJobSubtitleText,
   fetchFinalcutSources,
+  retryCopyJob,
 } from '../../api/finalcut'
 import { describeError } from '../../api/client'
 import { useJobRunner } from '../../hooks/useJobRunner'
@@ -108,6 +109,8 @@ export interface UseFinalcutFlowResult {
   removeCopyJobs: (ids: number[]) => Promise<boolean>
   /** 取消任意一条文案任务（历史列表用），返回更新后的任务 */
   cancelCopyJobById: (jobId: number) => Promise<FinalcutCopyJob | null>
+  /** 重试任意一条文案任务（历史列表用）：按原参数另起一条新任务 */
+  retryCopyJobById: (jobId: number) => Promise<void>
 }
 
 export interface UseFinalcutFlowOptions {
@@ -170,6 +173,12 @@ export function useFinalcutFlow(
   const apiRef = useRef(api)
   useEffect(() => {
     apiRef.current = api
+  })
+
+  // options 同样进 ref：下面的回调要能在引用恒定的前提下拿到最新的刷新函数
+  const optionsRef = useRef(options)
+  useEffect(() => {
+    optionsRef.current = options
   })
 
   /** 按任务结果重建候选列表（跑完回填 / 从历史点开 共用） */
@@ -265,6 +274,27 @@ export function useFinalcutFlow(
     [copyRunner],
   )
 
+  /**
+   * 重试任意一条文案任务（历史列表里的重试按钮用）：后端按原参数**新建一条
+   * 任务**并返回它（新 id、新一批文案）。
+   *
+   * 文案任务没有条目级状态（一次 AI 调用产出一批文案），只能整任务重跑；
+   * 而必须是新建 —— 一条任务的产物就是「那一批文案」，就地重跑会把上一批
+   * 覆盖掉，历史记录与产物再也对不上。
+   *
+   * 刻意**不把新任务顶成当前任务**：用户此刻在翻历史，不该被拽到第 ② 步去。
+   * 刷新交给 onCopyJobChanged（页面传的是历史列表的 reload）。
+   */
+  const retryCopyJobById = useCallback(async (jobId: number) => {
+    try {
+      const created = await retryCopyJob(jobId)
+      optionsRef.current?.onCopyJobChanged?.()
+      apiRef.current.message.success(`已重新发起：新任务 #${created.id}`)
+    } catch (error) {
+      apiRef.current.fail(error, '重试失败')
+    }
+  }, [])
+
   // ------------------------------------------------------------------
   // 第 ② 步左列：当前任务用的字幕（原文 + 喂给 AI 的素材）
   // ------------------------------------------------------------------
@@ -357,6 +387,7 @@ export function useFinalcutFlow(
     removeCopyJob,
     removeCopyJobs,
     cancelCopyJobById,
+    retryCopyJobById,
   }
 }
 

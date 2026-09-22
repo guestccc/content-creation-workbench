@@ -10,6 +10,7 @@ import pytest
 from pathlib import Path
 
 from app.core.config import settings
+from app.models.mix_job import MixJob, MixOutputStatus
 
 
 @pytest.fixture()
@@ -447,3 +448,205 @@ class TestJobRemark:
         response = client.put("/api/v1/mix/jobs/9999/remark", json={"remark": "x"})
         assert response.status_code == 404, response.text
         assert response.json()["success"] is False
+
+
+def _settle(db_session, job_id: int, statuses: dict, *, job_status: str = "partial"):
+    """把任务摆成「跑完了、但有几条没成」的样子。
+
+    接口测试不真起 ffmpeg（会取决于开发机装没装），所以直接写库把每条成片的
+    状态摆好；任务级计数按同一份 statuses 数一遍，与真跑完之后的记录形状
+    一致 —— 重试的断言（尤其是计数重算）才有意义。
+    """
+    job = db_session.get(MixJob, job_id)
+    assert job is not None
+    for item in job.outputs:
+        item.status = statuses.get(item.index, MixOutputStatus.SUCCESS)
+        if item.status == MixOutputStatus.SUCCESS:
+            path = Path(job.output_dir) / f"{item.index:02d}.mp4"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake-mp4")
+            item.output_path = str(path)
+            item.output_name = path.name
+            item.size_bytes = path.stat().st_size
+        else:
+            item.error_message = f"第 {item.index} 条拼接失败了"
+
+    job.status = job_status
+    job.completed_outputs = len(job.outputs)
+    job.failed_outputs = sum(
+        1 for it in job.outputs if it.status == MixOutputStatus.FAILED
+    )
+    job.skipped_outputs = sum(
+        1 for it in job.outputs if it.status == MixOutputStatus.SKIPPED
+    )
+    db_session.commit()
+    return job
+
+
+class TestRetry:
+    """单条重试：只有「没产出」的成片能重来，任务回到排队中。"""
+
+    def _create(self, client, materials, count=2) -> dict:
+        ids = _library_ids(client)
+        resp = client.post("/api/v1/mix/jobs", json=_create_payload(ids, materials, count))
+        assert resp.status_code == 201, resp.text
+        return resp.json()["data"]
+
+    def test_failed_output_is_requeued(self, client, db_session, materials):
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+
+        assert data["status"] == "pending"
+        assert data["finished_at"] is None
+        assert data["error_message"] == ""
+        assert data["current_phase"] == "" and data["progress_percent"] == 0
+        item = next(it for it in data["outputs"] if it["index"] == 2)
+        assert item["status"] == "pending"
+        assert item["error_message"] == ""
+        assert item["output_path"] == "" and item["output_name"] == ""
+        assert item["size_bytes"] == 0
+
+    def test_order_is_untouched(self, client, db_session, materials):
+        """order 决定这条成片到底怎么拼，重试绝不能换一版顺序。"""
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+        before = next(it for it in job["outputs"] if it["index"] == 2)["order"]
+
+        data = client.post(
+            f"/api/v1/mix/jobs/{job['id']}/items/2/retry"
+        ).json()["data"]
+        after = next(it for it in data["outputs"] if it["index"] == 2)["order"]
+        assert after == before
+
+    def test_skipped_output_is_retryable_too(self, client, db_session, materials):
+        """取消留下的 skipped 也要能重来 —— 它同样「没有产出」。"""
+        job = self._create(client, materials)
+        _settle(
+            db_session,
+            job["id"],
+            {2: MixOutputStatus.SKIPPED},
+            job_status="cancelled",
+        )
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        outputs = response.json()["data"]["outputs"]
+        assert next(it for it in outputs if it["index"] == 2)["status"] == "pending"
+        # 没被点的那条第 1 条保持成功
+        assert next(it for it in outputs if it["index"] == 1)["status"] == "success"
+
+    def test_successful_output_cannot_be_retried(self, client, db_session, materials):
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/1/retry")
+        assert response.status_code == 409
+        assert "只有失败或跳过" in response.json()["error"]["message"]
+
+    def test_unfinished_job_cannot_be_retried(self, client, materials):
+        """还在排队 / 正在跑的任务不能重试（工作线程正拿着它）。"""
+        job = self._create(client, materials)
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/1/retry")
+        assert response.status_code == 409
+        assert "尚未结束" in response.json()["error"]["message"]
+
+    def test_unknown_index_is_404(self, client, db_session, materials):
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/items/9/retry")
+        assert response.status_code == 404
+        assert "任务条目不存在" in response.json()["error"]["message"]
+
+    def test_unknown_job_is_404(self, client):
+        assert client.post("/api/v1/mix/jobs/999/items/1/retry").status_code == 404
+
+    def test_stale_product_is_removed(self, client, db_session, materials):
+        """重试前删掉这条的旧成片：路径按序号定死，留着会让判据失真。"""
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+        out_dir = Path(job["output_dir"])
+        stale = out_dir / "02.mp4"
+        stale.write_bytes(b"half-written")            # 手工造一份残片
+        partial = out_dir / "02.partial.mp4"
+        partial.write_bytes(b"half")
+
+        client.post(f"/api/v1/mix/jobs/{job['id']}/items/2/retry")
+        assert not stale.exists() and not partial.exists()
+        # 其它序号的成片不受影响
+        assert (out_dir / "01.mp4").is_file()
+
+    def test_counts_are_recounted(self, client, db_session, materials):
+        """completed_outputs 是执行器 += 1 出来的、收尾不会重算，重试时必须重数。
+
+        两条里第 2 条失败：重试后 completed 应当是「已成功的 1 条」，
+        而不是原来的 2（那样这条重跑完会变成 3/2）。
+        """
+        job = self._create(client, materials)
+        _settle(db_session, job["id"], {2: MixOutputStatus.FAILED})
+        assert job["total_outputs"] == 2
+
+        data = client.post(
+            f"/api/v1/mix/jobs/{job['id']}/items/2/retry"
+        ).json()["data"]
+        assert data["completed_outputs"] == 1
+        assert data["failed_outputs"] == 0
+        assert data["skipped_outputs"] == 0
+
+
+class TestRetryAll:
+    """一键重试：把失败 + 跳过的成片一起重新入队，成功的原样不动。"""
+
+    def _create(self, client, materials, count=3) -> dict:
+        ids = _library_ids(client)
+        payload = _create_payload(ids, materials, count)
+        # 要 3 条成片就得有 3 条中间段（2 条素材最多排 2 种顺序，count=3 会被拒）
+        payload["middle"] = [ids[1], ids[2], ids[3]]
+        payload["ending"] = [ids[0]]
+        resp = client.post("/api/v1/mix/jobs", json=payload)
+        assert resp.status_code == 201, resp.text
+        return resp.json()["data"]
+
+    def test_every_unfinished_output_is_requeued(self, client, db_session, materials):
+        job = self._create(client, materials)
+        _settle(
+            db_session,
+            job["id"],
+            {2: MixOutputStatus.FAILED, 3: MixOutputStatus.SKIPPED},
+            job_status="cancelled",
+        )
+        kept = Path(job["output_dir"]) / "01.mp4"
+
+        data = client.post(f"/api/v1/mix/jobs/{job['id']}/retry").json()["data"]
+        assert data["status"] == "pending"
+        assert [it["status"] for it in data["outputs"]] == ["success", "pending", "pending"]
+        assert data["completed_outputs"] == 1
+        assert data["failed_outputs"] == 0 and data["skipped_outputs"] == 0
+        assert kept.read_bytes() == b"fake-mp4"
+
+    def test_second_call_is_409(self, client, db_session, materials):
+        """第一次调用就把任务置回 pending，第二次必须 409 —— 这正是「批量不能
+        在前端循环调单条」要防的场景（循环会在第二次 409 时半途而废）。"""
+        job = self._create(client, materials, count=2)
+        _settle(db_session, job["id"], {1: MixOutputStatus.FAILED})
+
+        assert client.post(f"/api/v1/mix/jobs/{job['id']}/retry").status_code == 200
+        second = client.post(f"/api/v1/mix/jobs/{job['id']}/retry")
+        assert second.status_code == 409
+        assert "尚未结束" in second.json()["error"]["message"]
+
+    def test_nothing_to_retry_is_409(self, client, db_session, materials):
+        job = self._create(client, materials, count=2)
+        _settle(db_session, job["id"], {}, job_status="success")
+
+        response = client.post(f"/api/v1/mix/jobs/{job['id']}/retry")
+        assert response.status_code == 409
+        assert "没有可重试的成片" in response.json()["error"]["message"]
+
+    def test_unfinished_job_cannot_be_retried(self, client, materials):
+        job = self._create(client, materials, count=2)
+        assert client.post(f"/api/v1/mix/jobs/{job['id']}/retry").status_code == 409

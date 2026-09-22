@@ -9,9 +9,18 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.models.subtitle_job import (
+    SubtitleJob,
+    SubtitleJobItemStatus,
+    SubtitleJobStatus,
+)
 from app.services import subtitle_settings
 from app.services.subtitle_env import VcInstall
-from tests.fakes import DEFAULT_SRT
+from app.services.subtitle_job_service import SubtitleJobService
+from tests.fakes import DEFAULT_SRT, FakeVcPopen
+# 执行层的夹具（假子进程 + 连测试库的执行器）在 test_subtitle_runner.py 里，
+# 重试「真跑一遍」那条用例直接复用，免得在这里抄第二套假的 VideoCaptioner。
+from tests.test_subtitle_runner import _make_job, _make_runner, _refresh
 
 
 @pytest.fixture(autouse=True)
@@ -596,3 +605,224 @@ class TestUpdateRemark:
         """任务不存在 → 404。"""
         response = client.put("/api/v1/subtitle/jobs/99999/remark", json={"remark": "x"})
         assert response.status_code == 404, response.text
+
+
+def _settle(db_session, job_id: int, statuses: dict, *, job_status: str = "partial"):
+    """把任务摆成「跑完了、但有几条没成」的样子。
+
+    接口测试不真起 VideoCaptioner（会取决于开发机装没装），所以直接写库把每条
+    的状态摆好；任务级计数按同一份 statuses 数一遍，与真跑完之后的记录形状
+    一致 —— 重试的断言（尤其是计数重算）才有意义。
+    """
+    job = db_session.get(SubtitleJob, job_id)
+    assert job is not None
+    for item in job.items:
+        item.status = statuses.get(item.index, SubtitleJobItemStatus.SUCCESS)
+        if item.status == SubtitleJobItemStatus.SUCCESS:
+            path = Path(item.output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(DEFAULT_SRT, encoding="utf-8")
+            item.subtitle_exists = True
+            item.file_size = path.stat().st_size
+            item.segment_count = 2
+        else:
+            item.error_message = f"第 {item.index} 条转写失败了"
+
+    job.status = job_status
+    job.completed_videos = len(job.items)
+    job.failed_videos = sum(
+        1 for it in job.items if it.status == SubtitleJobItemStatus.FAILED
+    )
+    job.skipped_videos = sum(
+        1 for it in job.items if it.status == SubtitleJobItemStatus.SKIPPED
+    )
+    job.subtitle_count = sum(1 for it in job.items if it.subtitle_exists)
+    db_session.commit()
+    return job
+
+
+class TestRetry:
+    """单条重试：只有「没产出」的条目能重来，任务回到排队中。"""
+
+    def test_failed_item_is_requeued(self, client, db_session, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/1/retry")
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+
+        assert data["status"] == "pending"
+        assert data["finished_at"] is None
+        assert data["error_message"] == ""
+        item = next(it for it in data["items"] if it["index"] == 1)
+        assert item["status"] == "pending"
+        assert item["error_message"] == ""
+        assert item["subtitle_exists"] is False
+        assert item["segment_count"] == 0
+
+    def test_skipped_item_is_retryable_too(self, client, db_session, video_dir, tmp_path):
+        """取消 / 服务重启留下的 skipped 也要能重来 —— 它同样「没有产出」。
+
+        重启后的任务里没轮到的条目全是 skipped（recover_interrupted_jobs 的
+        error_message 里写着「可直接重新发起」），只放宽 failed 的话那句话兑不了现。
+        """
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(
+            db_session,
+            job["id"],
+            {2: SubtitleJobItemStatus.SKIPPED},
+            job_status="cancelled",
+        )
+
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/2/retry")
+        assert response.status_code == 200, response.text
+        item = next(it for it in response.json()["data"]["items"] if it["index"] == 2)
+        assert item["status"] == "pending"
+        # 没被点的那条第 1 条保持成功
+        other = next(it for it in response.json()["data"]["items"] if it["index"] == 1)
+        assert other["status"] == "success"
+
+    def test_successful_item_cannot_be_retried(self, client, db_session, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/2/retry")
+        assert response.status_code == 409
+        assert "只有失败或跳过" in response.json()["error"]["message"]
+
+    def test_unfinished_job_cannot_be_retried(self, client, video_dir, tmp_path):
+        """还在排队 / 正在跑的任务不能重试（工作线程正拿着它）。"""
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/1/retry")
+        assert response.status_code == 409
+        assert "尚未结束" in response.json()["error"]["message"]
+
+    def test_unknown_index_is_404(self, client, db_session, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/9/retry")
+        assert response.status_code == 404
+        assert "任务条目不存在" in response.json()["error"]["message"]
+
+    def test_unknown_job_is_404(self, client):
+        assert client.post("/api/v1/subtitle/jobs/999/items/1/retry").status_code == 404
+
+    def test_stale_subtitle_is_removed(self, client, db_session, video_dir, tmp_path):
+        """重试前清掉这条的旧 .srt：产物路径按条目定死，留着会让判据失真 ——
+        用户看到的会是上一轮的文本，而不是这一轮的结果。"""
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+        item = db_session.get(SubtitleJob, job["id"]).items[0]
+        stale = Path(item.output_path)
+        stale.write_text("上一轮写了一半", encoding="utf-8")
+
+        client.post(f"/api/v1/subtitle/jobs/{job['id']}/items/1/retry")
+        assert not stale.exists()
+
+    def test_counts_are_recounted(self, client, db_session, video_dir, tmp_path):
+        """completed / subtitle_count 都是执行器 += 1 出来的、收尾不会重算，
+        重试时必须按条目重数。
+
+        两条里第 2 条失败：重试后 completed 应当是「已成功的 1 条」，
+        而不是原来的 2（那样这条重跑完会变成 3/2）。
+        """
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {2: SubtitleJobItemStatus.FAILED})
+        assert job["total_videos"] == 2
+
+        data = client.post(
+            f"/api/v1/subtitle/jobs/{job['id']}/items/2/retry"
+        ).json()["data"]
+        assert data["completed_videos"] == 1
+        assert data["failed_videos"] == 0
+        assert data["skipped_videos"] == 0
+        assert data["subtitle_count"] == 1
+
+
+class TestRetryAll:
+    """一键重试：把失败 + 跳过的条目一起重新入队，成功的原样不动。"""
+
+    def test_every_unfinished_item_is_requeued(self, client, db_session, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(
+            db_session,
+            job["id"],
+            {2: SubtitleJobItemStatus.FAILED},
+            job_status="cancelled",
+        )
+        kept = Path(db_session.get(SubtitleJob, job["id"]).items[0].output_path)
+
+        data = client.post(f"/api/v1/subtitle/jobs/{job['id']}/retry").json()["data"]
+        assert data["status"] == "pending"
+        assert [it["status"] for it in data["items"]] == ["success", "pending"]
+        assert data["completed_videos"] == 1
+        assert data["failed_videos"] == 0 and data["skipped_videos"] == 0
+        assert kept.read_text(encoding="utf-8") == DEFAULT_SRT
+
+    def test_second_call_is_409(self, client, db_session, video_dir, tmp_path):
+        """第一次调用就把任务置回 pending，第二次必须 409 —— 这正是「批量不能
+        在前端循环调单条」要防的场景（循环会在第二次 409 时半途而废）。"""
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {1: SubtitleJobItemStatus.FAILED})
+
+        assert client.post(f"/api/v1/subtitle/jobs/{job['id']}/retry").status_code == 200
+        second = client.post(f"/api/v1/subtitle/jobs/{job['id']}/retry")
+        assert second.status_code == 409
+        assert "尚未结束" in second.json()["error"]["message"]
+
+    def test_nothing_to_retry_is_409(self, client, db_session, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        _settle(db_session, job["id"], {}, job_status="success")
+
+        response = client.post(f"/api/v1/subtitle/jobs/{job['id']}/retry")
+        assert response.status_code == 409
+        assert "没有可重试的条目" in response.json()["error"]["message"]
+
+    def test_unfinished_job_cannot_be_retried(self, client, video_dir, tmp_path):
+        source, _ = video_dir
+        job = _create_job(client, source, tmp_path / "字幕")
+        assert client.post(f"/api/v1/subtitle/jobs/{job['id']}/retry").status_code == 409
+
+
+class TestRetryWithRunner:
+    """重试之后真跑一遍：只处理被重试的那些，已成功的产物不被重写。"""
+
+    def test_only_the_retried_item_is_processed(self, db_session, tmp_path):
+        FakeVcPopen.reset()
+        job = _make_job(db_session, tmp_path)
+        # 第一次跑：第 1 条退出码非 0 且没产出 .srt → 判失败；第 2 条正常
+        _make_runner(scripts=[{"exit_code": 1, "no_output": True}, {}]).run_job(job.id)
+
+        job = _refresh(db_session, job)
+        assert job.status == SubtitleJobStatus.PARTIAL
+        kept = Path(job.items[1].output_path)
+        kept_text = kept.read_text(encoding="utf-8")
+
+        SubtitleJobService(db_session).retry_item(job.id, 1)
+
+        before = len(FakeVcPopen.instances)
+        _make_runner().run_job(job.id)
+
+        # 只起了一次子进程，而且跑的是被重试的第 1 条
+        assert len(FakeVcPopen.instances) - before == 1
+        argv = FakeVcPopen.instances[-1].argv
+        assert argv[argv.index("transcribe") + 1] == job.items[0].source_path
+        assert kept.read_text(encoding="utf-8") == kept_text   # 成功那条没被重写
+
+        refreshed = _refresh(db_session, job)
+        assert refreshed.status == SubtitleJobStatus.SUCCESS
+        assert refreshed.completed_videos == 2
+        assert refreshed.failed_videos == 0
+        assert refreshed.subtitle_count == 2

@@ -4,12 +4,42 @@
 优先级：环境变量 > .env 文件 > 代码内默认值。
 """
 
+import json
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+#: 「逗号分隔的扩展名」这种写法要能被解析，就必须带上 NoDecode。
+#:
+#: pydantic-settings 对 `List[str]` 这类复合字段**优先当作 JSON 解析**，解析失败
+#: 会直接抛 SettingsError 并让进程起不来 —— 这一切都发生在 `mode="before"` 的
+#: 字段校验器**之前**。也就是说没有 NoDecode 的话，下面
+#: `_split_extensions` 里那段逗号拆分逻辑根本轮不到执行：
+#: `X_INPUT_EXTENSIONS=.mp4,.mov` 会在启动时炸掉，而 JSON 数组写法才活。
+#: NoDecode 就是官方给这种「我自己解析」场景留的开关。
+ExtensionList = Annotated[List[str], NoDecode]
+
+
+def _split_env_list(value):
+    """把 .env 里的一行读成列表：逗号分隔与 JSON 数组两种写法都收。
+
+    带上 `NoDecode` 之后，JSON 数组写法**不再由 pydantic-settings 代劳**了，
+    得在这里自己 json.loads —— 否则 `X=["a","b"]` 会以 str 的身份撞上
+    `List[str]` 校验而报错。两种写法都留着，是因为文档里一直两种都承诺了。
+    """
+    if not isinstance(value, str):
+        return value            # 已经是 list（默认值 / init 传参），原样交给下一步
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"看起来是 JSON 数组却解析不了：{text}") from exc
+        return decoded
+    return [item.strip() for item in text.split(",") if item.strip()]
 
 
 def repo_root() -> Path:
@@ -119,7 +149,7 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
 
     # ---------- 跨域白名单 ----------
-    CORS_ORIGINS: List[str] = Field(
+    CORS_ORIGINS: ExtensionList = Field(
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
@@ -136,7 +166,7 @@ class Settings(BaseSettings):
     # 素材目录的**根**，默认是仓库根目录的 materials/。
     # 整个目录被 .gitignore 挡在 git 外面（原片与产物都太大），
     # 由后端启动时按 app/core/materials.py 里的规划建好 source / clips /
-    # subtitle / output / crawl / finalcut / dubbing 几个分段，
+    # subtitle / output / crawl / finalcut / dubbing / background 几个分段，
     # 新克隆的仓库因此也是规划好的样子。
     SCENE_MATERIALS_DIR: str = str(repo_root() / "materials")
     # 是否启用后台工作线程。测试环境置 False，避免 worker 与测试会话抢连接。
@@ -152,7 +182,7 @@ class Settings(BaseSettings):
     # 停止工作线程 / 取消任务时，等待子进程组自行退出的宽限（秒），之后强杀。
     SCENE_JOB_STOP_GRACE_SECONDS: float = 3.0
     # 可处理的视频扩展名（小写、带点）。前端据此标记可选文件，后端据此枚举目录。
-    SCENE_INPUT_EXTENSIONS: List[str] = Field(
+    SCENE_INPUT_EXTENSIONS: ExtensionList = Field(
         default_factory=lambda: [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"]
     )
     # 单个任务最多处理的视频数，防止误选一个几千条素材的目录把队列占满。
@@ -220,7 +250,7 @@ class Settings(BaseSettings):
     # 停止工作线程 / 取消任务时，等待子进程组自行退出的宽限（秒），之后强杀。
     SUBTITLE_JOB_STOP_GRACE_SECONDS: float = 3.0
     # 可处理的视频扩展名（小写、带点）。
-    SUBTITLE_INPUT_EXTENSIONS: List[str] = Field(
+    SUBTITLE_INPUT_EXTENSIONS: ExtensionList = Field(
         default_factory=lambda: [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"]
     )
     # 单个任务最多处理的视频数，防止误选一个几千条素材的目录把队列占满。
@@ -328,6 +358,40 @@ class Settings(BaseSettings):
     # 产物列表一次最多返回多少条（扫盘 + 索引，不翻页）。
     VOICEBOX_LIST_LIMIT: int = 500
 
+    # ---------- 一键换背景 ----------
+    # 是否启用后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。
+    BACKGROUND_WORKER_ENABLED: bool = True
+    # 工作线程空闲时的轮询间隔（秒）。
+    BACKGROUND_WORKER_POLL_SECONDS: float = 1.0
+    # 单张图的硬超时（秒）。纯 numpy 算术，几百万像素也就几秒；给足余量只是
+    # 为了兜住「机器同时在跑别的重活」这种情况。
+    BACKGROUND_ITEM_TIMEOUT_SECONDS: int = 300
+    # 停止工作线程时等待当前那张图跑完的宽限（秒）。
+    # ⚠️ 这不是硬保证：算法是同步的 numpy 调用，没有可中断的检查点（无子进程
+    # 可杀）。所以**取消的延迟上界 = 单张图的处理时间**，不是这个值。
+    BACKGROUND_STOP_GRACE_SECONDS: float = 3.0
+    # 单张图的像素上限。算法跑在 worker 线程里、**没有子进程隔离**，一张
+    # 48MP 的照片能吃到 1.5–2GB，把整个后端连同其它 worker 一起带走。
+    # 30M ≈ 6000×5000，比常见的手机原图（12–48MP）低，但换背景的输入多是
+    # 涂鸦翻拍，够用；超限的那张会被单独判失败并给出提示，不影响整批。
+    BACKGROUND_MAX_PIXELS: int = 30_000_000
+    # 可处理的图片扩展名（小写、带点）。这是**算法侧**的白名单，Pillow 读得出来
+    # 的都算，所以比预览白名单宽（.tif/.tiff 浏览器不认，但算法认）。
+    BACKGROUND_INPUT_EXTENSIONS: ExtensionList = Field(
+        default_factory=lambda: [
+            ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+        ]
+    )
+    # 背景图（贴纸要盖上去的那张）可选的扩展名。与上面分开，因为它是单选一张，
+    # 由前端 DirectoryPicker 过滤，语义上属于「可预览」而不是「可批量处理」。
+    BACKGROUND_PAGE_EXTENSIONS: ExtensionList = Field(
+        default_factory=lambda: [".png", ".jpg", ".jpeg", ".webp", ".bmp"]
+    )
+    # 单个任务最多处理几张图，防止误选一个几千张的目录把队列占满。
+    BACKGROUND_MAX_BATCH_FILES: int = 200
+    # 单次输出目录名里时间戳的格式（跟着 finalcut 的写法走）。
+    BACKGROUND_OUTPUT_PREFIX: str = "background-"
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_cors_origins(cls, value):
@@ -336,26 +400,32 @@ class Settings(BaseSettings):
         例如：CORS_ORIGINS=http://a.com,http://b.com
         同时兼容标准 JSON 数组写法。
         """
-        if isinstance(value, str) and not value.strip().startswith("["):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+        return _split_env_list(value)
 
-    @field_validator("SCENE_INPUT_EXTENSIONS", "SUBTITLE_INPUT_EXTENSIONS", mode="before")
+    @field_validator(
+        "SCENE_INPUT_EXTENSIONS",
+        "SUBTITLE_INPUT_EXTENSIONS",
+        "BACKGROUND_INPUT_EXTENSIONS",
+        "BACKGROUND_PAGE_EXTENSIONS",
+        mode="before",
+    )
     @classmethod
     def _split_scene_extensions(cls, value):
-        """支持用逗号分隔的字符串配置视频扩展名。
+        """支持用逗号分隔的字符串配置扩展名。
 
         例如：SCENE_INPUT_EXTENSIONS=.mp4,.mov
-        同时兼容标准 JSON 数组写法；统一转小写并补上点号前缀。
-        镜头分割与字幕提取共用这一份规范化逻辑（扩展名的写法没有理由不同）。
+        镜头分割、字幕提取与换背景共用这一份规范化逻辑（扩展名的写法没有理由不同）。
+
+        ⚠️ 新增任何扩展名配置**必须**把字段名加进上面的列表，并且**类型写成
+        `ExtensionList`**：两样缺一样，.env 里写 `X_EXTENSIONS=.png,.jpg` 都会在
+        启动时直接报错。原因见 `ExtensionList` 的注释。
         """
-        if isinstance(value, str) and not value.strip().startswith("["):
-            value = [item.strip() for item in value.split(",") if item.strip()]
-        if isinstance(value, list):
-            return [
-                ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in value
-            ]
-        return value
+        items = _split_env_list(value)
+        if not isinstance(items, list):
+            return items
+        return [
+            ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in items
+        ]
 
 
 @lru_cache(maxsize=1)

@@ -63,6 +63,21 @@ export function cancelMixJob(jobId: number): Promise<MixJob> {
   return post<MixJob>(`/mix/jobs/${jobId}/cancel`)
 }
 
+/**
+ * 重试单条失败 / 跳过的成片：成片重置回 pending，任务重新入队（其余成片结果不动）。
+ *
+ * ⚠️ 代价：失败收尾会把中间目录（归一化后的片段）清掉，所以重试会**重新归一化
+ * 全部片段**，比第一次的「只拼一条」慢得多 —— 界面上别让用户以为卡住了。
+ */
+export function retryMixOutput(jobId: number, index: number): Promise<MixJob> {
+  return post<MixJob>(`/mix/jobs/${jobId}/items/${index}/retry`)
+}
+
+/** 重试全部失败 / 跳过的成片：一条请求搞定，返回重置后的整条任务 */
+export function retryMixJob(jobId: number): Promise<MixJob> {
+  return post<MixJob>(`/mix/jobs/${jobId}/retry`)
+}
+
 /** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
 export function updateMixJobRemark(jobId: number, remark: string): Promise<MixJob> {
   return put<MixJob>(`/mix/jobs/${jobId}/remark`, { remark })

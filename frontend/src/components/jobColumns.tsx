@@ -144,9 +144,14 @@ export function jobCreatedColumn<T extends { created_at: string }>(): ColumnType
 }
 
 /**
- * 操作列：查看 / 取消 / 删除。
+ * 操作列：查看 / 取消 / 重试 / 删除。
  *
  * 跑着的任务给「取消」，跑完的给「删除」—— 两者互斥，同一条任务不会既取消又删除。
+ *
+ * 「重试」是可选的（`onRetry` 传了才有）：只有跑完、且还有没产出的条目时才亮。
+ * 列表接口不带条目明细，所以判断只能靠行上的计数 —— 各页面用 canRetry 自己收窄
+ * （背景看 failed_images/skipped_images，字幕看 failed_videos/skipped_videos，
+ * 抓取这种没有条目级状态的看任务状态本身）。
  */
 export function jobActionsColumn<T extends JobRowIdent>({
   isTerminal,
@@ -155,6 +160,8 @@ export function jobActionsColumn<T extends JobRowIdent>({
   onDelete,
   deleteDescription,
   purge,
+  onRetry,
+  canRetry,
 }: {
   isTerminal: (job: T) => boolean
   onView: (jobId: number) => void
@@ -164,16 +171,28 @@ export function jobActionsColumn<T extends JobRowIdent>({
   deleteDescription: string
   /** 「连同磁盘产物一起删」的勾选状态（页面的 usePurgeFiles()） */
   purge: UsePurgeFilesResult
+  /** 重试这条任务里所有失败 / 跳过的条目；不传就没有「重试」这个按钮 */
+  onRetry?: (job: T) => void
+  /** 这条任务现在值不值得给「重试」（默认：终态且不是全成功） */
+  canRetry?: (job: T) => boolean
 }): ColumnType<T> {
+  const retryable = (job: T): boolean =>
+    onRetry !== undefined && isTerminal(job) && (canRetry ? canRetry(job) : true)
+
   return {
     title: '操作',
-    // 三个操作按钮（查看 / 取消 / 删除）并排，宽度按最宽的那种状态留够
-    width: 180,
+    // 四个操作按钮（查看 / 取消 / 重试 / 删除）并排，宽度按最宽的那种状态留够
+    width: onRetry ? 220 : 180,
     render: (_: unknown, record: T) => (
       <Space size={4}>
         <Button type="link" style={{ padding: 0 }} onClick={() => onView(record.id)}>
           查看
         </Button>
+        {retryable(record) && (
+          <Button type="link" style={{ padding: 0 }} onClick={() => onRetry?.(record)}>
+            重试
+          </Button>
+        )}
         {!isTerminal(record) ? (
           <Button type="link" style={{ padding: 0 }} onClick={() => onCancel(record.id)}>
             取消

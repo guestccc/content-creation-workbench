@@ -252,6 +252,13 @@ class CrawlNoteResponse(BaseModel):
         description="已下载到本地的图片相对路径（相对任务输出目录，走 /media 接口取）",
     )
     local_videos: List[str] = Field(default_factory=list, description="已下载到本地的视频相对路径")
+    local_image_dir: str = Field(
+        default="",
+        description=(
+            "本地图片所在目录的绝对路径（供下游「一键换背景」把这一批图直接带过去）；"
+            "没有本地图片时为空串"
+        ),
+    )
     source_keyword: str = Field(default="", description="来源关键词（search 模式）")
 
 

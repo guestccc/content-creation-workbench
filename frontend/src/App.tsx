@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import Layout from './components/Layout'
+import BackgroundSwap from './pages/BackgroundSwap'
 import ContentList from './pages/ContentList'
 import CreatorLibrary from './pages/CreatorLibrary'
 import Dashboard from './pages/Dashboard'
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/dubbing" element={<Dubbing />} />
         <Route path="/crawl" element={<MaterialCrawl />} />
         <Route path="/creators" element={<CreatorLibrary />} />
+        <Route path="/background" element={<BackgroundSwap />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

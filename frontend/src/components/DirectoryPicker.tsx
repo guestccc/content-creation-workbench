@@ -10,14 +10,48 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { CloseOutlined, FileOutlined, FolderOutlined, StarFilled, StarOutlined } from '@ant-design/icons'
-import { Alert, Button, Empty, Flex, Input, List, Modal, Space, Spin, Tag, Typography } from 'antd'
+import {
+  Alert,
+  Button,
+  Empty,
+  Flex,
+  Image,
+  Input,
+  List,
+  Modal,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd'
 
 import { useApiMessage } from '../hooks'
-import { addFavorite, fetchDirectory, fetchFavorites, removeFavorite } from '../api/filesystem'
+import {
+  addFavorite,
+  fetchDirectory,
+  fetchFavorites,
+  localImagePreviewUrl,
+  removeFavorite,
+} from '../api/filesystem'
 import { describeError } from '../api/client'
 import type { FsEntry, FsFavorite, FsListData } from '../types/scene'
 
 const { Text } = Typography
+
+/**
+ * 能出缩略图的后缀 —— 与后端 `/fs/preview` 放行的图片白名单一致。
+ *
+ * 比可处理白名单窄：`.tif/.tiff` 算法认，预览接口不认，列出来只会是个破图，
+ * 所以那类文件照旧只显示图标与文件名。
+ */
+const THUMBNAIL_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.bmp']
+
+/** 这个文件能不能出缩略图 */
+function hasThumbnail(name: string): boolean {
+  const lower = name.toLowerCase()
+  return THUMBNAIL_EXTENSIONS.some((ext) => lower.endsWith(ext))
+}
 
 interface DirectoryPickerProps {
   /** 是否打开 */
@@ -28,8 +62,11 @@ interface DirectoryPickerProps {
   initialPath?: string
   /** 关闭弹窗 */
   onClose: () => void
-  /** 选定目录 */
-  onSelect: (path: string) => void
+  /**
+   * 选定目录。文件模式（传了 fileExtensions）下不会被调用 —— 那种用途只选文件，
+   * 弹窗里也没有「选定此目录」按钮，所以可以不传。
+   */
+  onSelect?: (path: string) => void
   /**
    * 可选：允许选文件时给出后缀白名单（小写带点，如 ['.srt', '.mp4']）。
    * 不传时行为与原来完全一致（只列目录、只选目录）。
@@ -140,10 +177,11 @@ function FavoritesPanel({
 }
 
 /**
- * 目录选择弹窗。
+ * 目录选择弹窗，两种用途：**选目录**（默认）与**选文件**（传 fileExtensions）。
  *
- * 只列目录（不展示文件内容，也不允许选中文件），
- * 「选定」按钮取的是当前所在目录的绝对路径。
+ * 选目录：只列子目录，底部「选定此目录」交出去的是当前所在目录的绝对路径。
+ * 选文件：额外列出白名单后缀的文件，底部按钮相应换成「选定此文件」——
+ * 确认的是**点中的那一行**，而不是当前目录。双击文件名 / 行尾「选用」是直接选定的快路。
  */
 export default function DirectoryPicker({
   open,
@@ -160,6 +198,12 @@ export default function DirectoryPicker({
   const [error, setError] = useState<string>('')
   /** 输入框里的路径（可能与已加载目录不同，回车才跳转） */
   const [inputPath, setInputPath] = useState<string>('')
+  /**
+   * 文件模式下**选中但还没确认**的文件绝对路径。
+   * 点一下文件行只是选中（高亮），底部「选定此文件」才交出去 —— 与目录模式的
+   * 「选定此目录」同一个形状，误点一下不至于当场定死。
+   */
+  const [pickedFile, setPickedFile] = useState<string>('')
 
   const [favorites, setFavorites] = useState<FsFavorite[]>([])
   const [favLoading, setFavLoading] = useState(false)
@@ -176,6 +220,8 @@ export default function DirectoryPicker({
       const result = await fetchDirectory(path)
       setData(result)
       setInputPath(result.path)
+      // 换了目录，之前选中的那个文件不再眼前，清掉免得「选定」交出去一个看不见的东西
+      setPickedFile('')
     } catch (err) {
       setError(describeError(err, '读取目录失败'))
     } finally {
@@ -236,9 +282,12 @@ export default function DirectoryPicker({
       )
     : []
 
-  /** 选定一个文件（文件行只出现在 file 模式下） */
-  const pickFile = (entry: FsEntry) => {
-    onSelectFile?.(entry.path)
+  /** 选中一个文件：只高亮，等底部「选定此文件」确认（文件行只出现在 file 模式下） */
+  const selectFile = (entry: FsEntry) => setPickedFile(entry.path)
+
+  /** 直接选定并关窗：双击行、行尾「选用」走这条快路 */
+  const commitFile = (path: string) => {
+    onSelectFile?.(path)
     onClose()
   }
 
@@ -296,13 +345,19 @@ export default function DirectoryPicker({
     }
   }
 
-  /** 确认选择当前目录 */
+  /** 确认选择当前目录（只有目录模式才用得到） */
   const confirm = () => {
     if (data) {
-      onSelect(data.path)
+      onSelect?.(data.path)
       onClose()
     }
   }
+
+  // 文件模式（fileExtensions）下「选定此目录」没有意义：这一趟进来就是要挑一个文件。
+  // 那个按钮留着只会误导 —— 「选定」本来该是选中所挑的文件，实际却会把**当前目录**
+  // 交给 onSelect（调用方要么收了个空操作，要么像换背景那样把别的输入框改了）。
+  // 所以文件模式换成「选定此文件」，确认的是高亮那一行。
+  const fileMode = Boolean(fileExtensions)
 
   return (
     <Modal
@@ -314,6 +369,32 @@ export default function DirectoryPicker({
       cancelText="取消"
       okButtonProps={{ disabled: !data }}
       onOk={confirm}
+      footer={
+        fileMode ? (
+          <Flex align="center" justify="space-between" gap={12}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              点文件名选中，再点「选定此文件」；双击文件名可直接选定
+            </Text>
+            <Space>
+              <Button onClick={onClose}>取消</Button>
+              {/* 没选中文件时是灰的 —— 它确认的就是选中那一行。灰按钮自己收不到
+                  鼠标事件（antd 6 用 pointer-events:none 关掉交互），Tooltip 得挂在
+                  外层 span 上，否则「灰了为什么」没人回答 */}
+              <Tooltip title={pickedFile ? undefined : '先在上面点一个文件名选中它'}>
+                <span style={{ display: 'inline-block' }}>
+                  <Button
+                    type="primary"
+                    disabled={!pickedFile}
+                    onClick={() => commitFile(pickedFile)}
+                  >
+                    选定此文件
+                  </Button>
+                </span>
+              </Tooltip>
+            </Space>
+          </Flex>
+        ) : undefined
+      }
       destroyOnHidden
     >
       {contextHolder}
@@ -369,41 +450,55 @@ export default function DirectoryPicker({
               />
             ) : (
               <>
-                <List
-                  dataSource={directories}
-                  renderItem={(entry) => (
-                    <List.Item
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => enter(entry)}
-                      actions={[
-                        <Button
-                          key="open"
-                          type="link"
-                          style={{ padding: 0 }}
-                          onClick={(event) => {
-                            // 整行都能点，按钮只做视觉提示；不阻止冒泡会触发两次 enter
-                            event.stopPropagation()
-                            enter(entry)
-                          }}
-                        >
-                          进入
-                        </Button>,
-                      ]}
-                    >
-                      <Space>
-                        <FolderOutlined style={{ color: 'var(--color-warning)' }} />
-                        <Text>{entry.name}</Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
+                {/* 空列表**不能**交给 List 渲染：它的 dataSource 为空时自带一个
+                    「暂无数据」空状态，而这个分支里只要文件非空就会走到这儿 ——
+                    于是「有子目录」的提示会跟下面的图片列表一起出现。
+                    两个列表各自判空，整体为空的情况上面那个 Empty 已经处理了 */}
+                {directories.length > 0 && (
+                  <List
+                    dataSource={directories}
+                    renderItem={(entry) => (
+                      <List.Item
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => enter(entry)}
+                        actions={[
+                          <Button
+                            key="open"
+                            type="link"
+                            style={{ padding: 0 }}
+                            onClick={(event) => {
+                              // 整行都能点，按钮只做视觉提示；不阻止冒泡会触发两次 enter
+                              event.stopPropagation()
+                              enter(entry)
+                            }}
+                          >
+                            进入
+                          </Button>,
+                        ]}
+                      >
+                        <Space>
+                          <FolderOutlined style={{ color: 'var(--color-warning)' }} />
+                          <Text>{entry.name}</Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                )}
                 {files.length > 0 && (
                   <List
                     dataSource={files}
                     renderItem={(entry) => (
                       <List.Item
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => pickFile(entry)}
+                        style={{
+                          cursor: 'pointer',
+                          // 选中的那一行给个底色，不然「选定此文件」到底会交出去哪个要猜
+                          background:
+                            pickedFile === entry.path
+                              ? 'var(--ant-color-fill-quaternary, #f5f5f5)'
+                              : undefined,
+                        }}
+                        onClick={() => selectFile(entry)}
+                        onDoubleClick={() => commitFile(entry.path)}
                         actions={[
                           <Button
                             key="pick"
@@ -411,7 +506,7 @@ export default function DirectoryPicker({
                             style={{ padding: 0 }}
                             onClick={(event) => {
                               event.stopPropagation()
-                              pickFile(entry)
+                              commitFile(entry.path)
                             }}
                           >
                             选用
@@ -419,7 +514,23 @@ export default function DirectoryPicker({
                         ]}
                       >
                         <Space>
-                          <FileOutlined style={{ color: 'var(--color-info)' }} />
+                          {/* 图片给缩略图：选背景图 / 选素材时「按名字猜内容」太费劲。
+                              缩略图是装饰，点它跟点整行一样是选中（preview 关掉，
+                              否则会弹出 antd 的放大浮层，把「选中」这动作挡住）。
+                              懒加载：一个目录几十张图，不 lazy 就是几十个请求一起飞 */}
+                          {hasThumbnail(entry.name) ? (
+                            <Image
+                              src={localImagePreviewUrl(entry.path)}
+                              width={40}
+                              height={40}
+                              preview={false}
+                              loading="lazy"
+                              alt={entry.name}
+                              style={{ objectFit: 'cover', borderRadius: 4 }}
+                            />
+                          ) : (
+                            <FileOutlined style={{ color: 'var(--color-info)' }} />
+                          )}
                           <Text>{entry.name}</Text>
                         </Space>
                       </List.Item>

@@ -6,7 +6,7 @@
 接口一览：
 
 - ``GET    /fs/list``                        列目录
-- ``GET    /fs/preview?path=``               本地视频只读流式预览（支持 Range）
+- ``GET    /fs/preview?path=``               本地视频/图片只读流式预览（视频支持 Range）
 - ``GET    /fs/favorites``                   收藏的目录
 - ``POST   /fs/favorites``                   收藏目录（幂等）
 - ``DELETE /fs/favorites/{favorite_id}``     取消收藏
@@ -17,8 +17,10 @@
 - 路径必须真实存在（列表还要求是目录），否则 400；
 - 单次最多返回 SCENE_FS_LIST_LIMIT 条，超出截断并置 truncated 标记；
 - 收藏只登记路径，不读取、不移动、不复制任何文件；取消收藏不动磁盘；
-- ``/preview`` 是全模块唯一会吐文件内容的接口，因此**只吐视频**：绝对路径 +
-  视频后缀白名单 + is_file，只读、不改写、不删除，并且只服务白名单内的后缀。
+- ``/preview`` 是全模块唯一会吐文件内容的接口，因此**只吐白名单内的视频和图片**：
+  绝对路径 + 后缀白名单 + is_file，只读、不改写、不删除。
+  **预览白名单比处理白名单窄**：算法侧（Pillow）能读 .tif/.tiff，但浏览器不认，
+  喂过去只会变成下载，所以预览只放 png/jpg/jpeg/webp/gif/bmp。
 
 ⚠️ 若日后把 HOST 改成 0.0.0.0 暴露到局域网，本模块必须先加鉴权
 或恢复根目录白名单 —— 现在它依赖「仅监听 127.0.0.1 的单机工具」这个前提。
@@ -29,13 +31,17 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi import Path as PathParam
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, NotFoundError
 from app.core.logging import get_logger
 from app.core.materials import ensure_materials_layout
-from app.core.video_files import media_type_for_video
+from app.core.media_files import (
+    is_media_file,
+    media_type_for_image,
+    media_type_for_video,
+)
 from app.schemas.common import ApiResponse, absolutize_path
 from app.schemas.scene_job import FsEntry, FsFavoriteCreate, FsFavoriteItem, FsListData
 from app.services import fs_favorites
@@ -44,6 +50,25 @@ from app.services.scene_job_service import is_video_file
 
 router = APIRouter(prefix="/fs", tags=["文件系统"])
 logger = get_logger(__name__)
+
+
+def _is_image_file(name: str) -> bool:
+    """是不是可批量处理的图片（换背景页据此挑原图）。
+
+    ⚠️ 用的是 ``BACKGROUND_INPUT_EXTENSIONS``，**绝不能改用
+    ``SCENE_INPUT_EXTENSIONS``** —— 后者同时是镜头分割「枚举视频」和字幕提取的
+    共用白名单，往里面塞 .png 会让那两个页面把图片当视频列出来、还能勾选。
+    """
+    return is_media_file(name, settings.BACKGROUND_INPUT_EXTENSIONS)
+
+
+def _is_previewable_image(name: str) -> bool:
+    """是不是浏览器直接认得的图片（``/fs/preview`` 据此放行）。
+
+    比 ``_is_image_file`` 窄：算法侧能把 .tif 读成数组，但浏览器拿到
+    image/tiff 只会下载，``<img>`` 是空的。预览白名单只管「能不能显示」。
+    """
+    return is_media_file(name, settings.BACKGROUND_PAGE_EXTENSIONS)
 
 
 def _resolve_target(path: Optional[str]) -> Path:
@@ -71,7 +96,7 @@ def list_directory(
         description="要列出的目录，支持 ~ 开头；不传则列出素材目录（默认仓库根目录的 materials/）",
     ),
 ) -> ApiResponse[FsListData]:
-    """列出一个目录的内容：目录在前、同类按名称排序，视频文件单独标记。"""
+    """列出一个目录的内容：目录在前、同类按名称排序，视频/图片分别标记。"""
     target = _resolve_target(path)
 
     if not target.exists():
@@ -82,6 +107,7 @@ def list_directory(
     entries: list[FsEntry] = []
     truncated = False
     video_count = 0
+    image_count = 0
     try:
         # 按名称预排序再截断，保证多次请求看到的顺序稳定
         children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
@@ -93,9 +119,13 @@ def list_directory(
                 truncated = True
                 break
             is_dir = child.is_dir()
+            # 视频与图片的白名单是分开的，一张图不会被标成视频，反之亦然
             is_video = (not is_dir) and is_video_file(child.name)
+            is_image = (not is_dir) and _is_image_file(child.name)
             if is_video:
                 video_count += 1
+            if is_image:
+                image_count += 1
             size: int | None = None
             if not is_dir:
                 try:
@@ -108,6 +138,7 @@ def list_directory(
                     path=str(child),
                     is_dir=is_dir,
                     is_video=is_video,
+                    is_image=is_image,
                     size_bytes=size,
                 )
             )
@@ -132,22 +163,25 @@ def list_directory(
             entries=entries,
             truncated=truncated,
             video_count=video_count,
+            image_count=image_count,
         )
     )
 
 
-@router.get("/preview", summary="本地视频只读流式预览（支持 Range）")
-def preview_local_video(
+@router.get("/preview", summary="本地视频/图片只读预览（视频支持 Range）")
+def preview_local_media(
     request: Request,
-    path: str = Query(..., description="视频文件绝对路径"),
+    path: str = Query(..., description="视频或图片文件的绝对路径"),
 ) -> Response:
-    """把本地视频以只读流发给 ``<video>``：整文件（200）或字节段（206 Partial Content）。
+    """把本地视频以只读流发给 ``<video>``：整文件（200）或字节段（206 Partial Content）；
+    图片则整份发出，交给 ``<img>`` 显示。
 
     素材列表里的「预览」按钮走它 —— 勾选之前先看一眼这条素材是不是想要的那条，
-    免得选错了再等一遍切分。字幕提取页共用同一张卡片，因此也一并有了预览。
+    免得选错了再等一遍切分。字幕提取页共用同一张卡片，因此也一并有了预览；
+    换背景页用同一个接口显示原图和背景图的缩略图。
 
-    后缀白名单与 ``/fs/list`` 判 ``is_video`` 用的是同一份配置：
-    **列表里标成视频的，这里都播得出来**，不会出现「列得出来、点开 400」。
+    后缀白名单与 ``/fs/list`` 的标记一一对应：**列表里标成视频/图片的，这里都取得回来**，
+    不会出现「列得出来、点开 400」。
 
     安全边界与 ``/fs/list`` 同级：绝对路径 + 后缀白名单 + ``is_file()``，
     只读（不接收任何写操作）。前提是本工具仅监听 127.0.0.1。
@@ -157,26 +191,33 @@ def preview_local_video(
         NotFoundError(404): 文件不存在。
     """
     try:
-        video = Path(absolutize_path(path, "视频文件"))
+        target = Path(absolutize_path(path, "媒体文件"))
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
 
     # is_video_file 是 scene_job_service 的薄封装（内部填的就是场景白名单），
     # 与 /fs/list 判 is_video 用的是同一个函数，规则不会漂
-    if not is_video_file(video.name):
-        raise BadRequestError(
-            f"只支持 {' / '.join(settings.SCENE_INPUT_EXTENSIONS)} 文件，"
-            f"当前是：{video.suffix or '（无扩展名）'}"
+    if is_video_file(target.name):
+        if not target.is_file():
+            raise NotFoundError(f"视频文件不存在：{target.name}")
+        # Range 由父进程按字节转发，媒体类型按后缀给 —— 给成 octet-stream
+        # 浏览器会当成附件下载，<video> 只会黑屏
+        return ranged_file_response(
+            target,
+            request.headers.get("range"),
+            media_type=media_type_for_video(target.name),
         )
-    if not video.is_file():
-        raise NotFoundError(f"视频文件不存在：{video.name}")
 
-    # Range 由父进程按字节转发，媒体类型按后缀给 —— 给成 octet-stream
-    # 浏览器会当成附件下载，<video> 只会黑屏
-    return ranged_file_response(
-        video,
-        request.headers.get("range"),
-        media_type=media_type_for_video(video.name),
+    if _is_previewable_image(target.name):
+        if not target.is_file():
+            raise NotFoundError(f"图片文件不存在：{target.name}")
+        # 图片不走 Range：浏览器对 <img> 的渐进加载本来就靠整份拿，且图片体积
+        # 远小于视频，没有分段的意义
+        return FileResponse(target, media_type=media_type_for_image(target.name))
+
+    supported = list(settings.SCENE_INPUT_EXTENSIONS) + list(settings.BACKGROUND_PAGE_EXTENSIONS)
+    raise BadRequestError(
+        f"只支持 {' / '.join(supported)} 文件，当前是：{target.suffix or '（无扩展名）'}"
     )
 
 

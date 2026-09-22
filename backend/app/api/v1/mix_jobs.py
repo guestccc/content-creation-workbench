@@ -16,6 +16,8 @@
 - GET  /jobs/{id}/outputs/{n}/video  成片视频流（支持 Range）
 - GET  /jobs/{id}/outputs/{n}/thumb  成片封面
 - POST /jobs/{id}/cancel         取消任务
+- POST /jobs/{id}/items/{n}/retry 重试单条失败 / 跳过的成片
+- POST /jobs/{id}/retry          重试全部失败 / 跳过的成片
 - PUT  /jobs/{id}/remark        更新任务备注（空串 = 清空）
 - POST /jobs/batch-delete        批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}              删除任务记录（默认成片文件保留，?purge_files=true 一并清）
@@ -289,6 +291,46 @@ def cancel_job(
 ) -> ApiResponse[MixJobResponse]:
     """取消排队中或执行中的任务，执行中的会整组杀掉当前 ffmpeg 子进程。"""
     job = service.cancel_job(job_id)
+    return ApiResponse(data=MixJobResponse.from_model(job))
+
+
+@router.post(
+    "/jobs/{job_id}/items/{index}/retry",
+    response_model=ApiResponse[MixJobResponse],
+    summary="重试单条失败 / 跳过的成片",
+)
+def retry_job_item(
+    service: MixJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    index: int = PathParam(..., ge=1, description="成片序号，从 1 开始"),
+) -> ApiResponse[MixJobResponse]:
+    """把该条重置回 pending 并让任务重新入队，其余成片的结果保持不动。
+
+    任务还在排队 / 执行中时拒绝（409）—— 正在跑的任务重跑没有意义；该条的素材
+    顺序（order）原样保留，上一轮的成片文件会先删掉。
+
+    ⚠️ 重试会**重新归一化全部片段**：失败收尾时临时的 norm/ 目录被清掉了，
+    而归一化是耗时大头，所以点下去到出片之间可能要等几分钟。
+    """
+    job = service.retry_item(job_id, index)
+    return ApiResponse(data=MixJobResponse.from_model(job))
+
+
+@router.post(
+    "/jobs/{job_id}/retry",
+    response_model=ApiResponse[MixJobResponse],
+    summary="重试全部未完成的成片",
+)
+def retry_job_items(
+    service: MixJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[MixJobResponse]:
+    """把该任务所有「失败」「跳过」的成片一起重新入队，已成功的保持原样。
+
+    走这一个接口而不是让前端循环调单条重试：第一次调用就会把任务置回 pending，
+    第二次会撞上「任务尚未结束」的校验。
+    """
+    job = service.retry_items(job_id)
     return ApiResponse(data=MixJobResponse.from_model(job))
 
 

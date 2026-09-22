@@ -386,6 +386,186 @@ class MixJobService:
             raise DatabaseError("更新任务备注失败") from exc
 
     # ------------------------------------------------------------------
+    # 重试
+    # ------------------------------------------------------------------
+
+    def retry_item(self, job_id: int, item_index: int) -> MixJob:
+        """重试单条成片：条目重置回 pending，任务重新入队。
+
+        前置条件：任务已终态、且该条是 failed 或 skipped —— 正在跑的任务没法
+        重试（工作线程正拿着它），已拼好的成片重跑没有意义。
+
+        ⚠️ 重试会**重新归一化全部片段**。失败收尾时 `_cleanup_tmp` 会把
+        `materials/output/.tmp/mix_<id>/norm/` 整棵删掉（只留 ffmpeg 日志），
+        而 Pass 1 是耗时大头 —— 所以一条 30 秒的成片重试可能要等上几分钟。
+        这是正确性上的取舍（归一化产物没了就只能重做），但别让用户以为卡住了。
+
+        Raises:
+            NotFoundError: 任务或成片不存在。
+            ConflictError: 任务未结束，或该条不是 failed / skipped。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                self._ensure_terminal_for_retry(job)
+                item = self._find_item_or_404(job, item_index)
+                self._ensure_item_retryable(item)
+                self._reset_items_for_retry(job, [item])
+                self.db.flush()
+
+            logger.info(
+                "混剪成片已重试入队 | job=%s | item=%s", job_id, item_index
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("重试混剪成片失败 | job=%s | item=%s", job_id, item_index)
+            raise DatabaseError("重试混剪成片失败") from exc
+
+    def retry_items(self, job_id: int) -> MixJob:
+        """一键重试：把该任务**所有** failed / skipped 的成片一起重新入队。
+
+        批量必须走这一个方法、不能在前端循环调 retry_item —— 第一次调用就把
+        任务置回 pending，第二次会撞上「任务尚未结束」的终态校验。所以终态校验
+        在循环之外只做一次，任务级字段也只在所有条目都重置完之后写一遍。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            ConflictError: 任务未结束，或没有可重试的成片。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                self._ensure_terminal_for_retry(job)
+
+                pending = [
+                    entry
+                    for entry in job.outputs
+                    if entry.status in MixOutputStatus.RETRYABLE
+                ]
+                if not pending:
+                    raise ConflictError(
+                        f"任务 #{job_id} 没有可重试的成片（{job.failed_outputs} 条失败、"
+                        f"{job.skipped_outputs} 条跳过）"
+                    )
+
+                self._reset_items_for_retry(job, pending)
+                self.db.flush()
+
+            logger.info(
+                "混剪任务批量重试入队 | job=%s | 成片数=%s", job_id, len(pending)
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量重试混剪任务失败 | job=%s", job_id)
+            raise DatabaseError("批量重试混剪任务失败") from exc
+
+    def _ensure_terminal_for_retry(self, job: MixJob) -> None:
+        """重试的公共前置：任务必须已经结束。
+
+        Raises:
+            ConflictError: 任务还在排队 / 正在跑。
+        """
+        if job.status not in MixJobStatus.TERMINAL:
+            raise ConflictError(f"任务尚未结束（{job.status}），无法重试")
+
+    def _find_item_or_404(self, job: MixJob, item_index: int) -> MixJobItem:
+        """按成片序号找条目，找不到就 404。
+
+        Raises:
+            NotFoundError: 该序号不在任务里。
+        """
+        item: Optional[MixJobItem] = next(
+            (entry for entry in job.outputs if entry.index == item_index), None
+        )
+        if item is None:
+            raise NotFoundError(f"任务条目不存在：job={job.id}, index={item_index}")
+        return item
+
+    @staticmethod
+    def _ensure_item_retryable(item: MixJobItem) -> None:
+        """只有「没产出」的成片能重试。
+
+        skipped 在这里有两种来源：任务被取消，或它依赖的片段归一化失败了 ——
+        两种都是「没有成片」，而且重试会把整个归一化阶段重做一遍，第二种也能
+        真正救回来。
+
+        Raises:
+            ConflictError: 该条是 pending / running / success。
+        """
+        if item.status not in MixOutputStatus.RETRYABLE:
+            raise ConflictError(
+                f"只有失败或跳过的成片才能重试（当前状态：{item.status}）"
+            )
+
+    def _reset_items_for_retry(self, job: MixJob, items: List[MixJobItem]) -> None:
+        """把给定成片重置回 pending，并把任务重新入队（单条 / 批量共用）。
+
+        四个容易踩的地方：
+
+        1. **计数要重算，不能清零了事**。completed_outputs 是执行器里 `+= 1`
+           累加出来的（mix_runner._finish_item / _skip_pending_outputs），收尾的
+           _finalize 只重算 failed / skipped（并按 total_outputs 反推成功数），
+           所以这里必须按条目状态数一遍再写。之后重跑的成片会在执行时各自 +1，
+           收尾时 failed / skipped 再由 _finalize 数回来，总数自洽。
+        2. **`order` 绝不能动**：它是该条成片的素材顺序（含这个 task seed 打乱
+           后的中间段），改了就等于换了条成片，与「重试」不是一回事。
+        3. **上一轮的成片文件与 concat 半成品要删掉**。输出路径按序号定死
+           （`{index:02d}.mp4` / `.partial.mp4`），留着旧文件会让「成片存在」
+           这个判据失真 —— 用户看到的会是上一轮的结果。
+        4. **child_pid 必须清**：它是取消 / 孤儿回收共用的唯一依据，留着旧 PID
+           有误杀无关进程的风险。
+        """
+        for item in items:
+            # 正常情况下 failed / skipped 的成片本来就没有文件，这里是防御性清理
+            # （上一轮写了一半、或取消时恰好留下 .partial.mp4）。
+            out_dir = Path(job.output_dir)
+            for stale in (
+                out_dir / f"{item.index:02d}.mp4",
+                out_dir / f"{item.index:02d}.partial.mp4",
+            ):
+                try:
+                    if stale.is_file():
+                        stale.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "清理重试前的残留成片失败，跳过该文件 | %s | %s", stale, exc
+                    )
+
+            item.status = MixOutputStatus.PENDING
+            item.output_path = ""
+            item.output_name = ""
+            item.duration_seconds = None
+            item.size_bytes = 0
+            item.exit_code = None
+            item.elapsed_seconds = 0
+            item.error_message = ""
+            item.started_at = None
+            item.finished_at = None
+
+        job.status = MixJobStatus.PENDING
+        job.error_message = ""
+        job.started_at = None
+        job.finished_at = None
+        job.child_pid = None
+        job.current_index = 0
+        job.current_clip = ""
+        job.current_phase = ""
+        job.progress_percent = 0.0
+        # total_clips / done_clips 由 Pass 1 开头自己重算（mix_runner 会按
+        # 去重后的片段清单重新写这两个字段），这里不碰。
+        job.completed_outputs = sum(
+            1 for entry in job.outputs if entry.status == MixOutputStatus.SUCCESS
+        )
+        job.failed_outputs = 0
+        job.skipped_outputs = 0
+
+    # ------------------------------------------------------------------
     # 成片定位（供播放/封面接口用；路径完全由任务记录推导）
     # ------------------------------------------------------------------
 

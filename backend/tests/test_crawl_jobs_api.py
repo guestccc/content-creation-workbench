@@ -306,6 +306,7 @@ class TestResultsAndLogAndMedia:
         assert first["title"] == "标题-n1"
         assert len(first["images"]) == 2
         assert first["local_images"] == []  # 没下载媒体时是空列表而不是 null
+        assert first["local_image_dir"] == ""  # 同理：没有图就没有目录，前端据此禁用换背景入口
         assert first["cover"] == first["images"][0]
 
     def test_results_with_local_media(self, client):
@@ -317,6 +318,8 @@ class TestResultsAndLogAndMedia:
 
         body = client.get(f"/api/v1/crawl/jobs/{data['id']}/results").json()["data"]
         assert body["notes"][0]["local_images"] == ["xhs/images/n1/1.webp"]
+        # 绝对目录要能直接交给换背景当原图目录（本机路径，不是相对路径）
+        assert Path(body["notes"][0]["local_image_dir"]) == media
 
         file_response = client.get(
             f"/api/v1/crawl/jobs/{data['id']}/media/xhs/images/n1/1.webp"
@@ -433,6 +436,101 @@ class TestDeletePurge:
         response = client.delete(f"/api/v1/crawl/jobs/{job_id}?purge_files=true")
         assert response.status_code == 200, response.text
         assert not out_dir.exists(), f"输出目录没清掉：{out_dir}"
+
+
+class TestRetry:
+    """重试：按旧任务的参数**新建一条任务**（POST /jobs/{id}/retry）。
+
+    抓取没有条目级状态（一条任务就是一个 MC 子进程），所以重试只有整任务重跑
+    一种形态；而重跑必须是新建而不是就地重跑 —— 输出目录按任务 id 定死、
+    MC 的 jsonl 又是 append 语义（就地重跑会把 note_count 算成两倍）。
+    """
+
+    def test_retry_creates_a_new_job(self, client):
+        """返回 201 + 一条全新的 pending 任务，输出目录跟着新 id 走。"""
+        created = _create_job(client)
+
+        response = client.post(f"/api/v1/crawl/jobs/{created['id']}/retry")
+        assert response.status_code == 201, response.text
+        new = response.json()["data"]
+
+        assert new["id"] != created["id"]
+        assert new["status"] == "pending"
+        assert new["output_dir"].endswith(f"job_{new['id']}")
+        assert new["output_dir"] != created["output_dir"]
+        # 预估口径与新建任务完全一致
+        assert new["expected_count"] == created["expected_count"]
+        assert new["params"] == created["params"]
+        assert new["crawled_count"] == 0 and new["note_count"] == 0
+
+    def test_old_job_and_its_products_are_untouched(self, client):
+        """旧任务的记录与磁盘产物一个字都不许动 —— 这是「新建」的意义。"""
+        created = _create_job(client)
+        out_dir = Path(created["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "notes.jsonl").write_text("{}", encoding="utf-8")
+
+        client.post(f"/api/v1/crawl/jobs/{created['id']}/retry")
+        client.post(f"/api/v1/crawl/jobs/{created['id']}/cancel")
+
+        detail = client.get(f"/api/v1/crawl/jobs/{created['id']}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["data"]["output_dir"] == created["output_dir"]
+        assert (out_dir / "notes.jsonl").is_file()
+
+    def test_cookie_login_is_rebuilt_server_side(self, client, db_session):
+        """cookie 登录的任务也能重试，且 cookie 原样带过去。
+
+        login_cookies 是登录凭据、任何响应都不回显，前端重建不出这种任务 ——
+        所以这必须是服务端从旧任务行里读的（本用例直接查库核对）。
+        """
+        from app.models.crawl_job import CrawlJob
+
+        created = _create_job(client, login_type="cookie", cookies=" a=1;b=2 ")
+
+        response = client.post(f"/api/v1/crawl/jobs/{created['id']}/retry")
+        assert response.status_code == 201, response.text
+        new = response.json()["data"]
+
+        assert new["login_type"] == "cookie"
+        assert "cookies" not in new and "login_cookies" not in new
+        assert db_session.get(CrawlJob, new["id"]).login_cookies == "a=1;b=2"
+
+    def test_params_are_carried_over(self, client):
+        """详情模式的 ids、翻页、条数上限……原样带进新任务。"""
+        created = _create_job(
+            client,
+            crawler_type="detail",
+            keywords=None,
+            ids=["https://www.xiaohongshu.com/explore/a"],
+            start_page=3,
+            max_notes=7,
+            get_comments=False,
+        )
+
+        new = client.post(f"/api/v1/crawl/jobs/{created['id']}/retry").json()["data"]
+
+        assert new["crawler_type"] == "detail"
+        assert new["params"]["ids"] == ["https://www.xiaohongshu.com/explore/a"]
+        assert new["params"]["start_page"] == 3
+        assert new["params"]["max_notes"] == 7
+        assert new["params"]["get_comments"] is False
+
+    def test_unknown_job_is_404(self, client):
+        assert client.post("/api/v1/crawl/jobs/9999/retry").status_code == 404
+
+    def test_env_broken_fails_fast_without_creating_a_job(self, client, monkeypatch):
+        """MC 被挪走时点击即 400，且不留下半条任务记录。"""
+        created = _create_job(client)
+        monkeypatch.setattr(
+            "app.services.crawl_job_service.probe_environment",
+            lambda refresh=False: _stub_env_payload(installed=False, ready=False),
+        )
+
+        response = client.post(f"/api/v1/crawl/jobs/{created['id']}/retry")
+        assert response.status_code == 400, response.text
+        assert "MediaCrawler" in response.json()["error"]["message"]
+        assert client.get("/api/v1/crawl/jobs").json()["data"]["total"] == 1
 
 
 class TestJobRemark:

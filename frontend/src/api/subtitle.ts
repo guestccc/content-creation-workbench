@@ -63,6 +63,16 @@ export function cancelSubtitleJob(jobId: number): Promise<SubtitleJob> {
   return post<SubtitleJob>(`/subtitle/jobs/${jobId}/cancel`)
 }
 
+/** 重试单条失败 / 跳过的视频：条目重置回 pending，任务重新入队（其余条目结果不动） */
+export function retrySubtitleItem(jobId: number, index: number): Promise<SubtitleJob> {
+  return post<SubtitleJob>(`/subtitle/jobs/${jobId}/items/${index}/retry`)
+}
+
+/** 重试全部失败 / 跳过的视频：一条请求搞定，返回重置后的整条任务 */
+export function retrySubtitleJob(jobId: number): Promise<SubtitleJob> {
+  return post<SubtitleJob>(`/subtitle/jobs/${jobId}/retry`)
+}
+
 /** 更新任务备注（空串表示清空，最多 200 字）；返回更新后的任务 */
 export function updateSubtitleJobRemark(jobId: number, remark: string): Promise<SubtitleJob> {
   return put<SubtitleJob>(`/subtitle/jobs/${jobId}/remark`, { remark })

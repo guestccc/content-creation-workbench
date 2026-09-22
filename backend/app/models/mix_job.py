@@ -66,6 +66,11 @@ class MixOutputStatus:
     ALL: tuple = (PENDING, RUNNING, SUCCESS, FAILED, SKIPPED)
     TERMINAL: tuple = (SUCCESS, FAILED, SKIPPED)
 
+    # 可重试 = 「没产出」的那两种：failed 是跑了但失败，skipped 是压根没轮到
+    # （取消 / 服务重启 / 依赖的片段归一化失败）。成功的重跑没有意义，
+    # pending / running 的正在被跑。
+    RETRYABLE: tuple = (FAILED, SKIPPED)
+
 
 class MixPhase:
     """任务当前所处阶段（归一化 → 拼接）。

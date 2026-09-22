@@ -406,6 +406,10 @@ class FsEntry(BaseModel):
     path: str = Field(description="绝对路径")
     is_dir: bool = Field(description="是否为目录")
     is_video: bool = Field(description="是否为可处理的视频文件（按后端配置的扩展名判断）")
+    is_image: bool = Field(
+        default=False,
+        description="是否为可处理的图片文件（换背景页据此挑原图；白名单与视频分开，一张图不会同时被标成视频）",
+    )
     size_bytes: Optional[int] = Field(default=None, description="文件大小，目录为空")
 
 
@@ -421,6 +425,9 @@ class FsListData(BaseModel):
     entries: List[FsEntry] = Field(description="目录内容，目录在前、同类按名称排序")
     truncated: bool = Field(description="条目是否因过多而被截断")
     video_count: int = Field(description="当前目录下（不含子目录）的视频文件数")
+    image_count: int = Field(
+        default=0, description="当前目录下（不含子目录）的图片文件数"
+    )
 
 
 class FsFavoriteItem(BaseModel):

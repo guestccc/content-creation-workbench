@@ -15,7 +15,8 @@
 - GET  /jobs/{id}/clips/{n}/video  片段视频流（支持 Range，可拖动进度条）
 - POST /jobs/{id}/cancel    取消任务
 - PUT  /jobs/{id}/remark    更新任务备注（空串 = 清空）
-- POST /jobs/{id}/items/{n}/retry  重试单条失败的视频（条目重置回 pending，任务重新入队）
+- POST /jobs/{id}/items/{n}/retry  重试单条失败 / 跳过的视频（条目重置回 pending，任务重新入队）
+- POST /jobs/{id}/retry     重试全部失败 / 跳过的视频
 - POST /jobs/batch-delete   批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}         删除任务记录（?purge_files=true 时产物一并清）
 """
@@ -323,15 +324,37 @@ def update_job_remark(
 @router.post(
     "/jobs/{job_id}/items/{item_index}/retry",
     response_model=ApiResponse[SceneJobResponse],
-    summary="重试单条失败的视频",
+    summary="重试单条失败 / 跳过的视频",
 )
 def retry_job_item(
     service: SceneJobServiceDep,
     job_id: int = PathParam(..., ge=1, description="任务 ID"),
     item_index: int = PathParam(..., ge=1, description="条目序号（任务内，从 1 开始）"),
 ) -> ApiResponse[SceneJobResponse]:
-    """把失败的条目重置回 pending 并让任务重新入队，其余条目的结果保持不动。"""
+    """把该条重置回 pending 并让任务重新入队，其余条目的结果保持不动。
+
+    任务还在排队 / 执行中时拒绝（409）—— 正在跑的任务重跑没有意义；该条上次的
+    片段产物会先清空，免得残留把重跑的进度与产物数一起污染。
+    """
     job = service.retry_item(job_id, item_index)
+    return ApiResponse(data=SceneJobResponse.from_model(job))
+
+
+@router.post(
+    "/jobs/{job_id}/retry",
+    response_model=ApiResponse[SceneJobResponse],
+    summary="重试全部未完成的视频",
+)
+def retry_job_items(
+    service: SceneJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[SceneJobResponse]:
+    """把该任务所有「失败」「跳过」的视频一起重新入队，已成功的保持原样。
+
+    走这一个接口而不是让前端循环调单条重试：第一次调用就会把任务置回 pending，
+    第二次会撞上「任务尚未结束」的校验。
+    """
+    job = service.retry_items(job_id)
     return ApiResponse(data=SceneJobResponse.from_model(job))
 
 

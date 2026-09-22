@@ -295,6 +295,43 @@ def update_job_remark(
     return ApiResponse(data=SubtitleJobResponse.from_model(job, include_items=False))
 
 
+@router.post(
+    "/jobs/{job_id}/items/{index}/retry",
+    response_model=ApiResponse[SubtitleJobResponse],
+    summary="重试单条失败 / 跳过的视频",
+)
+def retry_job_item(
+    service: SubtitleJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    index: int = PathParam(..., ge=1, description="视频在任务内的序号，从 1 开始"),
+) -> ApiResponse[SubtitleJobResponse]:
+    """把该条重置回 pending 并让任务重新入队，其余条目的结果保持不动。
+
+    任务还在排队 / 执行中时拒绝（409）—— 正在跑的任务重跑没有意义。上一轮写坏的
+    .srt 会先删掉，免得新结果出来之前用户看到的是旧文本。
+    """
+    job = service.retry_item(job_id, index)
+    return ApiResponse(data=SubtitleJobResponse.from_model(job))
+
+
+@router.post(
+    "/jobs/{job_id}/retry",
+    response_model=ApiResponse[SubtitleJobResponse],
+    summary="重试全部未完成的视频",
+)
+def retry_job_items(
+    service: SubtitleJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[SubtitleJobResponse]:
+    """把该任务所有「失败」「跳过」的视频一起重新入队，已成功的保持原样。
+
+    走这一个接口而不是让前端循环调单条重试：第一次调用就会把任务置回 pending，
+    第二次会撞上「任务尚未结束」的校验。
+    """
+    job = service.retry_items(job_id)
+    return ApiResponse(data=SubtitleJobResponse.from_model(job))
+
+
 @router.delete(
     "/jobs/{job_id}",
     response_model=ApiResponse[dict],

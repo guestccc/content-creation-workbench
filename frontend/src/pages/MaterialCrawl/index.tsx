@@ -9,17 +9,22 @@
  * 走公共 useJobRunner / useJobList，表单联动与结果/日志弹窗分别是本文件夹
  * 私有的 useCrawlForm / useCrawlResults，这里只做编排与布局。
  *
+ * 抓到的东西往哪去：图片走结果弹窗的「换背景」交给图文二创的下一环
+ * （见 swapBackground），视频照旧进镜头分割 / 混剪。
+ *
  * 平台 × 模式能力矩阵（支持的模式、输入提示、每页最小条数、Node 依赖）
  * 全部查本文件夹的 platforms.ts，不在 JSX 里写 if 链。
  */
 
 import {
+  BgColorsOutlined,
   CloudDownloadOutlined,
   CopyOutlined,
   EyeOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import type { ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Alert,
   Button,
@@ -74,9 +79,11 @@ import {
   fetchCrawlEnvironment,
   fetchCrawlJob,
   fetchCrawlJobs,
+  retryCrawlJob,
   updateCrawlJobRemark,
 } from '../../api/crawler'
 import { fetchCreators } from '../../api/creator'
+import type { BackgroundSwapPrefill } from '../../types/background'
 import type { CreatorListData } from '../../types/creator'
 import {
   CRAWLER_TYPE_META,
@@ -118,6 +125,7 @@ const KIND_LABEL: Record<string, string> = {
 
 export default function MaterialCrawl() {
   const { message, fail, contextHolder } = useApiMessage()
+  const navigate = useNavigate()
 
   const form = useCrawlForm()
   const spec = PLATFORM_SPECS[form.platform]
@@ -239,6 +247,27 @@ export default function MaterialCrawl() {
     getCheckboxProps: (job) => ({ disabled: !isTerminalStatus(job.status) }),
   }
 
+  /**
+   * 重试一条抓取任务。
+   *
+   * 抓取没有条目级状态（一条任务就是一个 MediaCrawler 子进程），所以只能整任务
+   * 重跑；而且必须是**新建**而不是就地重跑：输出目录按任务 id 定死、MC 的 jsonl
+   * 又是追加语义，就地重跑会把条数算成两倍。后端就是按这个语义实现的，返回的是
+   * 新任务，这里把新 id 告诉用户并刷新列表。
+   *
+   * cookie 登录的任务也点得动：cookie 只存在数据库行里、任何响应都不带它，
+   * 重建这一步在后端做。
+   */
+  const retryJob = async (target: CrawlJob) => {
+    try {
+      const created = await retryCrawlJob(target.id)
+      history.reload()
+      message.success(`已重新发起：新任务 #${created.id}`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
   /** 从历史记录点开一条任务：加载详情并挂到当前任务区；有结果的顺带打开结果弹窗 */
   const openHistoryJob = async (jobId: number) => {
     const detail = await runner.read(jobId)
@@ -249,6 +278,27 @@ export default function MaterialCrawl() {
     if (isTerminalStatus(detail.status) && detail.note_count > 0) {
       void results.open(jobId)
     }
+  }
+
+  /**
+   * 结果表点「换背景」：把这条笔记已下载到本地的图片带到换背景页面。
+   *
+   * 一条笔记的图都落在它自己的一个目录里（后端给的是绝对路径），正好对上那边
+   * 「一个原图目录 + 勾选一批文件名」的形态，所以整批带过去并预先勾好 ——
+   * 用户到了那边只剩选背景图这一件事。图片是相对路径，取最后一段当文件名
+   * （后端固定用 `/` 拼，posix 风格）。
+   */
+  const swapBackground = (note: CrawlNote) => {
+    // 弹窗里有行就一定有 jobId（open 时一起设的）；没有目录说明这条笔记没图
+    if (!note.local_image_dir || results.jobId === null) {
+      return
+    }
+    const state: BackgroundSwapPrefill = {
+      inputPath: note.local_image_dir,
+      files: note.local_images.map((rel) => rel.split('/').pop() ?? rel),
+      source: `素材抓取任务 #${results.jobId}`,
+    }
+    navigate('/background', { state })
   }
 
   const copyText = (text: string) => {
@@ -820,6 +870,7 @@ export default function MaterialCrawl() {
           onView: (id) => void openHistoryJob(id),
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
+          onRetry: (target) => void retryJob(target),
           onEditRemark: remark.open,
           purge,
         })}
@@ -877,7 +928,9 @@ export default function MaterialCrawl() {
           )
         }
         footer={null}
-        width={1100}
+        // 这页结果表列最多（还带操作列的「换背景」），窄了标题列会被挤成一条缝；
+        // antd 自己有 max-width: calc(100vw - 32px) 兜底，小屏会自动缩回来
+        width={1400}
         onCancel={results.close}
         destroyOnHidden
       >
@@ -886,13 +939,13 @@ export default function MaterialCrawl() {
           loading={results.loading}
           dataSource={results.notes}
           pagination={{ pageSize: 10, showSizeChanger: false }}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1080 }}
           expandable={{
             expandedRowRender: (note) => noteDetail(note, results.jobId),
             rowExpandable: (note) =>
               note.desc !== '' || note.images.length > 0 || note.local_videos.length > 0,
           }}
-          columns={noteColumns(results.jobId, copyText)}
+          columns={noteColumns(results.jobId, copyText, swapBackground)}
         />
       </Modal>
 
@@ -1009,6 +1062,7 @@ function noteImages(jobId: number | null, note: CrawlNote): string[] {
 function noteColumns(
   jobId: number | null,
   copy: (text: string) => void,
+  swapBackground: (note: CrawlNote) => void,
 ): ColumnsType<CrawlNote> {
   return [
     { title: '#', dataIndex: 'index', width: 44 },
@@ -1078,24 +1132,50 @@ function noteColumns(
     },
     {
       title: '操作',
-      width: 100,
-      render: (_: unknown, note: CrawlNote) => (
-        <Space size={4}>
-          {note.url && (
-            <a href={note.url} target="_blank" rel="noreferrer">
-              原文
-            </a>
-          )}
-          {note.url && (
-            <Button
-              type="text"
-              icon={<CopyOutlined />}
-              onClick={() => copy(note.url)}
-              title="复制链接"
-            />
-          )}
-        </Space>
-      ),
+      width: 176,
+      render: (_: unknown, note: CrawlNote) => {
+        const imageCount = note.local_images.length
+        return (
+          <Space size={4}>
+            {note.url && (
+              <a href={note.url} target="_blank" rel="noreferrer">
+                原文
+              </a>
+            )}
+            {note.url && (
+              <Button
+                type="text"
+                icon={<CopyOutlined />}
+                onClick={() => copy(note.url)}
+                title="复制链接"
+              />
+            )}
+            {/* 一键换背景：把这条笔记已下载到本地的图整批带过去当原图。
+
+                没图时按钮是灰的，而灰按钮（antd 6 用 pointer-events:none 关掉交互）
+                自己不收鼠标事件，所以 Tooltip 挂在外层 span 上 —— 否则「灰了为什么」
+                就没人回答 */}
+            <Tooltip
+              title={
+                imageCount > 0
+                  ? `把这条笔记的 ${imageCount} 张图带到「一键换背景」`
+                  : '这条笔记没有下载到本地图片（媒体下载未开启，或该平台无法按笔记关联图片）'
+              }
+            >
+              <span style={{ display: 'inline-block' }}>
+                <Button
+                  type="text"
+                  icon={<BgColorsOutlined />}
+                  disabled={imageCount === 0}
+                  onClick={() => swapBackground(note)}
+                >
+                  换背景
+                </Button>
+              </span>
+            </Tooltip>
+          </Space>
+        )
+      },
     },
   ]
 }
@@ -1215,6 +1295,7 @@ function historyColumns(handlers: {
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
   onEditRemark: (job: CrawlJob) => void
+  onRetry: (job: CrawlJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<CrawlJob> {
   return [
@@ -1249,6 +1330,10 @@ function historyColumns(handlers: {
       onDelete: handlers.onDelete,
       deleteDescription: '删除后不可恢复。',
       purge: handlers.purge,
+      // 抓取没有条目级状态，重试 = 按原参数另起一条新任务（新 id、新产物目录）。
+      // 只有没跑出结果的才给点：跑成功的重跑一遍没有意义，跑着的后端也会 409 挡
+      onRetry: handlers.onRetry,
+      canRetry: (job) => job.status === 'failed' || job.status === 'cancelled',
     }),
   ]
 }

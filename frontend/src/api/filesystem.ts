@@ -22,6 +22,16 @@ export function localVideoPreviewUrl(path: string): string {
   return `${BASE_URL}/fs/preview?path=${encodeURIComponent(path)}`
 }
 
+/**
+ * 任意本地图片的只读预览地址（直接塞给 `<img src>`）。
+ *
+ * 只吐浏览器认得的格式（png / jpg / jpeg / webp / bmp），比算法侧的白名单窄：
+ * .tif 这类能喂给 Pillow 但浏览器显示不出来的格式，在这里没有意义。
+ */
+export function localImagePreviewUrl(path: string): string {
+  return `${BASE_URL}/fs/preview?path=${encodeURIComponent(path)}`
+}
+
 /** 收藏的目录清单（目录选择弹窗左侧那一列） */
 export function fetchFavorites(): Promise<FsFavorite[]> {
   return get<FsFavorite[]>('/fs/favorites')

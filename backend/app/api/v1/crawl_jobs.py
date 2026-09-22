@@ -12,6 +12,7 @@
 - GET    /jobs/{id}/log           MC 子进程日志尾部
 - GET    /jobs/{id}/media/{path}  已下载的本地媒体文件（图片/视频）
 - POST   /jobs/{id}/cancel        取消任务
+- POST   /jobs/{id}/retry         重试（按原参数新建一条任务，返回的就是新任务）
 - PUT    /jobs/{id}/remark       更新任务备注（空串 = 清空）
 - POST   /jobs/batch-delete       批量删除任务记录（payload 带 purge_files 时产物一并清）
 - DELETE /jobs/{id}               删除任务记录（?purge_files=true 时产物一并清）
@@ -211,6 +212,32 @@ def cancel_job(
     已抓到的 jsonl 与媒体保留在输出目录，结果接口照常可查。
     """
     job = service.cancel_job(job_id)
+    return ApiResponse(data=CrawlJobResponse.from_model(job))
+
+
+@router.post(
+    "/jobs/{job_id}/retry",
+    response_model=ApiResponse[CrawlJobResponse],
+    status_code=201,
+    summary="重试素材抓取任务（按原参数新建一条任务）",
+)
+def retry_job(
+    service: CrawlJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[CrawlJobResponse]:
+    """按旧任务的参数**新建一条任务**并返回它（新 id、新的输出目录）。
+
+    抓取没有条目级状态（一条任务就是一个 MC 子进程），所以只能整任务重跑；
+    而重跑必须是新建：输出目录按任务 id 定死，且 MC 的 jsonl 是追加语义、
+    条数按行统计不去重 —— 就地重跑会把 note_count / crawled_count 算成两倍。
+
+    cookie 登录的任务也能重试：cookie 只存在旧任务行里、任何响应都不带它，
+    所以这一步只能在服务端做。
+
+    返回 201 而不是 200：这确实创建了一条新资源，前端应当用返回的 id 去
+    刷新历史列表，而不是把旧任务当成被更新的对象。
+    """
+    job = service.retry_job(job_id)
     return ApiResponse(data=CrawlJobResponse.from_model(job))
 
 

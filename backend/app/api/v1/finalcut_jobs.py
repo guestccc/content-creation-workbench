@@ -18,6 +18,7 @@
 - GET  /finalcut/copy-jobs/{id}           任务详情（轮询进度也用它）
 - GET  /finalcut/copy-jobs/{id}/subtitle-text  字幕原文 + 喂给 AI 的素材（② 左右对照）
 - POST /finalcut/copy-jobs/{id}/cancel    取消任务（结果不落库）
+- POST /finalcut/copy-jobs/{id}/retry     重试（按原参数新建一条任务，返回新任务）
 - PUT  /finalcut/copy-jobs/{id}/remark    更新任务备注（空串 = 清空）
 - POST /finalcut/copy-jobs/batch-delete   批量删除任务记录（无磁盘产物，无 purge）
 - DELETE /finalcut/copy-jobs/{id}         删除任务记录（只删记录）
@@ -264,6 +265,32 @@ def cancel_copy_job(
 ) -> ApiResponse[FinalcutCopyJobResponse]:
     """取消任务：结果不会落库。在途的 AI 请求会跑完再丢弃（上界 AI_TIMEOUT_SECONDS）。"""
     job = service.cancel_job(job_id)
+    return ApiResponse(data=FinalcutCopyJobResponse.from_model(job))
+
+
+@router.post(
+    "/copy-jobs/{job_id}/retry",
+    response_model=ApiResponse[FinalcutCopyJobResponse],
+    status_code=201,
+    summary="重试文案任务（按原参数新建一条任务）",
+)
+def retry_copy_job(
+    service: FinalcutCopyJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[FinalcutCopyJobResponse]:
+    """按旧任务的参数**新建一条任务**并返回它（新 id、新一批文案）。
+
+    文案任务没有条目级状态（一次 AI 调用产出一批文案），所以只能整任务重跑；
+    而重跑必须是新建：一条任务的产物就是「那一批文案」，就地重跑会把上一批
+    覆盖掉，历史记录与产物再也对不上。
+
+    素材（字幕 / 视频）路径全部从旧任务行取，不接受任何前端传入的路径；
+    文件已删或读不出来时点击即 400。
+
+    返回 201 而不是 200：这确实创建了一条新资源，前端应当用返回的 id 去刷新
+    历史列表，而不是把旧任务当成被更新的对象。
+    """
+    job = service.retry_job(job_id)
     return ApiResponse(data=FinalcutCopyJobResponse.from_model(job))
 
 

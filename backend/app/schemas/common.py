@@ -72,8 +72,8 @@ MAX_BATCH_DELETE_SIZE = 100
 class JobBatchDeleteRequest(BaseModel):
     """批量删除任务记录：整批成功或整批失败。
 
-    五个任务域（镜头分割 / 字幕提取 / 混剪 / 素材抓取 / 一键成品）共用一个模型 ——
-    内容没有任何领域差异，不做五份逐字拷贝。
+    七个任务域（镜头分割 / 字幕提取 / 混剪 / 素材抓取 / 一键成品 / 智能配音 /
+    一键换背景）共用一个模型 —— 内容没有任何领域差异，不做七份逐字拷贝。
     """
 
     ids: List[Annotated[int, Field(ge=1)]] = Field(
@@ -99,7 +99,7 @@ MAX_JOB_REMARK_LENGTH = 200
 
 
 class JobRemarkUpdate(BaseModel):
-    """更新任务备注：六个任务域共用一个模型（与 JobBatchDeleteRequest 同理）。
+    """更新任务备注：七个任务域共用一个模型（与 JobBatchDeleteRequest 同理）。
 
     备注是纯用户标记，各域没有任何差异；空串是有效值，表示清空备注。
     """

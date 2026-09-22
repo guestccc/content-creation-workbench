@@ -14,10 +14,11 @@ from app.core.materials import SUBDIRS, ensure_materials_layout
 
 
 def test_list_directory(client, tmp_path):
-    """列目录：目录在前，视频文件单独标记，隐藏文件不展示。"""
+    """列目录：目录在前，视频/图片分别标记，隐藏文件不展示。"""
     (tmp_path / "子目录").mkdir()
     (tmp_path / "b视频.mp4").write_bytes(b"b")
     (tmp_path / "a视频.MOV").write_bytes(b"a")
+    (tmp_path / "涂鸦.png").write_bytes(b"p")
     (tmp_path / "说明.txt").write_text("t", encoding="utf-8")
     (tmp_path / ".隐藏").write_text("h", encoding="utf-8")
 
@@ -26,13 +27,31 @@ def test_list_directory(client, tmp_path):
     data = response.json()["data"]
 
     names = [entry["name"] for entry in data["entries"]]
-    assert names == ["子目录", "a视频.MOV", "b视频.mp4", "说明.txt"]
+    assert names == ["子目录", "a视频.MOV", "b视频.mp4", "涂鸦.png", "说明.txt"]
     assert data["entries"][0]["is_dir"] is True
     assert data["entries"][1]["is_video"] is True
-    assert data["entries"][3]["is_video"] is False
+    assert data["entries"][3]["is_image"] is True
+    assert data["entries"][4]["is_video"] is False
+    assert data["entries"][4]["is_image"] is False
     assert data["video_count"] == 2
+    assert data["image_count"] == 1
     assert data["truncated"] is False
     assert data["path"] == str(tmp_path)
+
+
+def test_list_never_marks_one_file_as_both(client, tmp_path):
+    """一张图不会被同时标成视频 —— 两张白名单是分开的配置。
+
+    换背景页复用这个接口挑原图。谁要是图省事把 .png 塞进 SCENE_INPUT_EXTENSIONS，
+    镜头分割页就会把图片当视频列出来还能勾选，这条会红。
+    """
+    (tmp_path / "涂鸦.png").write_bytes(b"p")
+    (tmp_path / "口播.mp4").write_bytes(b"v")
+
+    data = client.get("/api/v1/fs/list", params={"path": str(tmp_path)}).json()["data"]
+    marks = {e["name"]: (e["is_video"], e["is_image"]) for e in data["entries"]}
+    assert marks == {"口播.mp4": (True, False), "涂鸦.png": (False, True)}
+    assert (data["video_count"], data["image_count"]) == (1, 1)
 
 
 def test_list_root_parent_is_none(client):
@@ -78,8 +97,9 @@ def test_default_path_is_materials_dir(client, tmp_path, monkeypatch):
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["path"] == str(materials)
-    # 列默认目录时会顺路把七个分段补齐，所以根下既有素材也有分段目录（目录在前）
+    # 列默认目录时会顺路把八个分段补齐，所以根下既有素材也有分段目录（目录在前）
     assert [entry["name"] for entry in data["entries"]] == [
+        "background",
         "clips",
         "crawl",
         "dubbing",
@@ -179,6 +199,68 @@ def test_preview_covers_every_listed_video(client, tmp_path):
         assert response.headers["content-type"].startswith("video/"), suffix
 
         video.unlink()
+
+
+def test_preview_covers_every_listed_image(client, tmp_path):
+    """列表里标成 is_image 的后缀，预览都得显示得出来（与视频那条对称）。
+
+    这里守的是**两个白名单的包含关系**：预览白名单（BACKGROUND_PAGE_EXTENSIONS）
+    必须是处理白名单（BACKGROUND_INPUT_EXTENSIONS）的子集，否则换背景页会出现
+    「勾得出来、缩略图 400」。.tif/.tiff 是刻意不在预览白名单里的例外 —— 算法读
+    得出来，浏览器认不得，所以按后缀排除掉。
+    """
+    for suffix in settings.BACKGROUND_PAGE_EXTENSIONS:
+        image = tmp_path / f"涂鸦{suffix}"
+        image.write_bytes(b"fake-image-bytes")
+
+        listed = client.get("/api/v1/fs/list", params={"path": str(tmp_path)}).json()["data"]
+        assert [entry["is_image"] for entry in listed["entries"]] == [True], suffix
+
+        response = client.get("/api/v1/fs/preview", params={"path": str(image)})
+        assert response.status_code == 200, suffix
+        assert response.headers["content-type"].startswith("image/"), suffix
+
+        image.unlink()
+
+    # 预览白名单确实是处理白名单的子集（多出来的那些就是浏览器不认的格式）
+    assert set(settings.BACKGROUND_PAGE_EXTENSIONS) <= set(settings.BACKGROUND_INPUT_EXTENSIONS)
+    assert set(settings.BACKGROUND_PAGE_EXTENSIONS) != set(settings.BACKGROUND_INPUT_EXTENSIONS)
+
+
+def test_preview_image_is_listed_but_not_video(client, tmp_path):
+    """图片能预览、但不是视频：换背景页拿它当原图，镜头分割页不该看见它。"""
+    image = tmp_path / "涂鸦.png"
+    image.write_bytes(b"fake-image-bytes")
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(image)})
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/png"
+    # 图片不走 Range：整个发出去，没有 206 一说
+    assert response.content == b"fake-image-bytes"
+
+
+def test_preview_tiff_400(client, tmp_path):
+    """.tif 算法读得出来，但浏览器显示不了 → 预览按 400 拒掉，不退化成下载。"""
+    image = tmp_path / "扫描件.tif"
+    image.write_bytes(b"fake-image-bytes")
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(image)})
+    assert response.status_code == 400, response.text
+    assert "只支持" in response.json()["error"]["message"]
+
+
+def test_preview_svg_400(client, tmp_path):
+    """SVG 能带脚本，同源直出就是 XSS 面 —— 两个白名单都不收它。"""
+    svg = tmp_path / "带毒的.svg"
+    svg.write_text("<svg onload='alert(1)'/>", encoding="utf-8")
+
+    response = client.get("/api/v1/fs/preview", params={"path": str(svg)})
+    assert response.status_code == 400, response.text
+
+
+def test_preview_image_missing_file_404(client, tmp_path):
+    response = client.get("/api/v1/fs/preview", params={"path": str(tmp_path / "没有.png")})
+    assert response.status_code == 404, response.text
 
 
 def test_preview_rejects_non_video_400(client, tmp_path):

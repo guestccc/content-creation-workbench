@@ -239,6 +239,38 @@ class FinalcutCopyJobService:
             raise DatabaseError("文案任务创建失败") from exc
 
     # ------------------------------------------------------------------
+    # 重试
+    # ------------------------------------------------------------------
+
+    def retry_job(self, job_id: int) -> FinalcutCopyJob:
+        """整任务重跑：拿旧任务的参数**新建一条任务**并返回它。
+
+        这条任务没有条目级状态（一次 AI 调用产出一批文案），所以「重试」只有
+        整任务重跑一种形态。做成新建而不是就地重跑的理由：一条任务的产物就是
+        「那一批文案」，就地重跑会把上一批覆盖掉，历史记录与产物就再也对不上；
+        新建之后旧任务原样留档，用户能在历史里对比两批文案的差别。
+
+        入参全部能从旧任务行拿到（subtitle_path / video_path / chars_per_second
+        / copy_count / hint），语速也照抄**当时快照的值**而不是今天的全局默认。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            BadRequestError: 素材已删或读不出来 —— 由 create_job 抛出，点击即报错。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        source = self.get_job(job_id)
+        payload = FinalcutCopyJobCreate(
+            subtitle_path=source.subtitle_path,
+            video_path=source.video_path,
+            chars_per_second=source.chars_per_second,
+            copy_count=source.copy_count,
+            hint=source.hint,
+        )
+        job = self.create_job(payload)
+        logger.info("文案任务重试（新建） | 原任务=%s | 新任务=%s", job_id, job.id)
+        return job
+
+    # ------------------------------------------------------------------
     # 状态流转
     # ------------------------------------------------------------------
 

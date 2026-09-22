@@ -25,11 +25,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core import video_files
+from app.core import media_files
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, DatabaseError, NotFoundError
 from app.core.logging import get_logger
 from app.core.materials import SUBTITLE, subdir
+from app.core.output_paths import allocate_unique_paths
 from app.core.subtitle_asr import resolve_engine
 from app.db.session import transaction
 from app.models.content import utcnow
@@ -49,7 +50,7 @@ logger = get_logger(__name__)
 
 def is_video_file(name: str) -> bool:
     """按后端配置的扩展名白名单判断是否为可处理的视频文件。"""
-    return video_files.is_video_file(name, settings.SUBTITLE_INPUT_EXTENSIONS)
+    return media_files.is_media_file(name, settings.SUBTITLE_INPUT_EXTENSIONS)
 
 
 def enumerate_videos(
@@ -57,9 +58,9 @@ def enumerate_videos(
 ) -> List[Path]:
     """把输入路径展开成一份确定的视频清单（白名单与批量上限取本功能的配置）。
 
-    规则与异常见 core/video_files.enumerate_videos —— 那里是唯一实现。
+    规则与异常见 core/media_files.enumerate_videos —— 那里是唯一实现。
     """
-    return video_files.enumerate_videos(
+    return media_files.enumerate_videos(
         input_path,
         recursive=recursive,
         files=files,
@@ -80,38 +81,20 @@ def allocate_output_paths(
     预建输出目录（而不是等到子进程里）：`-o` 传的是带扩展名的完整文件路径，
     VideoCaptioner 的文件模式分支不会自己创建父目录 —— 目录必须在这里就位。
 
+    编号规则本身在 core/output_paths.py（换背景要用同一套），这里只填命名规则。
+
     Raises:
         BadRequestError: 输出目录建不出来（权限、只读盘）。
     """
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise BadRequestError(f"创建输出目录失败：{output_dir}（{exc}）") from exc
-
-    allocation: Dict[Path, Path] = {}
-    used_names: Dict[str, int] = {}
-
-    for video in videos:
-        base_name = video.stem
-        count = used_names.get(base_name, 0)
-
-        # 同批次内重名（recursive 模式下不同子目录可能有同名文件）与磁盘上
-        # 已有同名文件，走同一套「往后找第一个没被占的编号」逻辑：
-        # 本批次已经分出去的编号会被记进 used_names，所以下一轮从它之后接着找。
-        while True:
-            count += 1
-            candidate = output_dir / (
-                f"{base_name}{format_suffix}"
-                if count == 1
-                else f"{base_name}-{count}{format_suffix}"
-            )
-            if not candidate.exists():
-                break
-
-        used_names[base_name] = count
-        allocation[video] = candidate
-
-    return allocation
+    return allocate_unique_paths(
+        videos,
+        output_dir,
+        lambda video, count: (
+            f"{video.stem}{format_suffix}"
+            if count == 1
+            else f"{video.stem}-{count}{format_suffix}"
+        ),
+    )
 
 
 def _product_paths(job: SubtitleJob) -> List[Path]:
@@ -398,6 +381,172 @@ class SubtitleJobService:
 
         _purge_products(products, job_ids=job_ids)
         return job_ids
+
+    # ------------------------------------------------------------------
+    # 重试
+    # ------------------------------------------------------------------
+
+    def retry_item(self, job_id: int, item_index: int) -> SubtitleJob:
+        """重试单条：条目重置回 pending，任务重新入队。
+
+        前置条件：任务已终态、且该条目是 failed 或 skipped —— 正在跑的任务没法
+        重试（工作线程正拿着它），已转写成功的条目重跑没有意义。
+
+        Raises:
+            NotFoundError: 任务或条目不存在。
+            ConflictError: 任务未结束，或该条目不是 failed / skipped。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                self._ensure_terminal_for_retry(job)
+                item = self._find_item_or_404(job, item_index)
+                self._ensure_item_retryable(item)
+                self._reset_items_for_retry(job, [item])
+                self.db.flush()
+
+            logger.info(
+                "字幕提取条目已重试入队 | job=%s | item=%s | %s",
+                job_id, item_index, item.source_name,
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("重试字幕提取条目失败 | job=%s | item=%s", job_id, item_index)
+            raise DatabaseError("重试字幕提取条目失败") from exc
+
+    def retry_items(self, job_id: int) -> SubtitleJob:
+        """一键重试：把该任务**所有** failed / skipped 的条目一起重新入队。
+
+        批量必须走这一个方法、不能在前端循环调 retry_item —— 第一次调用就把
+        任务置回 pending，第二次会撞上「任务尚未结束」的终态校验。所以终态校验
+        在循环之外只做一次，任务级字段也只在所有条目都重置完之后写一遍。
+
+        Raises:
+            NotFoundError: 任务不存在。
+            ConflictError: 任务未结束，或没有可重试的条目。
+            DatabaseError: 写库失败（事务已回滚）。
+        """
+        try:
+            with transaction(self.db):
+                job = self._get_job_or_404(job_id)
+                self._ensure_terminal_for_retry(job)
+
+                pending = [
+                    entry
+                    for entry in job.items
+                    if entry.status in SubtitleJobItemStatus.RETRYABLE
+                ]
+                if not pending:
+                    raise ConflictError(
+                        f"任务 #{job_id} 没有可重试的条目（{job.failed_videos} 条失败、"
+                        f"{job.skipped_videos} 条跳过）"
+                    )
+
+                self._reset_items_for_retry(job, pending)
+                self.db.flush()
+
+            logger.info(
+                "字幕提取任务批量重试入队 | job=%s | 条目数=%s", job_id, len(pending)
+            )
+            return job
+        except (NotFoundError, ConflictError):
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("批量重试字幕提取任务失败 | job=%s", job_id)
+            raise DatabaseError("批量重试字幕提取任务失败") from exc
+
+    def _ensure_terminal_for_retry(self, job: SubtitleJob) -> None:
+        """重试的公共前置：任务必须已经结束。
+
+        Raises:
+            ConflictError: 任务还在排队 / 正在跑。
+        """
+        if job.status not in SubtitleJobStatus.TERMINAL:
+            raise ConflictError(f"任务尚未结束（{job.status}），无法重试")
+
+    def _find_item_or_404(self, job: SubtitleJob, item_index: int) -> SubtitleJobItem:
+        """按任务内序号找条目，找不到就 404。
+
+        Raises:
+            NotFoundError: 该序号不在任务里。
+        """
+        item: Optional[SubtitleJobItem] = next(
+            (entry for entry in job.items if entry.index == item_index), None
+        )
+        if item is None:
+            raise NotFoundError(f"任务条目不存在：job={job.id}, index={item_index}")
+        return item
+
+    @staticmethod
+    def _ensure_item_retryable(item: SubtitleJobItem) -> None:
+        """只有「没产出」的条目能重试：failed 与 skipped 都是没转写出字幕。
+
+        Raises:
+            ConflictError: 条目是 pending / running / success。
+        """
+        if item.status not in SubtitleJobItemStatus.RETRYABLE:
+            raise ConflictError(
+                f"只有失败或跳过的条目才能重试（当前状态：{item.status}）"
+            )
+
+    def _reset_items_for_retry(
+        self, job: SubtitleJob, items: List[SubtitleJobItem]
+    ) -> None:
+        """把给定条目重置回 pending，并把任务重新入队（单条 / 批量共用）。
+
+        三个容易踩的地方：
+
+        1. **计数要重算，不能清零了事**。completed_videos / subtitle_count 都是
+           执行器里 `+= 1` 累加出来的（subtitle_runner._finish_item），收尾的
+           _finalize 只重算 failed / skipped / subtitle_count，所以这里必须按
+           条目状态数一遍再写。之后重跑的条目会在执行时各自 +1，收尾时
+           failed / skipped 再由 _finalize 数回来，总数自洽。
+        2. **上一轮的字幕文件要删掉**。输出路径按条目定死（重名已加后缀），
+           留着旧 .srt 会让「字幕存在」这个判据失真 —— 用户看到的会是上一轮的
+           文本，而不是这一轮的结果。
+        3. **child_pid 必须清**：它是取消 / 孤儿回收共用的唯一依据，留着旧 PID
+           有误杀无关进程的风险。
+        """
+        for item in items:
+            # 正常情况下 failed / skipped 的条目本来就没有字幕文件，这里是
+            # 防御性清理（上一轮写了一半、或用户手工放进来的同名文件）。
+            stale = Path(item.output_path)
+            try:
+                if stale.is_file():
+                    stale.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "清理重试前的残留字幕失败，跳过该文件 | %s | %s", stale, exc
+                )
+
+            item.status = SubtitleJobItemStatus.PENDING
+            item.subtitle_exists = False
+            item.file_size = 0
+            item.segment_count = 0
+            item.duration_seconds = None
+            item.exit_code = None
+            item.elapsed_seconds = 0
+            item.error_message = ""
+            item.started_at = None
+            item.finished_at = None
+
+        job.status = SubtitleJobStatus.PENDING
+        job.error_message = ""
+        job.started_at = None
+        job.finished_at = None
+        job.child_pid = None
+        job.current_index = 0
+        job.current_video = ""
+        job.current_elapsed_seconds = 0
+        job.completed_videos = sum(
+            1 for entry in job.items if entry.status == SubtitleJobItemStatus.SUCCESS
+        )
+        job.failed_videos = 0
+        job.skipped_videos = 0
+        job.subtitle_count = sum(1 for entry in job.items if entry.subtitle_exists)
 
     # ------------------------------------------------------------------
     # 产物

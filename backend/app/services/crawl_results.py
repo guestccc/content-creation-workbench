@@ -266,27 +266,38 @@ def normalize_note(raw: dict, platform: str) -> dict:
 
 
 def collect_results(output_dir: Path, platform: str) -> List[dict]:
-    """组装完整结果：归一化 + 附带本地媒体相对路径。
+    """组装完整结果：归一化 + 附带本地媒体路径。
 
     local_images / local_videos 是相对任务输出目录的 posix 路径，
-    前端拼 `/crawl/jobs/{id}/media/{path}` 取文件。
+    前端拼 `/crawl/jobs/{id}/media/{path}` 取文件；
+    local_image_dir 是图片所在目录的绝对路径，给「一键换背景」这类下游功能用
+    （那边要的是「一个目录 + 一批文件名」，posix 相对路径换不过去）。
     """
     notes = scan_notes(output_dir, platform)
     for note in notes:
-        images, videos = local_media(output_dir, platform, str(note["id"]))
+        images, videos, image_dir = local_media(output_dir, platform, str(note["id"]))
         note["local_images"] = images
         note["local_videos"] = videos
+        note["local_image_dir"] = image_dir
     return notes
 
 
-def local_media(output_dir: Path, platform: str, note_id: str) -> Tuple[List[str], List[str]]:
-    """探测一条笔记已下载到本地的图片 / 视频文件（相对路径，posix 风格）。
+def local_media(
+    output_dir: Path, platform: str, note_id: str
+) -> Tuple[List[str], List[str], str]:
+    """探测一条笔记已下载到本地的图片 / 视频文件。
 
     只对 NOTE_MEDIA_PLATFORMS 里的平台有意义；其它平台直接返回空
     （要么 MC 根本不下载媒体，要么像微博那样平铺无法按笔记关联）。
+
+    Returns:
+        (图片相对路径列表, 视频相对路径列表, 图片所在目录的绝对路径)。
+        相对路径是 posix 风格、相对任务输出目录；目录路径是本机绝对路径，
+        没有本地图片时给空串 —— 前端拿它当换背景的「原图目录」，
+        把这一批图整批带过去。
     """
     if not note_id or platform not in NOTE_MEDIA_PLATFORMS:
-        return [], []
+        return [], [], ""
 
     media_dir = MEDIA_DIR_NAMES[platform]
     images: List[str] = []
@@ -304,7 +315,10 @@ def local_media(output_dir: Path, platform: str, note_id: str) -> Tuple[List[str
                     sink.append(f"{media_dir}/{kind}/{note_id}/{item.name}")
         except OSError:
             continue
-    return images, videos
+    # 与上面 loop 里的 images 分支同一个目录（平台下的 images/<笔记 id>），
+    # 只是这里要的是绝对路径；有图才给，没图给空串 —— 前端据此禁用入口
+    image_dir = output_dir / media_dir / "images" / note_id
+    return images, videos, str(image_dir) if images else ""
 
 
 def _split_urls(text: str) -> List[str]:

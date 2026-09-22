@@ -25,6 +25,7 @@ from app.models.mix_job import (
 )
 from app.core.materials import CLIPS, subdir
 from app.services import media_tools, mix_runner
+from app.services.mix_job_service import MixJobService
 from app.services.mix_runner import (
     MixRunner,
     build_concat_argv,
@@ -474,3 +475,48 @@ class TestRecover:
         recovered = recover_interrupted_jobs(session_factory=TestingSessionLocal)
         assert recovered == 0
         assert _reload(db_session, job.id).status == MixJobStatus.PENDING
+
+
+# --------------------------------------------------------------------------
+# 重试
+# --------------------------------------------------------------------------
+
+
+class TestRetryWithRunner:
+    """重试之后真跑一遍：只拼接被重试的成片，已成功的成片不被重写。
+
+    归一化阶段是**重做**的（失败收尾把 .tmp/mix_<id>/norm/ 删了），这里顺带把
+    这个代价钉住 —— 哪天有人改了清理策略，这条用例会提醒他同步更新界面文案。
+    """
+
+    def test_only_the_retried_output_is_concatenated(self, db_session, materials, tmp_path):
+        job = _make_job(
+            db_session, tmp_path,
+            opening=[REL("a")], middle=[REL("b"), REL("c")], ending=[REL("d")],
+            count=2,
+        )
+        # 4 次归一化成功 + 拼接：第 1 条成功、第 2 条失败
+        scripts = [{}, {}, {}, {}, {}, {"exit_code": 1, "produce": False}]
+        _make_runner(scripts=scripts).run_job(job.id)
+
+        job = _reload(db_session, job.id)
+        assert job.status == MixJobStatus.PARTIAL
+        assert job.outputs[0].status == MixOutputStatus.SUCCESS
+        assert job.outputs[1].status == MixOutputStatus.FAILED
+
+        # 给成功那条的成片打个记号：重试之后它必须原封不动
+        kept = Path(job.outputs[0].output_path)
+        kept.write_bytes(b"sentinel")
+
+        MixJobService(db_session).retry_item(job.id, 2)
+        FakeFfmpeg.reset()
+        _make_runner().run_job(job.id)
+
+        job = _reload(db_session, job.id)
+        assert job.status == MixJobStatus.SUCCESS
+        assert job.completed_outputs == 2
+        assert job.failed_outputs == 0 and job.skipped_outputs == 0
+        assert kept.read_bytes() == b"sentinel"          # 成功那条没被重拼
+        assert Path(job.outputs[1].output_path).is_file()  # 重试那条产出了
+        # 归一化 4 次（全部重做）+ 只拼接第 2 条 = 5 次 ffmpeg
+        assert len(FakeFfmpeg.instances) == 5

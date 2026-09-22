@@ -15,7 +15,8 @@
     ├── output/     成片，待发布
     ├── crawl/      素材抓取产物：每个任务一个 job_<id>/ 子目录（jsonl + 媒体文件）
     ├── finalcut/   一键成品产物：每个合成任务一个 finalcut-<时间戳>/ 子目录
-    └── dubbing/    智能配音产物：每次生成一份 <名字>.wav（配音页的默认输出目录）
+    ├── dubbing/    智能配音产物：每次生成一份 <名字>.wav（配音页的默认输出目录）
+    └── background/ 一键换背景产物：每个任务一个 background-<时间戳>/ 子目录
 
 根目录本身不鼓励放东西：原片进 source/，产物进各自的分段目录，
 这样「哪些是素材、哪些是产物」一眼可辨，也不会几百个文件糊在一层。
@@ -40,6 +41,7 @@ OUTPUT = "output"
 CRAWL = "crawl"
 FINALCUT = "finalcut"
 DUBBING = "dubbing"
+BACKGROUND = "background"
 
 #: 子目录 → 用途说明。顺序即建目录的顺序，也是日志与文档里的顺序。
 SUBDIRS: Dict[str, str] = {
@@ -50,6 +52,7 @@ SUBDIRS: Dict[str, str] = {
     CRAWL: "素材抓取产物：每个任务一个 job_<id>/ 子目录（MC 的 --save_data_path）",
     FINALCUT: "一键成品产物：每个合成任务一个 finalcut-<时间戳>/ 子目录",
     DUBBING: "智能配音产物：每次生成一份 <名字>.wav（Voicebox 的外部产物落到这里）",
+    BACKGROUND: "一键换背景产物：每个任务一个 background-<时间戳>/ 子目录",
 }
 
 
@@ -66,7 +69,7 @@ def subdir(name: str) -> Path:
     """素材目录下某个分段的路径（不保证存在）。
 
     Args:
-        name: 分段名，取值见 SOURCE / CLIPS / SUBTITLE / OUTPUT。
+        name: 分段名，取值见本模块的 SUBDIRS（SOURCE / CLIPS / SUBTITLE / …）。
     Raises:
         ValueError: 传入了规划之外的分段名 —— 这类错是代码写错，不该静默兜底。
     """
@@ -76,7 +79,7 @@ def subdir(name: str) -> Path:
 
 
 def ensure_materials_layout() -> Path:
-    """建好素材目录骨架（根目录 + 七个分段），返回可用的根路径。
+    """建好素材目录骨架（根目录 + 八个分段），返回可用的根路径。
 
     应用启动与列目录接口都走这个函数，保证新克隆的仓库一打开就是规划好的样子。
 

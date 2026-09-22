@@ -13,6 +13,8 @@ dependencies = [
     # 一键成品的 AI 文案生成走 OpenAI 兼容的 chat/completions（httpx 直连）。
     # 它原本只在 dev 组里给测试客户端用，现在运行期也要依赖。
     "httpx>=0.28.0",
+    "numpy>=2.4",
+    "pillow>=11",
 ]
 
 [dependency-groups]

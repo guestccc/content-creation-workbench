@@ -19,6 +19,10 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
 from app.db.session import engine
+from app.services.background_job_worker import background_job_worker
+from app.services.background_runner import (
+    recover_interrupted_jobs as recover_interrupted_background_jobs,
+)
 from app.services.crawl_job_worker import crawl_job_worker
 from app.services.crawl_runner import recover_interrupted_jobs as recover_interrupted_crawl_jobs
 from app.services.finalcut_copy_runner import recover_interrupted_copy_jobs
@@ -90,6 +94,13 @@ async def lifespan(app: FastAPI):
         atexit.register(_shutdown_finalcut_worker)
         finalcut_job_worker.start()
 
+    if settings.BACKGROUND_WORKER_ENABLED:
+        # 一键换背景：同一套 DB 即队列模式。没有子进程，恢复只标状态
+        # （扣图跑在 worker 线程自己的进程里，进程没了任务就真停了）。
+        recover_interrupted_background_jobs()
+        atexit.register(_shutdown_background_worker)
+        background_job_worker.start()
+
     yield
 
     logger.info("正在关闭应用")
@@ -108,6 +119,9 @@ async def lifespan(app: FastAPI):
     if settings.FINALCUT_WORKER_ENABLED:
         atexit.unregister(_shutdown_finalcut_worker)
         _shutdown_finalcut_worker()
+    if settings.BACKGROUND_WORKER_ENABLED:
+        atexit.unregister(_shutdown_background_worker)
+        _shutdown_background_worker()
     logger.info("释放数据库连接池")
     engine.dispose()
 
@@ -150,6 +164,18 @@ def _shutdown_finalcut_worker() -> None:
         finalcut_job_worker.stop()
     except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
         logger.exception("停止一键成品工作线程出现异常")
+
+
+def _shutdown_background_worker() -> None:
+    """停止一键换背景工作线程（有界等待，绝不阻塞热重载）。
+
+    ⚠️ 这边没有子进程可杀，碰到一张大图时线程可能真的超出宽限期还没退出 ——
+    那是预期行为（daemon 兜底 + 下次启动回收），不是故障。
+    """
+    try:
+        background_job_worker.stop()
+    except Exception:  # noqa: BLE001 - 关闭路径兜底，绝不能挂住进程退出
+        logger.exception("停止一键换背景工作线程出现异常")
 
 
 def create_app() -> FastAPI:

@@ -4,6 +4,12 @@
 """
 
 from app.models.account import Account, AccountStatus
+from app.models.background_job import (
+    BackgroundJob,
+    BackgroundJobItem,
+    BackgroundJobItemStatus,
+    BackgroundJobStatus,
+)
 from app.models.content import Content, ContentStatus
 from app.models.crawl_job import (
     CrawlJob,
@@ -48,6 +54,10 @@ from app.models.subtitle_job import (
 __all__ = [
     "Account",
     "AccountStatus",
+    "BackgroundJob",
+    "BackgroundJobItem",
+    "BackgroundJobItemStatus",
+    "BackgroundJobStatus",
     "Content",
     "ContentStatus",
     "CrawlJob",

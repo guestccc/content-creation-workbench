@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.services.account_service import AccountService
+from app.services.background_job_service import BackgroundJobService
 from app.services.creator_service import CreatorService
 from app.services.crawl_cookie_service import CrawlCookieService
 from app.services.content_service import ContentService
@@ -84,6 +85,11 @@ def get_subtitle_job_service(db: DbSession) -> SubtitleJobService:
     return SubtitleJobService(db)
 
 
+def get_background_job_service(db: DbSession) -> BackgroundJobService:
+    """构造一键换背景任务服务实例。"""
+    return BackgroundJobService(db)
+
+
 def get_crawl_job_service(db: DbSession) -> CrawlJobService:
     """构造素材抓取任务服务实例。"""
     return CrawlJobService(db)
@@ -116,6 +122,7 @@ PublishTaskServiceDep = Annotated[PublishTaskService, Depends(get_publish_task_s
 SceneJobServiceDep = Annotated[SceneJobService, Depends(get_scene_job_service)]
 MixJobServiceDep = Annotated[MixJobService, Depends(get_mix_job_service)]
 SubtitleJobServiceDep = Annotated[SubtitleJobService, Depends(get_subtitle_job_service)]
+BackgroundJobServiceDep = Annotated[BackgroundJobService, Depends(get_background_job_service)]
 CrawlJobServiceDep = Annotated[CrawlJobService, Depends(get_crawl_job_service)]
 CreatorServiceDep = Annotated[CreatorService, Depends(get_creator_service)]
 CrawlCookieServiceDep = Annotated[CrawlCookieService, Depends(get_crawl_cookie_service)]

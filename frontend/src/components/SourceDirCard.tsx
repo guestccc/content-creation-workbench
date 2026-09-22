@@ -17,6 +17,7 @@ import { localVideoPreviewUrl } from '../api/filesystem'
 import type { UseSourceDirResult } from '../hooks/useSourceDir'
 import type { FsEntry } from '../types/scene'
 import { formatBytes } from '../utils/format'
+import PathBox from './PathBox'
 import VideoPreviewModal from './VideoPreviewModal'
 
 const { Text } = Typography
@@ -36,26 +37,6 @@ interface SourceDirCardProps {
   isEmptySourceDir: boolean
   onPickInput: () => void
   onPickOutput: () => void
-}
-
-/** 路径展示框：占满剩余宽度，过长省略（与 antd 输入框同样的内边距与边框） */
-function PathBox({ value, placeholder }: { value: string; placeholder: string }) {
-  return (
-    <Text
-      style={{
-        flex: 1,
-        padding: '4px 11px',
-        border: '1px solid var(--color-border)',
-        borderRadius: 6,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        color: value ? undefined : 'var(--color-text-muted)',
-      }}
-    >
-      {value || placeholder}
-    </Text>
-  )
 }
 
 export default function SourceDirCard({

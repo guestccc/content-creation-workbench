@@ -47,6 +47,7 @@ import DirectoryPicker from '../../components/DirectoryPicker'
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../../components/JobProgressCard'
 import JobRemarkModal from '../../components/JobRemarkModal'
+import RetryAllButton from '../../components/RetryAllButton'
 import SourceDirCard from '../../components/SourceDirCard'
 import SubtitlePreviewModal from '../../components/SubtitlePreviewModal'
 import type { SubtitlePreviewTarget } from '../../components/SubtitlePreviewModal'
@@ -77,6 +78,8 @@ import {
   fetchSubtitleFiles,
   fetchSubtitleJob,
   fetchSubtitleJobs,
+  retrySubtitleItem,
+  retrySubtitleJob,
   updateSubtitleJobRemark,
 } from '../../api/subtitle'
 import { ITEM_STATUS_META, JOB_STATUS_META, isTerminalStatus } from '../../types/subtitle'
@@ -241,6 +244,42 @@ export default function SubtitleExtract() {
   const cancel = async (jobId: number) => {
     if (await runner.cancel(jobId)) {
       message.info('已请求取消')
+    }
+  }
+
+  /**
+   * 重试接口返回的是**整条任务**的新状态，三处状态源都要对上号地刷新：
+   * 页面上方那张当前任务卡、历史「查看」弹窗里那条、历史列表的行。
+   */
+  const applyRetried = (updated: SubtitleJob) => {
+    runner.setJob((current) => (current?.id === updated.id ? updated : current))
+    setDetailJob((current) => (current?.id === updated.id ? updated : current))
+    history.reload()
+  }
+
+  /** 重试单条失败 / 跳过的视频：任务重新入队，其余视频的结果不动 */
+  const retryItem = async (target: SubtitleJob, item: SubtitleJobItem) => {
+    try {
+      applyRetried(await retrySubtitleItem(target.id, item.index))
+      message.success(`已重新入队：${item.source_name}`)
+    } catch (error) {
+      fail(error, '重试失败')
+    }
+  }
+
+  /**
+   * 重试全部未完成的视频。
+   *
+   * 走一条批量接口而不是循环调单条：第一次调用就把任务置回 pending，循环里
+   * 第二次会撞上「任务尚未结束」的 409 而半途而废。
+   */
+  const retryAll = async (target: SubtitleJob) => {
+    const count = target.failed_videos + target.skipped_videos
+    try {
+      applyRetried(await retrySubtitleJob(target.id))
+      message.success(`已重新入队 ${count} 条`)
+    } catch (error) {
+      fail(error, '重试失败')
     }
   }
 
@@ -606,17 +645,30 @@ export default function SubtitleExtract() {
         >
           {/* 每条视频的处理明细 */}
           {job.items.length > 0 && (
-            <Table
-              style={{ marginTop: 12 }}
-              rowKey="id"
-              pagination={false}
-              dataSource={job.items}
-              columns={itemColumns(job, (item) => {
-                if (item.subtitle_exists) {
-                  void openPreview(job.id, item.index)
-                }
-              })}
-            />
+            <>
+              {isTerminalStatus(job.status) && (
+                <Flex justify="flex-end" style={{ marginTop: 12 }}>
+                  <RetryAllButton
+                    count={job.failed_videos + job.skipped_videos}
+                    onRetry={() => void retryAll(job)}
+                  />
+                </Flex>
+              )}
+              <Table
+                rowKey="id"
+                pagination={false}
+                dataSource={job.items}
+                columns={itemColumns(
+                  job,
+                  (item) => {
+                    if (item.subtitle_exists) {
+                      void openPreview(job.id, item.index)
+                    }
+                  },
+                  (item) => void retryItem(job, item),
+                )}
+              />
+            </>
           )}
         </JobProgressCard>
       )}
@@ -653,6 +705,7 @@ export default function SubtitleExtract() {
           onCancel: (id) => void cancel(id),
           onDelete: (id) => void remove(id),
           onEditRemark: remark.open,
+          onRetry: (target) => void retryAll(target),
           purge,
         })}
         dataSource={history.items}
@@ -728,12 +781,24 @@ export default function SubtitleExtract() {
 
               {/* 还在跑的时候这个弹窗自己会轮询，状态列是活的。
                   预览复用页面级的字幕文本弹窗，直接叠在这层上面 */}
+              {isTerminalStatus(detailJob.status) && (
+                <Flex justify="flex-end">
+                  <RetryAllButton
+                    count={detailJob.failed_videos + detailJob.skipped_videos}
+                    onRetry={() => void retryAll(detailJob)}
+                  />
+                </Flex>
+              )}
               <Table
                 rowKey="id"
                 pagination={false}
                 dataSource={detailJob.items}
                 locale={{ emptyText: <Empty description="这条任务没有视频明细" /> }}
-                columns={itemColumns(detailJob, (item) => void openPreview(detailJob.id, item.index))}
+                columns={itemColumns(
+                  detailJob,
+                  (item) => void openPreview(detailJob.id, item.index),
+                  (item) => void retryItem(detailJob, item),
+                )}
               />
             </Space>
           )
@@ -801,8 +866,9 @@ function DescriptionsBlock({ job }: { job: SubtitleJob }) {
 function itemColumns(
   job: SubtitleJob,
   onPreview: (item: SubtitleJobItem) => void,
+  onRetry?: (item: SubtitleJobItem) => void,
 ): ColumnsType<SubtitleJobItem> {
-  return [
+  const columns: ColumnsType<SubtitleJobItem> = [
     { title: '#', dataIndex: 'index', width: 48 },
     { title: '视频', dataIndex: 'source_name', ellipsis: true },
     {
@@ -860,17 +926,36 @@ function itemColumns(
     },
     {
       title: '操作',
-      width: 64,
-      render: (_: unknown, record: SubtitleJobItem) =>
-        record.subtitle_exists ? (
-          <Button type="link" style={{ padding: 0 }} onClick={() => onPreview(record)}>
-            预览
-          </Button>
-        ) : (
-          <Text type="secondary">—</Text>
-        ),
+      width: 72,
+      render: (_: unknown, record: SubtitleJobItem) => {
+        // 有字幕就预览；没有字幕且任务已跑完，才谈得上重试 —— 两者互斥，
+        // 一个条目不会既产出了字幕又等着被补跑
+        if (record.subtitle_exists) {
+          return (
+            <Button type="link" style={{ padding: 0 }} onClick={() => onPreview(record)}>
+              预览
+            </Button>
+          )
+        }
+        // 可重试 = 「没有产出」：failed 是跑了但失败，skipped 是被取消 /
+        // 服务重启时压根没轮到
+        const retryable =
+          onRetry !== undefined &&
+          (record.status === 'failed' || record.status === 'skipped') &&
+          isTerminalStatus(job.status)
+        if (retryable) {
+          return (
+            <Button type="link" style={{ padding: 0 }} onClick={() => onRetry?.(record)}>
+              重试
+            </Button>
+          )
+        }
+        return <Text type="secondary">—</Text>
+      },
     },
   ]
+
+  return columns
 }
 
 /** 字幕产物清单列定义 */
@@ -904,6 +989,7 @@ function historyColumns(handlers: {
   onCancel: (jobId: number) => void
   onDelete: (jobId: number) => void
   onEditRemark: (job: SubtitleJob) => void
+  onRetry: (job: SubtitleJob) => void
   purge: UsePurgeFilesResult
 }): ColumnsType<SubtitleJob> {
   return [
@@ -921,6 +1007,9 @@ function historyColumns(handlers: {
       onDelete: handlers.onDelete,
       deleteDescription: '删除后不可恢复。',
       purge: handlers.purge,
+      // 列表接口不带逐条明细，只能靠行上的计数判断还有没有没产出的
+      onRetry: handlers.onRetry,
+      canRetry: (job) => job.failed_videos + job.skipped_videos > 0,
     }),
   ]
 }
