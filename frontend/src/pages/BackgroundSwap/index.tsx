@@ -16,13 +16,20 @@
  * 明细表（JobItemsTable）与历史「查看」弹窗（JobDetailModal）也在这个文件夹里 ——
  * 只有本页用得到，不进 src/components/。
  *
- * 除了自己挑目录，还能被**带着图跳进来**：素材抓取的结果弹窗里点「换背景」，
- * 把那条笔记已下载的图片（目录 + 文件名）放进路由 state，这里读出来预填。
+ * 原图有两种来路，都是「一条笔记的一批图」：
+ * 1. **被带着图跳进来** —— 素材抓取的结果弹窗里点「换背景」，把那条笔记已下载的
+ *    图片（目录 + 文件名）放进路由 state，这里读出来预填；
+ * 2. **本页自己挑** —— 「从素材抓取选图」弹窗（CrawlSourceModal），两级选下来
+ *    同样是「目录 + 一批文件名」。抓取产物落在分层目录里、目录选择器又不递归，
+ *    没有这个入口就只能靠第 1 条那条单向通道。
+ *
+ * 两种来路都会把来源（抓取任务 id + 笔记 id）一起带给后端存下来 —— 素材抓取那边
+ * 就是靠它把派生出来的换背景任务挂回笔记行的。
  */
 
 import { BgColorsOutlined, PictureOutlined } from '@ant-design/icons'
 import type { ReactNode } from 'react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import {
   Alert,
@@ -89,12 +96,15 @@ import type {
   BackgroundJobItem,
   BackgroundJobParams,
   BackgroundJobPayload,
+  BackgroundSwapEntry,
   BackgroundSwapPrefill,
 } from '../../types/background'
 import { formatElapsed } from '../../utils/format'
+import CrawlSourceModal from './CrawlSourceModal'
 import ImageSourceCard from './ImageSourceCard'
 import JobDetailModal from './JobDetailModal'
 import JobItemsTable from './JobItemsTable'
+import { useCrawlSource } from './useCrawlSource'
 import { useImageDir } from './useImageDir'
 
 const { Text, Title, Paragraph } = Typography
@@ -118,19 +128,36 @@ export default function BackgroundSwap() {
   const { message, fail, contextHolder } = useApiMessage()
 
   /**
-   * 其它页面带过来的原图（react-router state）。
+   * 其它页面跳进来时带的东西（react-router state）：一批原图、和/或一条要直接
+   * 打开详情弹窗的换背景任务。
    *
    * 用 useState 的初始化器取一次：state 会一直挂在这条 history 记录上，
-   * 但预填只在**进入页面这一刻**算数 —— 用户之后换了目录，这段说明就不该再挂着，
+   * 但它只在**进入页面这一刻**算数 —— 用户之后换了目录，那段说明就不该再挂着，
    * 所以手动换目录时把它一起清掉（见下面的 DirectoryPicker）。
    */
   const location = useLocation()
+  const [entry] = useState<BackgroundSwapEntry>(
+    () => (location.state ?? {}) as BackgroundSwapEntry,
+  )
   const [prefill, setPrefill] = useState<BackgroundSwapPrefill | null>(
-    () => (location.state ?? null) as BackgroundSwapPrefill | null,
+    entry.prefill ?? null,
   )
 
   const dir = useImageDir(fail, prefill)
   const picker = useDirectoryPicker<'input' | 'output' | 'bg'>()
+
+  /**
+   * 「从素材抓取选图」选中的一条笔记落到页面上。
+   *
+   * 目录与说明文字必须一起换 —— 只换目录的话，页面上那句「已从素材抓取任务 #12
+   * 带入 3 张图」会停在上一批，跟眼前的勾选对不上。所以走同一个函数。
+   */
+  const applyCrawlPrefill = (next: BackgroundSwapPrefill) => {
+    dir.applyPrefill(next)
+    setPrefill(next)
+  }
+
+  const crawlSource = useCrawlSource({ onPick: applyCrawlPrefill, fail })
 
   // ---------- 历史任务「查看」弹窗 ----------
   const [detailJobId, setDetailJobId] = useState<number | null>(null)
@@ -218,6 +245,15 @@ export default function BackgroundSwap() {
       params,
       ...(outputDir ? { output_dir: outputDir } : {}),
       ...(dir.selected.length > 0 ? { files: dir.selected } : {}),
+      // 来源只在「这批图确实是从抓取结果带过来的」时才带：用户手动重选过目录
+      // 的话 prefill 已经被清掉（见 DirectoryPicker），来源跟着一起丢 —— 记一条
+      // 对不上号的来源比不记更糟
+      ...(prefill?.crawlJobId !== undefined && prefill.crawlNoteId !== undefined
+        ? {
+            source_crawl_job_id: prefill.crawlJobId,
+            source_crawl_note_id: prefill.crawlNoteId,
+          }
+        : {}),
     })
     if (!created) {
       return
@@ -312,6 +348,18 @@ export default function BackgroundSwap() {
     }
   }
 
+  /**
+   * 从素材抓取那边「看详情」跳进来的：进页面就把那条换背景任务的弹窗打开。
+   *
+   * 只在挂载时跑一次（state 是这次导航带过来的快照）。依赖数组故意留空 ——
+   * openJobDetail 不是 useCallback，写进去会退化成「每次渲染都拉一遍详情」。
+   */
+  useEffect(() => {
+    if (entry.openJobId != null) {
+      void openJobDetail(entry.openJobId)
+    }
+  }, [])
+
   return (
     <div className="page">
       {contextHolder}
@@ -343,10 +391,11 @@ export default function BackgroundSwap() {
             outputDir={outputDir}
             prefillNotice={
               prefill
-                ? `已从${prefill.source}带入这 ${prefill.files.length} 张图并勾选，可自行增减`
+                ? `已从「${prefill.source}」带入这 ${prefill.files.length} 张图并勾选，可自行增减`
                 : undefined
             }
             onPickInput={() => picker.open('input')}
+            onPickFromCrawl={crawlSource.openModal}
             onPickOutput={() => picker.open('output')}
           />
         </Col>
@@ -559,6 +608,19 @@ export default function BackgroundSwap() {
         onClose={picker.close}
       />
 
+      {/* ---------- 从素材抓取选图 ---------- */}
+      <CrawlSourceModal
+        open={crawlSource.open}
+        jobs={crawlSource.jobs}
+        jobsLoading={crawlSource.jobsLoading}
+        activeJobId={crawlSource.activeJobId}
+        notes={crawlSource.notes}
+        notesLoading={crawlSource.notesLoading}
+        onSelectJob={crawlSource.selectJob}
+        onPick={crawlSource.pick}
+        onClose={crawlSource.closeModal}
+      />
+
       {/* ---------- 历史任务详情弹窗 ---------- */}
       <JobDetailModal
         jobId={detailJobId}
@@ -618,7 +680,7 @@ function AdvancedSettings({
 
       <NumberField
         label="缩放比例"
-        hint="贴纸宽度占背景宽度的比例，0.1 = 占背景宽的 10%；留空 = 不缩放，按原尺寸贴"
+        hint="整幅画布（含留白）宽度占背景宽度的比例，0.8 = 占背景宽的 80%；留空 = 原尺寸原位置贴。任何情况都不裁边"
         value={params.scale}
         placeholder="原尺寸"
         min={0.01}
@@ -670,6 +732,16 @@ function AdvancedSettings({
         addon="px"
         onChange={(value) => setParam('margin', value ?? DEFAULT_BACKGROUND_PARAMS.margin)}
       />
+
+      <Field
+        label="校准红框"
+        hint="给贴纸描一圈 2px 红边再贴上去 —— 红框始终框住整幅画布，就是实际落位与大小"
+      >
+        <Switch
+          checked={params.debug_border}
+          onChange={(checked) => setParam('debug_border', checked)}
+        />
+      </Field>
 
       <Text strong style={{ fontSize: 12 }}>
         抠图

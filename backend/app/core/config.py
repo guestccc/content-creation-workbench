@@ -309,6 +309,12 @@ class Settings(BaseSettings):
     AI_MAX_RETRIES: int = 1
     # 自定义 system 提示词，留空用内置的（services/finalcut_copy.py）。
     AI_SYSTEM_PROMPT: str = ""
+    # 流式请求里是否显式开启思考模式（DeepSeek 的 thinking + reasoning_effort）。
+    # 默认 True：DeepSeek 的思考模式本来就是默认开、effort=high，显式写出来只是
+    # 把它钉住，思维链会走 reasoning_content 流回来（见 ai_client.stream_chat）。
+    # **指向别的 OpenAI 兼容端点时改成 False** —— 那两个字段是 DeepSeek 私有的，
+    # 不认识的供应商会 400 挡回来；置 False 时一个都不发，退回老行为。
+    AI_THINKING: bool = True
 
     # ---------- 一键成品 ----------
     # 是否启用后台工作线程。测试环境置 False，与 SCENE_WORKER_ENABLED 同一套理由。

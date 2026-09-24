@@ -1,24 +1,20 @@
 /**
- * 「AI 配置与口播语速」弹窗：base_url / 模型 / API key 三项 + 口播语速，
- * 保存一并写回 backend/.env。
+ * 「AI 配置」弹窗：base_url / 模型 / API key 三项，保存一并写回 backend/.env。
+ *
+ * 后端只有一份 AI 配置（finalcut 与素材抓取的 AI 文案共用同一组 AI_* 变量），
+ * 所以这个弹窗是共用组件：一键成品页要配语速，抓取页只要三个连接项。
  *
  * key 的读接口只给掩码（完整值不出后端），所以输入框留空 = 不改原 key；
  * 占位符显示掩码提示用户「已有一个 key 在位」。DeepSeek 的默认端点与模型
  * 由后端下发（首次打开时表单回填当前生效值），用户通常只需粘一次 key。
- *
- * **口播语速为什么放在这里**：它是新任务的**默认**语速（页面上每条任务可
- * 单独覆盖），藏在「DeepSeek」标题下会找不到。默认 5.0 字/秒只是经验值，
- * 各家音色快慢差得远 —— 自己量一次（「87 字念了 15 秒」）填进去才准，
- * 所以配了个换算助手：填字数与秒数点一下，算出语速填进主字段，不用按计算器。
- * 真实校验在后端（1.0–15.0，越界 400），前端这条只是提前拦一下。
  */
 
 import { useEffect, useState } from 'react'
 import { Alert, Button, Flex, Form, Input, InputNumber, Modal, Typography } from 'antd'
 
-import { fetchAiSettings, updateAiSettings } from '../../api/finalcut'
-import { describeError } from '../../api/client'
-import type { UseApiMessageResult } from '../../hooks/useApiMessage'
+import { fetchAiSettings, updateAiSettings } from '../api/finalcut'
+import { describeError } from '../api/client'
+import type { UseApiMessageResult } from '../hooks/useApiMessage'
 
 const { Text } = Typography
 
@@ -27,8 +23,17 @@ interface AiSettingsModalProps {
   /** 提示接口，直接传页面的 useApiMessage() 返回值 */
   api: UseApiMessageResult
   onClose: () => void
-  /** 保存成功后调用（页面用它重新探测环境，好让新语速立刻生效） */
+  /** 保存成功后调用（页面用它重新探测环境，好让新配置立刻生效） */
   onSaved: () => void
+  /**
+   * 是否显示「默认口播语速」相关的一整块（语速字段 + 换算助手 + 语速告警）。
+   *
+   * 默认 false：语速只服务一键成品的口播稿，其它页面（素材抓取）用不到，
+   * 露出来只会让人以为改了会影响自己。**隐藏时不提交这个字段** ——
+   * AiSettingsPayload 里 chars_per_second 是「不传 = 不改」，把表单回填的
+   * 当前值原样 PUT 回去等于「用户看不到却改掉了它」（尤其别的页面刚改过时）。
+   */
+  showCharsPerSecond?: boolean
 }
 
 interface FormValues {
@@ -38,7 +43,13 @@ interface FormValues {
   chars_per_second: number
 }
 
-export default function AiSettingsModal({ open, api, onClose, onSaved }: AiSettingsModalProps) {
+export default function AiSettingsModal({
+  open,
+  api,
+  onClose,
+  onSaved,
+  showCharsPerSecond = false,
+}: AiSettingsModalProps) {
   const [form] = Form.useForm<FormValues>()
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -110,14 +121,18 @@ export default function AiSettingsModal({ open, api, onClose, onSaved }: AiSetti
   }
 
   const save = async () => {
-    const values = await form.validateFields()
+    // 隐藏语速时该字段不参与校验：它既没填也没渲染，不该拦住保存
+    const values = await form.validateFields(
+      showCharsPerSecond ? undefined : ['base_url', 'model', 'api_key'],
+    )
     setSaving(true)
     try {
       await updateAiSettings({
         base_url: values.base_url.trim(),
         model: values.model.trim(),
         api_key: values.api_key.trim(),
-        chars_per_second: values.chars_per_second,
+        // 不传 = 不改；隐藏时整个键都不出现，避免把看不见的旧值写回去
+        ...(showCharsPerSecond ? { chars_per_second: values.chars_per_second } : {}),
       })
       api.message.success('配置已保存并生效')
       onSaved()
@@ -132,7 +147,7 @@ export default function AiSettingsModal({ open, api, onClose, onSaved }: AiSetti
   return (
     <Modal
       open={open}
-      title="AI 配置与口播语速"
+      title="AI 配置"
       onCancel={onClose}
       okText="保存"
       cancelText="取消"
@@ -168,49 +183,53 @@ export default function AiSettingsModal({ open, api, onClose, onSaved }: AiSetti
           />
         </Form.Item>
 
-        <Form.Item
-          name="chars_per_second"
-          label="默认口播语速（字/秒）"
-          extra={`一秒念几个字。新任务的初始值（内置默认 ${rateDefault}），不影响已创建的任务 —— 每条任务的语速在页面上单独调；填你自己音色的实测值更准，文案的字数预算按它算。`}
-          rules={[
-            { required: true, message: '请填写口播语速' },
-            { type: 'number', min: 1, max: 15, message: '语速要在 1.0–15.0 字/秒之间' },
-          ]}
-        >
-          <InputNumber min={1} max={15} step={0.1} style={{ width: 160 }} />
-        </Form.Item>
+        {showCharsPerSecond && (
+          <>
+            <Form.Item
+              name="chars_per_second"
+              label="默认口播语速（字/秒）"
+              extra={`一秒念几个字。新任务的初始值（内置默认 ${rateDefault}），不影响已创建的任务 —— 每条任务的语速在页面上单独调；填你自己音色的实测值更准，文案的字数预算按它算。`}
+              rules={[
+                { required: true, message: '请填写口播语速' },
+                { type: 'number', min: 1, max: 15, message: '语速要在 1.0–15.0 字/秒之间' },
+              ]}
+            >
+              <InputNumber min={1} max={15} step={0.1} style={{ width: 160 }} />
+            </Form.Item>
 
-        <Form.Item label="按实测校准（可选）" style={{ marginBottom: 8 }}>
-          <Flex vertical gap={6}>
-            <Flex align="center" gap={6} wrap>
-              <InputNumber
-                min={1}
-                placeholder="字数"
-                style={{ width: 96 }}
-                value={measuredChars}
-                onChange={setMeasuredChars}
-              />
-              <Text type="secondary">字念了</Text>
-              <InputNumber
-                min={1}
-                placeholder="秒数"
-                style={{ width: 96 }}
-                value={measuredSeconds}
-                onChange={setMeasuredSeconds}
-              />
-              <Text type="secondary">秒</Text>
-              <Button size="small" disabled={!canMeasure} onClick={applyMeasured}>
-                算出语速
-              </Button>
-            </Flex>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {measuredHint ||
-                '例：一段 87 字的稿子配音出来 15 秒，就填 87 和 15 —— 语速是 5.8 字/秒。'}
-            </Text>
-          </Flex>
-        </Form.Item>
+            <Form.Item label="按实测校准（可选）" style={{ marginBottom: 8 }}>
+              <Flex vertical gap={6}>
+                <Flex align="center" gap={6} wrap>
+                  <InputNumber
+                    min={1}
+                    placeholder="字数"
+                    style={{ width: 96 }}
+                    value={measuredChars}
+                    onChange={setMeasuredChars}
+                  />
+                  <Text type="secondary">字念了</Text>
+                  <InputNumber
+                    min={1}
+                    placeholder="秒数"
+                    style={{ width: 96 }}
+                    value={measuredSeconds}
+                    onChange={setMeasuredSeconds}
+                  />
+                  <Text type="secondary">秒</Text>
+                  <Button size="small" disabled={!canMeasure} onClick={applyMeasured}>
+                    算出语速
+                  </Button>
+                </Flex>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {measuredHint ||
+                    '例：一段 87 字的稿子配音出来 15 秒，就填 87 和 15 —— 语速是 5.8 字/秒。'}
+                </Text>
+              </Flex>
+            </Form.Item>
+          </>
+        )}
       </Form>
-      {rateWarning && (
+      {showCharsPerSecond && rateWarning && (
         <Alert type="warning" message={rateWarning} showIcon style={{ marginTop: 12 }} />
       )}
     </Modal>

@@ -70,17 +70,25 @@ export function useCookieLibrary(api: CookieLibraryApi) {
     }
   }, [])
 
-  /** 打开存库弹窗（把输入框当前值配一个名字存起来） */
-  const openSave = useCallback(() => {
+  /** 「存到库」的目标：谁点的按钮就存谁的值（建任务表单与评论补抓弹窗共用此弹窗） */
+  const [saveTarget, setSaveTarget] = useState<{ platform: CrawlPlatform; cookie: string } | null>(null)
+
+  /** 打开存库弹窗（把调用方输入框当前值配一个名字存起来） */
+  const openSave = useCallback((platform: CrawlPlatform, cookie: string) => {
     setSaveName('')
+    setSaveTarget({ platform, cookie })
     setSaveOpen(true)
   }, [])
 
   const closeSave = useCallback(() => setSaveOpen(false), [])
 
-  /** 确认保存：同平台同名 → 覆盖更新，否则新建 */
+  /** 确认保存：同平台同名 → 覆盖更新，否则新建。值取 saveTarget（见 openSave） */
   const confirmSave = useCallback(
-    async (platform: CrawlPlatform, cookie: string): Promise<boolean> => {
+    async (): Promise<boolean> => {
+      if (saveTarget === null) {
+        return false
+      }
+      const { platform, cookie } = saveTarget
       const name = saveName.trim()
       if (!name) {
         latest.current.api.message.warning('请给 Cookie 起个名字（如「主号」）')
@@ -108,7 +116,7 @@ export function useCookieLibrary(api: CookieLibraryApi) {
         setSaving(false)
       }
     },
-    [library, saveName],
+    [library, saveName, saveTarget],
   )
 
   /** 删除 */
@@ -165,6 +173,7 @@ export function useCookieLibrary(api: CookieLibraryApi) {
     closeSave,
     saveName,
     setSaveName,
+    saveTarget,
     confirmSave,
     saving,
     remove,

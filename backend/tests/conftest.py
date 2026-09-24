@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 # 导入模型包，确保建表时元数据完整
 import app.models  # noqa: F401
+from app.api.deps import get_session_factory
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
@@ -154,6 +155,10 @@ def client(db_session):
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
+    # 流式端点（SSE）的写入发生在响应阶段，那时请求会话可能已经关掉了，
+    # 所以它走的是「会话工厂」这条注入线（见 app/api/deps.py）。这里必须一并
+    # 覆盖成测试库 —— 漏了这行，AI 文案的流式写入会落进真实 workbench.db。
+    app.dependency_overrides[get_session_factory] = lambda: TestingSessionLocal
     test_client = TestClient(app)
     try:
         yield test_client

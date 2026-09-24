@@ -64,7 +64,7 @@ import { fetchCopyJobs, updateCopyJobRemark } from '../../api/finalcut'
 import { localVideoPreviewUrl } from '../../api/filesystem'
 import { COPY_PHASE_LABEL, JOB_STATUS_META, isTerminalStatus } from '../../types/finalcut'
 import type { FinalcutCopyJob, FinalcutSource } from '../../types/finalcut'
-import AiSettingsModal from './AiSettingsModal'
+import AiSettingsModal from '../../components/AiSettingsModal'
 import CopyCard from './CopyCard'
 import SubtitleMaterialCard from './SubtitleMaterialCard'
 import { copyCharBudget } from './copyLength'
@@ -756,6 +756,7 @@ export default function FinalCut() {
         api={api}
         onClose={() => setAiSettingsOpen(false)}
         onSaved={() => void refresh(true)}
+        showCharsPerSecond
       />
 
       {/* ---------- 备注编辑 ---------- */}

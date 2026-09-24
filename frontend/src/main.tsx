@@ -1,7 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
-import { ConfigProvider } from 'antd'
+import { XProvider } from '@ant-design/x'
+import zhCN_X from '@ant-design/x/locale/zh_CN'
 import zhCN from 'antd/locale/zh_CN'
 
 import App from './App'
@@ -17,15 +18,18 @@ if (!rootElement) {
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     {/*
-      ConfigProvider 作用于全部页面：界面组件已统一为 antd，
-      主题只在这一处定义，页面里不再各写各的颜色。
+      XProvider（@ant-design/x）作用于全部页面：它是 ConfigProvider 的替代品，
+      完整继承后者的 props，所以主题仍然只在这一处定义，页面里不再各写各的颜色。
 
       刻意不引 antd 的全局 reset —— 组件样式是自带的（v6 起基于 CSS 变量），
       index.css 只提供 body 的字体/背景与设计变量，两下互不干扰。
       theme.token 与 index.css 里的 CSS 变量对齐，保证视觉是一套。
+
+      locale 必须**合并**两份：x 自己的组件（Think 等）文案在 zhCN_X 里，
+      antd 组件的文案在 zhCN 里，只传一个另一边就会掉回英文。
     */}
-    <ConfigProvider
-      locale={zhCN}
+    <XProvider
+      locale={{ ...zhCN_X, ...zhCN }}
       theme={{
         token: {
           colorPrimary: '#2563eb',
@@ -47,6 +51,6 @@ ReactDOM.createRoot(rootElement).render(
       <BrowserRouter>
         <App />
       </BrowserRouter>
-    </ConfigProvider>
+    </XProvider>
   </React.StrictMode>,
 )

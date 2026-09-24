@@ -176,6 +176,123 @@ export interface CrawlLogData {
   log: string
 }
 
+/** 一个平台的候选文案（标题 + 简介） */
+export interface NotePlatformCopy {
+  /** 候选标题（至多 5 条；模型少给就少给，按实际渲染） */
+  titles: string[]
+  /** 候选简介（至多 3 条） */
+  intros: string[]
+}
+
+/** 一条笔记的 AI 文案生成结果（小红书 + 抖音各一份） */
+export interface CrawlNoteAiCopy {
+  job_id: number
+  note_id: string
+  platforms: {
+    xhs: NotePlatformCopy
+    dy: NotePlatformCopy
+  }
+  /** 生成用的模型名 */
+  model: string
+  /** 本次生成的 token 用量 */
+  tokens_used: number
+  /** 模型思维链原文；老行或模型不支持思考时是空串（此时弹窗整块不渲染） */
+  reasoning: string
+  updated_at: string
+}
+
+/** AI 文案读取接口返回；found=false 表示还没生成过（正常态，不是错误） */
+export interface CrawlNoteAiCopyData {
+  found: boolean
+  result: CrawlNoteAiCopy | null
+}
+
+// ---------------------------------------------------------------------------
+// 评论（查看 / 补抓）
+// ---------------------------------------------------------------------------
+
+/** 一条归一化后的评论（跨平台字段已对齐，见 services/crawl_comments.py） */
+export interface CrawlComment {
+  id: string
+  content: string
+  nickname: string
+  /**
+   * 点赞数，**字符串**原样透传。
+   *
+   * 空串表示「这个平台不落盘点赞」（快手 / 贴吧），要能与 "0"（真的 0 赞）
+   * 区分开 —— 都渲染成 0 是在编数据。
+   */
+  liked_count: string
+  /** 归一化后的时间；认不出时是空串（不是无效值，只是没得显示） */
+  created_at: string
+  /** 平台说这条评论有多少条子评论（含没抓到的，见 CommentsModal 里的差额提示） */
+  sub_comment_count: number
+  /**
+   * 评论图地址，**两种形态混合**：
+   * - `http(s)…` 平台原图 URL —— 带时效签名，过期即 403（通常是后端没缓存
+   *   成功的），裂图只能靠「再抓一次」刷新签名；
+   * - 其余是本地缓存路径（后端读评论时懒下载的），用 crawlMediaUrl(jobId, path) 取。
+   */
+  pictures: string[]
+  /** 父评论没被抓到（截断 / 风控），提升成一级展示但必须标明 */
+  orphan: boolean
+  children: CrawlComment[]
+}
+
+/** 原任务的评论采集配置（弹窗三态判定的依据） */
+export interface CrawlCommentsConfig {
+  /** get_comments 且 max_comments > 0 才算真的会抓 */
+  enabled: boolean
+  max_comments: number
+  sub_comments: boolean
+}
+
+/** 最新一次评论补抓任务的状态（补抓任务不进历史列表，这是它唯一的可见入口） */
+export interface CrawlCommentRefetchState {
+  /** 补抓任务 id（取消走 cancelCrawlJob） */
+  job_id: number
+  status: CrawlJobStatus
+  error_message: string
+  /** 这次补抓自己抓到的评论条数（不是任务的 note_count，那边数的是内容行） */
+  comment_count: number
+  /** 排在它前面的待执行任务数（MC 单任务串行，用来解释「为什么还在转圈」） */
+  queued_ahead: number
+}
+
+/** 一条笔记的评论查询结果 */
+export interface NoteCommentsData {
+  /** 根任务 id（拿派生任务 id 查也会解析回根任务） */
+  job_id: number
+  note_id: string
+  /** 平台标识（补抓设置里的 Cookie 库按它过滤） */
+  platform: CrawlPlatform
+  comments: CrawlComment[]
+  /** 评论总条数（含所有层级） */
+  total: number
+  /** 一级评论条数 */
+  top_level_total: number
+  comments_config: CrawlCommentsConfig
+  /** 根任务的登录方式（补抓设置里登录方式单选的默认选中项） */
+  login_type: CrawlLoginType
+  /** 根任务是否无头跑浏览器（补抓设置里无头开关的默认值） */
+  headless: boolean
+  refetch: CrawlCommentRefetchState | null
+}
+
+/** 补抓一条笔记评论的请求体 */
+export interface CrawlCommentRefetchPayload {
+  note_id: string
+  /** 一级评论条数上限（后端限 1~200） */
+  max_comments: number
+  sub_comments: boolean
+  /** 不传 = 沿用原任务的登录方式 */
+  login_type?: CrawlLoginType
+  /** 新贴的 Cookie 串；cookie 登录且不传（留空）时服务端沿用原任务存的 */
+  cookies?: string
+  /** 不传 = 沿用原任务的无头设置 */
+  headless?: boolean
+}
+
 /** 创建任务的请求体 */
 export interface CrawlJobPayload {
   platform: CrawlPlatform

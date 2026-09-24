@@ -337,6 +337,29 @@ def mc_note(note_id: str, **overrides) -> dict:
 DEFAULT_MC_NOTES = [mc_note("note1"), mc_note("note2"), mc_note("note3")]
 
 
+def mc_comment(comment_id: str, *, note_id: str = "note1", note_field: str = "note_id",
+               **overrides) -> dict:
+    """一条 xhs 形态的原始评论行（其它平台用 overrides 换掉字段名）。
+
+    note_field 是评论行里指回笔记的那个字段，逐平台不同（抖音 aweme_id、
+    快手/B站 video_id、知乎 content_id）—— 与 crawl_results.FIELD_MAP 的 id
+    同一张对照表，见 services/crawl_comments。
+    """
+    comment = {
+        "comment_id": comment_id,
+        note_field: note_id,
+        "content": f"评论-{comment_id}",
+        "nickname": "路人甲",
+        "like_count": 3,
+        "create_time": 1747000000000,  # 毫秒时间戳
+        "parent_comment_id": "",       # 顶层：xhs 用空串（抖音/B站是 "0"）
+        "sub_comment_count": 0,
+        "pictures": "",
+    }
+    comment.update(overrides)
+    return comment
+
+
 class FakeMcPopen:
     """模拟 MediaCrawler 子进程（python main.py ...）的最小接口。
 

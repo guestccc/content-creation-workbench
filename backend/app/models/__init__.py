@@ -11,6 +11,7 @@ from app.models.background_job import (
     BackgroundJobStatus,
 )
 from app.models.content import Content, ContentStatus
+from app.models.crawl_ai_copy import CrawlNoteAiCopy
 from app.models.crawl_job import (
     CrawlJob,
     CrawlJobStatus,
@@ -63,6 +64,7 @@ __all__ = [
     "CrawlJob",
     "CrawlJobStatus",
     "CrawlLoginType",
+    "CrawlNoteAiCopy",
     "CrawlPlatform",
     "CrawlerType",
     "Creator",

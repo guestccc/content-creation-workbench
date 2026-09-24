@@ -12,6 +12,14 @@
  * 抓到的东西往哪去：图片走结果弹窗的「换背景」交给图文二创的下一环
  * （见 swapBackground），视频照旧进镜头分割 / 混剪。
  *
+ * 反方向也看得见：某条笔记的图换过背景，那一行的操作列就多一个「换背景任务 N」，
+ * 点开是派生任务的简表（见 useDerivedBackgroundJobs / DerivedBackgroundJobsModal）。
+ * 两个方向靠换背景任务上记的来源（抓取任务 id + 笔记 id）对上号。
+ *
+ * 挑中哪条之后要发抖音 / 小红书：结果表操作列的「AI 文案」按（任务, 笔记）
+ * 读/生成双平台文案（见 useAiCopy / AiCopyModal）。AI 配置是两页共用的
+ * components/AiSettingsModal，**本页不放入口**，只从文案弹窗的「去配置」进。
+ *
  * 平台 × 模式能力矩阵（支持的模式、输入提示、每页最小条数、Node 依赖）
  * 全部查本文件夹的 platforms.ts，不在 JSX 里写 if 链。
  */
@@ -19,14 +27,22 @@
 import {
   BgColorsOutlined,
   CloudDownloadOutlined,
+  CommentOutlined,
   CopyOutlined,
   EyeOutlined,
+  HeartTwoTone,
+  MessageTwoTone,
   ReloadOutlined,
+  RobotOutlined,
+  StarTwoTone,
+  UnorderedListOutlined,
 } from '@ant-design/icons'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Col,
@@ -51,6 +67,7 @@ import {
 } from 'antd'
 import type { ColumnsType, TableProps } from 'antd/es/table'
 
+import AiSettingsModal from '../../components/AiSettingsModal'
 import HistoryCard from '../../components/HistoryCard'
 import JobProgressCard, { JobTitle } from '../../components/JobProgressCard'
 import JobRemarkModal from '../../components/JobRemarkModal'
@@ -83,7 +100,6 @@ import {
   updateCrawlJobRemark,
 } from '../../api/crawler'
 import { fetchCreators } from '../../api/creator'
-import type { BackgroundSwapPrefill } from '../../types/background'
 import type { CreatorListData } from '../../types/creator'
 import {
   CRAWLER_TYPE_META,
@@ -108,12 +124,19 @@ import type {
   CrawlPlatform,
   CrawlerType,
 } from '../../types/crawler'
+import { prefillFromCrawlNote } from '../../utils/crawlPrefill'
 import { formatDateTime, formatElapsed } from '../../utils/format'
-import { useCrawlForm } from './useCrawlForm'
-import { useCrawlResults } from './useCrawlResults'
-import { useCookieLibrary } from './useCookieLibrary'
+import AiCopyModal from './AiCopyModal'
+import CommentsModal from './CommentsModal'
 import CookieEditModal from './CookieEditModal'
 import CookieManagerModal from './CookieManagerModal'
+import DerivedBackgroundJobsModal from './DerivedBackgroundJobsModal'
+import { useAiCopy } from './useAiCopy'
+import { useCookieLibrary } from './useCookieLibrary'
+import { useCrawlForm } from './useCrawlForm'
+import { useCrawlResults } from './useCrawlResults'
+import { useDerivedBackgroundJobs } from './useDerivedBackgroundJobs'
+import { useNoteComments } from './useNoteComments'
 
 const { Text, Title, Paragraph } = Typography
 
@@ -124,7 +147,9 @@ const KIND_LABEL: Record<string, string> = {
 }
 
 export default function MaterialCrawl() {
-  const { message, fail, contextHolder } = useApiMessage()
+  // api 整个留着（不只是解构出的三个）：AI 配置弹窗要整份 UseApiMessageResult
+  const api = useApiMessage()
+  const { message, fail, contextHolder } = api
   const navigate = useNavigate()
 
   const form = useCrawlForm()
@@ -154,6 +179,21 @@ export default function MaterialCrawl() {
   const platformCookies = cookieLib.cookiesForPlatform(form.platform)
   // ---------- 结果 / 日志弹窗 ----------
   const results = useCrawlResults(fail)
+
+  // ---------- 结果表「AI 文案」：给一条笔记生成双平台发布文案 ----------
+  const aiCopy = useAiCopy()
+  /** AI 配置弹窗（页面级没有配置按钮，只从文案弹窗的「去配置」进来） */
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+
+  // ---------- 结果里这条笔记派生出的换背景任务（笔记行的回看入口） ----------
+  const derivedBackground = useDerivedBackgroundJobs({ crawlJobId: results.jobId, fail })
+  /** 正在看派生任务的笔记；null 表示那个弹窗关着 */
+  const [derivedNote, setDerivedNote] = useState<CrawlNote | null>(null)
+
+  // ---------- 结果表「评论」：看/补抓一条笔记的评论 ----------
+  // 补抓任务不进历史任务列表（它是原任务的派生任务），所以这个 hook 还兼着
+  // 「哪条笔记正在补抓」的唯一事实源 —— 表格里那行按钮上的角标看它
+  const comments = useNoteComments({ message, fail })
 
   // ---------- 历史 + 当前任务 ----------
   const history = useJobList<CrawlJob>({ fetchList: fetchCrawlJobs })
@@ -285,20 +325,65 @@ export default function MaterialCrawl() {
    *
    * 一条笔记的图都落在它自己的一个目录里（后端给的是绝对路径），正好对上那边
    * 「一个原图目录 + 勾选一批文件名」的形态，所以整批带过去并预先勾好 ——
-   * 用户到了那边只剩选背景图这一件事。图片是相对路径，取最后一段当文件名
-   * （后端固定用 `/` 拼，posix 风格）。
+   * 用户到了那边只剩选背景图这一件事。翻译的过程在 utils/crawlPrefill 里，
+   * 换背景页自己选素材抓取产物走的是同一份（两边逐字相同，不能各抄一份）。
    */
   const swapBackground = (note: CrawlNote) => {
-    // 弹窗里有行就一定有 jobId（open 时一起设的）；没有目录说明这条笔记没图
-    if (!note.local_image_dir || results.jobId === null) {
+    if (results.jobId === null) {
       return
     }
-    const state: BackgroundSwapPrefill = {
-      inputPath: note.local_image_dir,
-      files: note.local_images.map((rel) => rel.split('/').pop() ?? rel),
-      source: `素材抓取任务 #${results.jobId}`,
+    // 没有本地图片时 prefillFromCrawlNote 返回 null，那就什么都不做 ——
+    // 与按钮置灰同一个判据，别硬造一个空目录带过去
+    const prefill = prefillFromCrawlNote(note, results.jobId)
+    if (prefill === null) {
+      return
     }
-    navigate('/background', { state })
+    navigate('/background', { state: { prefill } })
+  }
+
+  /**
+   * 结果表点「换背景任务 N」：看这条笔记的图被拿去换过几次背景。
+   *
+   * 列表不在这里拉 —— 开结果弹窗时已经按这条抓取任务整批拉过了
+   * （见 useDerivedBackgroundJobs），弹窗只是把分组好的那几条摆出来。
+   */
+  const openBackgroundJobs = (note: CrawlNote) => {
+    setDerivedNote(note)
+  }
+
+  /**
+   * 派生任务简表里点「看详情」：跳到换背景页并直接打开那条任务。
+   *
+   * 不复用「带图过去」那条通道：这里要的是**回看**一条已经跑完的任务，
+   * 把它的原图再勾一遍带过去只会让人以为要重跑。
+   */
+  const openBackgroundJob = (jobId: number) => {
+    navigate('/background', { state: { openJobId: jobId } })
+  }
+
+  /**
+   * 结果表点「AI 文案」：给这条笔记生成小红书 / 抖音的发布文案。
+   *
+   * 结果弹窗开着时 results.jobId 必定有值（按钮就在那个表里），理论上取不到
+   * 就直接返回 —— 文案要按（任务, 笔记）落库，没有任务 id 存不了。
+   */
+  const openAiCopy = (note: CrawlNote) => {
+    if (results.jobId === null) {
+      return
+    }
+    void aiCopy.open(results.jobId, note)
+  }
+
+  /**
+   * 结果表点「评论」：看这条笔记抓到手的评论，没抓到 / 抓少了可以就地补抓。
+   *
+   * 与 AI 文案同一个前提：按钮就在结果弹窗的表里，results.jobId 必定有值。
+   */
+  const openComments = (note: CrawlNote) => {
+    if (results.jobId === null) {
+      return
+    }
+    comments.open(results.jobId, note)
   }
 
   const copyText = (text: string) => {
@@ -642,7 +727,10 @@ export default function MaterialCrawl() {
                       label: item.remark ? `${item.name}（${item.remark}）` : item.name,
                     }))}
                   />
-                  <Button onClick={cookieLib.openSave} disabled={!form.cookies.trim()}>
+                  <Button
+                    onClick={() => cookieLib.openSave(form.platform, form.cookies.trim())}
+                    disabled={!form.cookies.trim()}
+                  >
                     存到库
                   </Button>
                   {cookieLib.items.length > 0 && (
@@ -928,9 +1016,12 @@ export default function MaterialCrawl() {
           )
         }
         footer={null}
-        // 这页结果表列最多（还带操作列的「换背景」），窄了标题列会被挤成一条缝；
-        // antd 自己有 max-width: calc(100vw - 32px) 兜底，小屏会自动缩回来
-        width={1400}
+        // 这页结果表列最多，窄了标题列会被挤成一条缝。操作列四个入口后表格
+        // 自然宽 1386，这里仍给 1500 —— 多出来的都归「标题」列（唯一没有
+        // 固定宽的列），标题能多认几个字。1500 = 表格自身 1386 + antd 的左右
+        // 各 24 内边距 + 余量；antd 自己有 max-width: calc(100vw - 32px) 兜底，
+        // 小屏会自动缩回来（表格转横向滚动）。
+        width={1500}
         onCancel={results.close}
         destroyOnHidden
       >
@@ -939,15 +1030,59 @@ export default function MaterialCrawl() {
           loading={results.loading}
           dataSource={results.notes}
           pagination={{ pageSize: 10, showSizeChanger: false }}
-          scroll={{ x: 1080 }}
+          // 1386 = 各列固定宽之和（含展开箭头那 48）+ 留给「标题」列的 198。
+          // 标题是唯一没有固定宽的列，多余的空间都给它。改列宽要连着这里一起改。
+          scroll={{ x: 1386 }}
           expandable={{
             expandedRowRender: (note) => noteDetail(note, results.jobId),
             rowExpandable: (note) =>
               note.desc !== '' || note.images.length > 0 || note.local_videos.length > 0,
           }}
-          columns={noteColumns(results.jobId, copyText, swapBackground)}
+          columns={noteColumns(results.jobId, {
+            swapBackground,
+            backgroundJobCount: (note) => derivedBackground.byNoteId[note.id]?.length ?? 0,
+            openBackgroundJobs,
+            openAiCopy,
+            openComments,
+            refetchingNoteId: comments.activeNoteId,
+          })}
         />
       </Modal>
+
+      {/* ---------- 某条笔记的 AI 发布文案 ---------- */}
+      <AiCopyModal
+        state={aiCopy}
+        copyText={copyText}
+        onGoSettings={() => setAiSettingsOpen(true)}
+      />
+
+      {/* ---------- 某条笔记的评论（查看 + 补抓） ---------- */}
+      <CommentsModal state={comments} cookieLib={cookieLib} />
+
+      {/* ---------- AI 配置（从文案弹窗的「去配置」进来；页面级没有入口） ----------
+          保存成功后若刚才卡在「没配置」，自动重试一次 —— 用户点完保存回来
+          就看见文案了，不用再点一遍「换一批」。语速字段与抓取无关，隐藏。 */}
+      <AiSettingsModal
+        open={aiSettingsOpen}
+        api={api}
+        onClose={() => setAiSettingsOpen(false)}
+        onSaved={() => {
+          if (aiCopy.errorKind === 'config') {
+            aiCopy.regenerate()
+          }
+        }}
+      />
+
+      {/* ---------- 某条笔记派生出的换背景任务（简表 + 跳去看详情） ---------- */}
+      <DerivedBackgroundJobsModal
+        note={derivedNote}
+        jobs={derivedNote ? derivedBackground.byNoteId[derivedNote.id] ?? [] : []}
+        loading={derivedBackground.loading}
+        error={derivedBackground.error}
+        onRefresh={derivedBackground.refresh}
+        onView={openBackgroundJob}
+        onClose={() => setDerivedNote(null)}
+      />
 
       {/* ---------- 日志尾部弹窗 ---------- */}
       <Modal
@@ -982,14 +1117,16 @@ export default function MaterialCrawl() {
         )}
       </Modal>
 
-      {/* ---------- 存到 Cookie 库弹窗 ---------- */}
+      {/* ---------- 存到 Cookie 库弹窗 ----------
+          建任务表单与评论补抓弹窗共用：存谁的值由打开时捕获的 saveTarget 决定，
+          不能到点「保存」那一刻才去读表单（那时焦点可能在评论弹窗里） */}
       <Modal
         open={cookieLib.saveOpen}
-        title={`把当前 Cookie 存到「${PLATFORM_META[form.platform].label}」库`}
+        title={`把当前 Cookie 存到「${PLATFORM_META[cookieLib.saveTarget?.platform ?? form.platform].label}」库`}
         okText="保存"
         cancelText="取消"
         confirmLoading={cookieLib.saving}
-        onOk={() => void cookieLib.confirmSave(form.platform, form.cookies.trim())}
+        onOk={() => void cookieLib.confirmSave()}
         onCancel={cookieLib.closeSave}
         destroyOnHidden
       >
@@ -1061,14 +1198,38 @@ function noteImages(jobId: number | null, note: CrawlNote): string[] {
 /** 结果表列定义 */
 function noteColumns(
   jobId: number | null,
-  copy: (text: string) => void,
-  swapBackground: (note: CrawlNote) => void,
+  handlers: {
+    swapBackground: (note: CrawlNote) => void
+    /** 这条笔记派生出的换背景任务数；0 表示没换过背景，操作列不给入口 */
+    backgroundJobCount: (note: CrawlNote) => number
+    /** 点「换背景任务 N」：打开那条笔记的派生任务简表 */
+    openBackgroundJobs: (note: CrawlNote) => void
+    /** 点「AI 文案」：打开这条笔记的双平台发布文案弹窗 */
+    openAiCopy: (note: CrawlNote) => void
+    /** 点「评论」：打开这条笔记的评论弹窗（看 + 补抓） */
+    openComments: (note: CrawlNote) => void
+    /** 正在补抓评论的那条笔记 id；null 表示没有补抓在跑（按钮上出角标用） */
+    refetchingNoteId: string | null
+  },
 ): ColumnsType<CrawlNote> {
+  const {
+    swapBackground,
+    backgroundJobCount,
+    openBackgroundJobs,
+    openAiCopy,
+    openComments,
+    refetchingNoteId,
+  } = handlers
+  // 列宽口径（别凭手感改，改一处要连着下面 scroll.x 一起算）：
+  // antd 默认尺寸的单元格左右各 16px 内边距，所以「内容宽 + 32」才是列能容下的宽；
+  // 展开箭头那一列另占 48px。下面每列的宽度都是按内容量出来的。
   return [
-    { title: '#', dataIndex: 'index', width: 44 },
+    // 序号是笔记在结果里的位置，三位数足够（一页才 10 行）
+    { title: '#', dataIndex: 'index', width: 56 },
     {
+      // 48px 封面图 + 左右内边距
       title: '封面',
-      width: 72,
+      width: 80,
       render: (_: unknown, note: CrawlNote) => {
         const src = noteImages(jobId, note)[0]
         return src ? (
@@ -1088,27 +1249,61 @@ function noteColumns(
     {
       title: '标题',
       ellipsis: true,
-      render: (_: unknown, note: CrawlNote) => (
-        <Tooltip title={note.title || note.desc}>
-          <span>{noteDisplayTitle(note)}</span>
-        </Tooltip>
-      ),
+      // 标题本身就是去原帖的入口（原来操作列里那个「原文」+「复制链接」撤了）。
+      // 没 url 的笔记退回纯文本，悬停 tooltip 仍给完整标题 / 正文，长标题被截
+      // 了也能看全。ellipsis 是列级 CSS（overflow:hidden + 省略号），a 是行内
+      // 元素，跟在 span 里表现一致，不影响截断。
+      render: (_: unknown, note: CrawlNote) => {
+        const title = noteDisplayTitle(note)
+        return (
+          <Tooltip title={note.title || note.desc}>
+            {note.url ? (
+              <a href={note.url} target="_blank" rel="noreferrer">
+                {title}
+              </a>
+            ) : (
+              <span>{title}</span>
+            )}
+          </Tooltip>
+        )
+      },
     },
-    { title: '作者', dataIndex: 'nickname', width: 110, ellipsis: true },
+    // 昵称能认出来就行（长昵称给省略号），但要容下 6~7 个字
+    { title: '作者', dataIndex: 'nickname', width: 120, ellipsis: true },
     // 互动数三列各自可排序：MC 落盘是 "6.6万" 这类字符串，排序先经 parseCountValue
     // 转数值（纯字符串排序会把 "999" 排在 "6.6万" 前面）；首次点击即从高到低。
+    // 点赞是挑素材时最常看的维度，所以只有它默认降序（defaultSortOrder 只挂
+    // 有 sorter 的列），另两列保持「不点不排」。
+    // 表头只放图标（label 是悬停提示，不渲染成文字）：列宽得容下最长的数字
+    // —— "123.5万" 这种，约 42px 内容 + 32 内边距，再加排序箭头。
     ...(
       [
-        { title: '点赞', field: 'liked_count' },
-        { title: '收藏', field: 'collected_count' },
-        { title: '评论', field: 'comment_count' },
+        {
+          label: '点赞',
+          field: 'liked_count',
+          icon: <HeartTwoTone twoToneColor="#eb2f96" />,
+          byDefault: true,
+        },
+        {
+          label: '收藏',
+          field: 'collected_count',
+          icon: <StarTwoTone twoToneColor="#faad14" />,
+          byDefault: false,
+        },
+        {
+          label: '评论',
+          field: 'comment_count',
+          icon: <MessageTwoTone twoToneColor="#1677ff" />,
+          byDefault: false,
+        },
       ] as const
     ).map(
       (column): ColumnsType<CrawlNote>[number] => ({
-        title: column.title,
+        title: <Tooltip title={column.label}>{column.icon}</Tooltip>,
         dataIndex: column.field,
-        width: 76,
+        width: 80,
         align: 'right',
+        defaultSortOrder: column.byDefault ? 'descend' : undefined,
         sortDirections: ['descend', 'ascend'],
         sorter: (a, b) => parseCountValue(a[column.field]) - parseCountValue(b[column.field]),
         render: (value: string) => (
@@ -1119,37 +1314,41 @@ function noteColumns(
       }),
     ),
     {
+      // formatDateTime 给的是「2026-09-23 14:33」，约 114px 内容 + 内边距
       title: '发布',
       dataIndex: 'publish_time',
-      width: 100,
+      width: 150,
       render: (value: string) => (value ? formatDateTime(value) : '—'),
     },
     {
       title: '图片',
-      width: 64,
+      width: 68,
       render: (_: unknown, note: CrawlNote) =>
         note.images.length > 0 ? `${note.images.length} 张` : '—',
     },
     {
       title: '操作',
-      width: 176,
+      // 「原文」与「复制链接」撤了（标题就是入口），剩下的入口一行放得下，
+      // 之前的上下两行布局也就跟着收回一行。
+      // 426 是量出来的：AI文案 ~96 + 换背景 ~96 + 换背景任务 N ~152（N 按三位
+      // 数留）+ 评论图标按钮 32、彼此 4px 间距、再加左右内边距 —— 给少了这一列
+      // 的内容会横着挤出格子。评论只给图标（带 tooltip）不给文字：加一个 96px 的
+      // 文字按钮会把「标题」列挤到约 100px，就是刚修过的那种溢出。
+      width: 426,
       render: (_: unknown, note: CrawlNote) => {
         const imageCount = note.local_images.length
+        const backgroundCount = backgroundJobCount(note)
+        const refetching = refetchingNoteId === note.id
         return (
           <Space size={4}>
-            {note.url && (
-              <a href={note.url} target="_blank" rel="noreferrer">
-                原文
-              </a>
-            )}
-            {note.url && (
-              <Button
-                type="text"
-                icon={<CopyOutlined />}
-                onClick={() => copy(note.url)}
-                title="复制链接"
-              />
-            )}
+            {/* AI 文案：把这条笔记的原文交给 AI，出小红书 / 抖音两套标题与简介。
+                按钮恒可点 —— 每行都点得动，没配 key 时弹窗里给「去配置」 */}
+            <Tooltip title="AI 推荐的小红书 / 抖音标题与简介，可直接复制">
+              <Button type="text" icon={<RobotOutlined />} onClick={() => openAiCopy(note)}>
+                AI文案
+              </Button>
+            </Tooltip>
+
             {/* 一键换背景：把这条笔记已下载到本地的图整批带过去当原图。
 
                 没图时按钮是灰的，而灰按钮（antd 6 用 pointer-events:none 关掉交互）
@@ -1172,6 +1371,31 @@ function noteColumns(
                   换背景
                 </Button>
               </span>
+            </Tooltip>
+
+            {/* 这条笔记的图**已经**被拿去换过背景：给一个回看入口。
+                没换过的笔记不渲染（灰着也占位置，一屏几十行全是灰按钮更吵）——
+                所以这里没有 disabled 分支，也就用不着外面那层 span */}
+            {backgroundCount > 0 && (
+              <Tooltip title={`这条笔记的图换过背景，共 ${backgroundCount} 条任务`}>
+                <Button
+                  type="text"
+                  icon={<UnorderedListOutlined />}
+                  onClick={() => openBackgroundJobs(note)}
+                >
+                  换背景任务 {backgroundCount}
+                </Button>
+              </Tooltip>
+            )}
+
+            {/* 评论：看这条笔记抓到手的评论，没抓到 / 抓得太少可以在弹窗里补抓。
+                只给图标不给文字 —— 加一个 96px 的文字按钮会把「标题」列挤回
+                刚修过的那种溢出。补抓在跑时角标是唯一可见入口（补抓任务不进
+                历史任务列表） */}
+            <Tooltip title={refetching ? '正在补抓这条笔记的评论' : '查看这条笔记抓到的评论'}>
+              <Badge dot={refetching}>
+                <Button type="text" icon={<CommentOutlined />} onClick={() => openComments(note)} />
+              </Badge>
             </Tooltip>
           </Space>
         )

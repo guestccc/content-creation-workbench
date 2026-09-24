@@ -47,6 +47,9 @@ from app.models.background_job import (
     BackgroundJobStatus,
 )
 from app.models.content import utcnow
+# 跨域只 import **模型**，不注入对方的 service（同 finalcut_render_service 的做法）：
+# 这里要的只是「这个 id 存不存在」，没有任何抓取域的业务规则要复用。
+from app.models.crawl_job import CrawlJob
 from app.schemas.background_job import BackgroundJobCreate
 from app.schemas.common import JobRemarkUpdate
 from app.services.fs_cleanup import remove_paths_best_effort
@@ -165,8 +168,13 @@ class BackgroundJobService:
         page: int = 1,
         page_size: int = 20,
         status: Optional[str] = None,
+        source_crawl_job_id: Optional[int] = None,
     ) -> Tuple[List[BackgroundJob], int]:
         """分页查询任务，按创建时间倒序（即 ID 倒序）。
+
+        Args:
+            source_crawl_job_id: 只列出来自该素材抓取任务的那些（素材抓取页
+                用它把派生任务挂回原任务的笔记行上）。None = 不过滤。
 
         Returns:
             (当前页数据, 满足条件的总条数)
@@ -175,6 +183,12 @@ class BackgroundJobService:
             conditions = []
             if status:
                 conditions.append(BackgroundJob.status == status)
+            # 0 不是合法 id：判 None 而不是判真值，免得以后有人传 0 时
+            # 悄悄退化成「不过滤、返回全部」
+            if source_crawl_job_id is not None:
+                conditions.append(
+                    BackgroundJob.source_crawl_job_id == source_crawl_job_id
+                )
 
             count_stmt = select(func.count()).select_from(BackgroundJob)
             list_stmt = select(BackgroundJob)
@@ -208,7 +222,7 @@ class BackgroundJobService:
 
         Raises:
             BadRequestError: 背景图不存在 / 后缀不在白名单 / 输入路径不合法 /
-                目录里没有图片 / 输出目录建不出来。
+                目录里没有图片 / 输出目录建不出来 / 来源素材抓取任务不存在。
             DatabaseError: 写库失败（事务已回滚）。
         """
         background = Path(payload.background_path)
@@ -221,6 +235,18 @@ class BackgroundJobService:
             )
 
         images = enumerate_images(payload.input_path, files=payload.files)
+
+        # 来源任务必须存在 —— 但**不校验**「这条笔记是否属于该任务」：抓取产物
+        # 随时可能被清掉（删除任务时勾了清产物），那种校验只会造出「明明有来源
+        # 却建不出来」。这里只挡住「传了一个根本不存在的任务 id」。
+        # 位置必须在下面建输出目录之前：晚于 mkdir 会给用户留一个空的
+        # background-<时间戳>/ 目录。
+        if payload.source_crawl_job_id is not None:
+            source_job = self.db.get(CrawlJob, payload.source_crawl_job_id)
+            if source_job is None:
+                raise BadRequestError(
+                    f"来源素材抓取任务不存在：id={payload.source_crawl_job_id}"
+                )
 
         if payload.output_dir:
             output_root = Path(payload.output_dir)
@@ -256,6 +282,8 @@ class BackgroundJobService:
                     files=list(payload.files or []),
                     background_path=str(background),
                     params=params,
+                    source_crawl_job_id=payload.source_crawl_job_id,
+                    source_crawl_note_id=payload.source_crawl_note_id,
                     total_images=len(images),
                 )
                 self.db.add(job)

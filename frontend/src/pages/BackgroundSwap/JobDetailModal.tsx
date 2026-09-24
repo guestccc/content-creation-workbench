@@ -74,6 +74,18 @@ export default function JobDetailModal({
                 {job.failed_images > 0 && ` · ${job.failed_images} 张失败`}
                 {job.skipped_images > 0 && ` · ${job.skipped_images} 张跳过`}
               </Descriptions.Item>
+              {/* 来源：素材抓取那边「看详情」跳过来时，「我为什么在这个页面」
+                  得在这里自明。弱关联，来源任务被删了这行照样在 */}
+              {job.source_crawl_job_id !== null && (
+                <Descriptions.Item label="来源" span={2}>
+                  素材抓取任务 #{job.source_crawl_job_id}
+                  {job.source_crawl_note_id && (
+                    <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                      笔记 {job.source_crawl_note_id}
+                    </Text>
+                  )}
+                </Descriptions.Item>
+              )}
               <Descriptions.Item label="输出目录" span={2}>
                 <Text style={{ fontSize: 12 }}>{job.output_dir}</Text>
               </Descriptions.Item>

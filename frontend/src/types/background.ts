@@ -50,7 +50,7 @@ export interface BackgroundJobParams {
   keep_color: boolean
 
   // ---------- 贴合 ----------
-  /** 贴纸宽度占底图宽度的比例（默认 0.1 = 占底图宽的 10%）；null = 不缩放，按原尺寸居中贴 */
+  /** 整幅画布（含透明留白）宽度占底图宽度的比例（默认 0.8）；null = 不缩放，原尺寸原位置居中贴。任何情况下都不裁边 */
   scale: number | null
   /** 贴合位置：关键字或 "x,y" 坐标；null = center */
   pos: string | null
@@ -62,6 +62,8 @@ export interface BackgroundJobParams {
   rotate: number
   /** 贴纸不透明度 0–1 */
   opacity: number
+  /** 校准红框：贴纸描 2px 红边再贴，用来看实际落位与尺寸（验证原尺寸居中时打开） */
+  debug_border: boolean
 }
 
 /**
@@ -102,11 +104,13 @@ export interface BackgroundStats {
   canvas?: number[]
   page?: number[]
   output?: number[]
-  /** 抠出来的贴纸画布尺寸（裁边、缩放**之前**的），与页面上最终贴上去的大小不是一回事 */
+  /** 贴上去的画布尺寸 = 原图画布（scale=null）或整体缩放后的画布；永不裁边 */
   sticker?: number[]
   position?: number[]
   /** 贴合时用的缩放比例；null = 原尺寸贴 */
   scale?: number | null
+  /** 这张产物带没带校准红框（排查「为什么图上有红边」先看这里） */
+  debug_border?: boolean
   /** 是否走了「输入已经是透明底」的直通分支 */
   already_transparent?: boolean
   /** 不透明像素数 / 可见像素数 / 可见占比 */
@@ -145,6 +149,10 @@ export interface BackgroundJob {
   output_dir: string
   /** 勾选的原图文件名清单；为空表示处理目录下全部图片 */
   files: string[]
+  /** 来源素材抓取任务 id；为空表示不是从抓取结果带过来的（仅溯源，弱关联） */
+  source_crawl_job_id: number | null
+  /** 来源笔记 id（空串表示没有来源）。素材抓取页靠它把任务挂回笔记行 */
+  source_crawl_note_id: string
   background_path: string
   background_name: string
   params: BackgroundJobParams
@@ -183,30 +191,51 @@ export interface BackgroundJobPayload {
   output_dir?: string
   /** 只处理目录下的这些文件名；留空表示全部图片 */
   files?: string[]
+  /** 来源素材抓取任务 id；带来源时才传（后端会校验这个任务存在） */
+  source_crawl_job_id?: number
+  /** 来源笔记 id；与上面的任务 id 成对出现，不能只给这一个 */
+  source_crawl_note_id?: string
   params: BackgroundJobParams
 }
 
 /**
- * 从别的页面跳进换背景时带过来的原图（react-router location.state）。
+ * 从素材抓取带进来的一批原图。
  *
- * 目前只有素材抓取的结果弹窗会带：那边一条笔记的图已经在本地同一个目录里，
- * 正好对应这里「一个目录 + 勾选一批文件」的形态。
+ * 那边一条笔记的图已经在本地同一个目录里，正好对应这里「一个目录 + 勾选一批
+ * 文件」的形态。两种来路：进页面前由路由 state 带进来，或者在页面里用
+ * 「从素材抓取选图」现挑一条笔记。
  */
 export interface BackgroundSwapPrefill {
   /** 原图目录的绝对路径 */
   inputPath: string
   /** 目录里要勾选的文件名（纯文件名，不带路径） */
   files: string[]
-  /** 来源说明，展示用（如「素材抓取任务 #12」） */
+  /** 来源说明，展示用（如「素材抓取任务 #12 · 保温杯测评」） */
   source: string
+  /** 来源抓取任务 id；不是从抓取来的就没有这一项，建任务时也不带来源 */
+  crawlJobId?: number
+  /** 来源笔记 id；与 crawlJobId 成对出现 */
+  crawlNoteId?: string
+}
+
+/**
+ * 跳进换背景页时挂在路由 state 上的载荷（react-router location.state）。
+ *
+ * 两种用途可以同时出现（比如「带一批图进来并打开某条任务的详情弹窗」），
+ * 所以做成一个对象而不是「state 本身就是 prefill」——后者两种用途只能二选一。
+ */
+export interface BackgroundSwapEntry {
+  /** 带上来的原图（目录 + 勾选 + 来源说明） */
+  prefill?: BackgroundSwapPrefill
+  /** 进页面就直接打开这条换背景任务的详情弹窗（素材抓取那边「看详情」用） */
+  openJobId?: number
 }
 
 /**
  * 算法参数的默认值（与后端 schemas/background_job.py 一致）。
  *
- * 除 `scale` 外都等于脚本默认。`scale` 刻意用 0.1（贴纸占背景宽的 10%）而不是
- * 脚本的「原尺寸」：手绘原图动辄 1080×1440，随手挑的背景常常比它小，原尺寸贴会
- * 直接判失败、整批出不来。留空仍然有效 = 不缩放、按原尺寸贴。
+ * 除 `scale` 外都等于脚本默认。`scale` 默认 0.8 = 整幅画布（永不裁边）整体缩到
+ * 背景宽的 80% —— 原尺寸贴大背景只占三成宽，偏小；清空输入框即回原尺寸原位置贴。
  */
 export const DEFAULT_BACKGROUND_PARAMS: BackgroundJobParams = {
   hi_frac: 0.9,
@@ -217,12 +246,13 @@ export const DEFAULT_BACKGROUND_PARAMS: BackgroundJobParams = {
   gate_pad: 0.12,
   warm: true,
   keep_color: false,
-  scale: 0.1,
+  scale: 0.8,
   pos: null,
   search_from: 0.35,
   margin: 20,
   rotate: 0.0,
   opacity: 1.0,
+  debug_border: false,
 }
 
 /** 贴合位置候选项；空值 = 居中（后端默认） */

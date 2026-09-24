@@ -85,6 +85,26 @@ class BackgroundJob(Base, JobRemarkMixin):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=BackgroundJobStatus.PENDING, comment="任务状态"
     )
+
+    # ---------- 来源（跨域弱关联，仅溯源） ----------
+    # 原图常常是从素材抓取的结果里带过来的。记下来源只为一件事：回过头能说清
+    # 「这条换背景任务是拿哪条抓取任务的哪条笔记跑出来的」。
+    # **不建外键**：抓取任务被删（连同产物）是常规操作，不该反过来影响已有记录；
+    # 笔记 id 是各平台原生的字符串，本来也建不了外键 —— 一半有约束一半没有，
+    # 比整对都松更糟（同 finalcut_render_jobs.copy_job_id 的「仅溯源」口径）。
+    source_crawl_job_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="来源素材抓取任务 id（仅溯源，不建外键）"
+    )
+    source_crawl_note_id: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        default="",
+        comment=(
+            "来源笔记 id（抓取产物 <平台>/images/<笔记 id>/ 的目录名）；"
+            "空串表示不是从抓取结果带过来的"
+        ),
+    )
+
     input_path: Mapped[str] = mapped_column(
         String(1000), nullable=False, comment="原图输入路径（文件或目录，已规范化为绝对路径）"
     )

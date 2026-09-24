@@ -5,15 +5,22 @@
  * crawlMediaUrl 不是请求函数：本地媒体地址直接给 <img>/<video> 的 src 用。
  */
 
-import { BASE_URL, del, get, post, put } from './client'
+import { BASE_URL, del, get, post, postStream, put } from './client'
+import type { StreamHandler } from './client'
 import type {
+  CrawlCommentRefetchPayload,
   CrawlEnvironment,
   CrawlJob,
   CrawlJobListData,
   CrawlJobPayload,
   CrawlLogData,
+  CrawlNoteAiCopyData,
   CrawlResultsData,
+  NoteCommentsData,
 } from '../types/crawler'
+
+/* 生成走 SSE 流式接口，超时由后端兜底、取消由调用方传 AbortSignal ——
+   前端不设秒表（见 client.ts 的 postStream）。 */
 
 /** 探测 MediaCrawler / Node / 登录态缓存，未就绪时返回分步安装指引 */
 export function fetchCrawlEnvironment(refresh = false): Promise<CrawlEnvironment> {
@@ -48,6 +55,73 @@ export function fetchCrawlResults(jobId: number): Promise<CrawlResultsData> {
 /** 获取 MC 子进程日志尾部（排查失败用） */
 export function fetchCrawlLog(jobId: number, limit?: number): Promise<CrawlLogData> {
   return get<CrawlLogData>(`/crawl/jobs/${jobId}/log`, limit ? { limit } : undefined)
+}
+
+/**
+ * 读取一条笔记已生成的 AI 文案。
+ *
+ * 没生成过时返回 `{found: false, result: null}` —— 这是正常态不是错误，
+ * 调用方据此决定要不要当场生成。
+ *
+ * note_id 走 query 而不是路径段：平台原生 id 的字符集没保证，含 `/` 会吞路径。
+ */
+export function fetchNoteAiCopy(jobId: number, noteId: string): Promise<CrawlNoteAiCopyData> {
+  return get<CrawlNoteAiCopyData>(`/crawl/jobs/${jobId}/ai-copies`, { note_id: noteId })
+}
+
+/**
+ * 流式生成（或「换一批」）一条笔记的 AI 文案。
+ *
+ * 覆盖语义：同一（任务, 笔记）永远只有最新一份，重复调用即换一批。
+ * 帧契约（与后端一一对应，见 crawl_jobs.py 的 stream_note_ai_copy）：
+ *
+ * - `reasoning` —— `{text}`：思维链增量，边到边推给 `<Think>`；
+ * - `done`      —— `{result}`：落库完成，result 就是 CrawlNoteAiCopy；
+ * - `error`     —— `{code, message}`：失败。AI_NOT_CONFIGURED / AI_AUTH_FAILED
+ *   提示去配置，其余提示重试。
+ *
+ * @param onEvent 每收到一帧回调一次，由调用方（useAiCopy）累积状态
+ * @param signal 取消信号：关弹窗、重新生成时要掐断上一轮
+ */
+export function streamNoteAiCopy(
+  jobId: number,
+  noteId: string,
+  onEvent: StreamHandler,
+  signal?: AbortSignal,
+): Promise<void> {
+  return postStream(
+    `/crawl/jobs/${jobId}/ai-copies/stream`,
+    { note_id: noteId },
+    onEvent,
+    signal,
+  )
+}
+
+/**
+ * 读一条笔记的评论（评论树 + 原任务评论配置 + 最新一次补抓状态）。
+ *
+ * 三件事挤在一个接口里是刻意的：补抓在跑时前端要靠轮询这个接口同时更新
+ * 「评论列表」和「补抓进度」，分成两个接口就会出现两边不同步的中间态。
+ *
+ * note_id 走 query 而不是路径段，与 fetchNoteAiCopy 同口径：平台原生 id 的
+ * 字符集没保证，含 `/` 会吞路径。
+ */
+export function fetchNoteComments(jobId: number, noteId: string): Promise<NoteCommentsData> {
+  return get<NoteCommentsData>(`/crawl/jobs/${jobId}/comments`, { note_id: noteId })
+}
+
+/**
+ * 对一条笔记补抓评论：后端按原任务的平台 / 登录态**新建一条 detail 派生任务**
+ * （只抓这一条、开着评论开关），返回那条任务。
+ *
+ * 派生任务不进历史任务列表 —— 它的状态只能从 fetchNoteComments 的 refetch 字段看。
+ * 同一条笔记已有非终态补抓时后端返 409，details 里带已存在那条的 job_id。
+ */
+export function refetchNoteComments(
+  jobId: number,
+  payload: CrawlCommentRefetchPayload,
+): Promise<CrawlJob> {
+  return post<CrawlJob>(`/crawl/jobs/${jobId}/comments/refetch`, payload)
 }
 
 /** 取消任务（执行中的会整组结束 MC 进程，已抓内容保留） */

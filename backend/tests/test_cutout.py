@@ -244,8 +244,8 @@ class TestFailures:
     def test_sticker_bigger_than_page_raises(self, tmp_path):
         """贴纸比背景大：直接报错，别学脚本「打印一句警告然后照样裁掉」。
 
-        批量场景下静默降质比报错难查得多。走的是 scale=None（原尺寸贴）这条路 ——
-        给了缩放比例就缩得下，报错自然轮不到（那正是默认值改成 0.1 想达到的效果）。
+        批量场景下静默降质比报错难查得多。走的是 scale=None（原尺寸贴，即默认）这条路 ——
+        给了缩放比例就缩得下，报错自然轮不到。
         """
         source = tmp_path / "大图.png"
         Image.fromarray(_synthetic(), "RGB").save(source)
@@ -302,7 +302,7 @@ class TestStickerSource:
 
 
 class TestComposite:
-    """贴合：默认缩到背景宽的 10% 居中；scale=None 时按原尺寸居中。"""
+    """贴合：默认原尺寸、原位置居中；给了 scale 整幅画布一起缩 —— 永不裁边。"""
 
     def test_center_is_ink_corner_is_page(self):
         rgba, _ = cutout(_synthetic(), CutoutParams())
@@ -314,31 +314,41 @@ class TestComposite:
         assert out.getpixel((200, 200)) == (INK, INK, INK)     # (x, y)
         assert out.getpixel((5, 5)) == (0, 0, 255)             # 角落仍是背景色
 
-    def test_scale_shrinks_and_trims_the_sticker(self):
-        """给了 scale 才裁边 + 缩放（贴纸宽 = 底图宽 × scale）。"""
+    def test_scale_resizes_the_whole_canvas_without_trimming(self):
+        """给了 scale：整幅画布（含透明留白）一起缩，笔画的相对位置不变。
+
+        回归钉「永不裁边」：曾在这里先裁到主体包围盒再缩放 —— 笔画在画布里的
+        位置信息整个丢失，缩完的贴纸被笔画撑满。现在画布四边的留白必须原样
+        保留（按比例），角上仍露出背景色。
+        """
         rgba, _ = cutout(_synthetic(), CutoutParams())
         sticker = Image.fromarray(rgba, "RGBA")
         page = Image.new("RGB", (200, 200), (0, 0, 255))
 
         out, pos = composite(sticker, page, CutoutParams(scale=0.5))
-        assert pos[0] >= 0 and pos[1] >= 0
-        assert out.getpixel((100, 100)) == (INK, INK, INK)
+        # 画布 300×200 整体缩到 200×0.5=100 宽 → 100×67，落点按这个尺寸居中
+        assert pos == ((200 - 100) // 2, (200 - 67) // 2)
+        # 画布角是透明留白：盖上去露出背景色 —— 没被裁掉的直接证据
+        assert out.getpixel((pos[0] + 1, pos[1] + 1)) == (0, 0, 255)
+        # 主体（画布内 x 120..219，占左侧 40%）缩放后仍落在画布同比例处 → 页面中央附近是墨
+        assert out.getpixel((106, 106)) == (INK, INK, INK)
 
-    def test_default_scale_is_a_tenth_of_the_page(self):
-        """不传任何参数时，贴纸宽度 = 底图宽的 10%，而不是脚本的「原尺寸」。
+    def test_default_scale_is_eight_tenths_of_the_page(self):
+        """不传任何参数：整幅画布缩到背景宽的 80% 居中 —— 永不裁边。
 
-        这是**刻意偏离脚本默认**的一处：手绘原图动辄 1080×1440，随手挑的背景常常
-        比它小，「原尺寸贴」会让整批图判失败。改回 None 等于把那个坑重新挖开。
+        默认值的演变：0.1（裁边缩到 10%，笔画位置丢失）→ None（原尺寸，贴大
+        背景只占三成宽、偏小）→ 0.8（画布整体缩放，位置保真且画面饱满）。
+        要原尺寸原位置就显式传 None / 清空输入框。
         """
-        assert CutoutParams().scale == 0.1
+        assert CutoutParams().scale == 0.8
 
         rgba, _ = cutout(_synthetic(), CutoutParams())
         sticker = Image.fromarray(rgba, "RGBA")
         page = Image.new("RGB", (400, 400), (0, 0, 255))
 
-        # 贴纸被缩到 400 × 0.1 = 40px 宽，落点自然按这个宽度居中
+        # 300×200 画布整体缩到 400×0.8=320 宽 → 320×213，按这个尺寸居中
         _out, pos = composite(sticker, page, CutoutParams())
-        assert pos[0] == (400 - 40) // 2
+        assert pos == ((400 - 320) // 2, (400 - 213) // 2)
 
     def test_opacity_scales_the_sticker_alpha(self):
         rgba, _ = cutout(_synthetic(), CutoutParams())
@@ -348,6 +358,38 @@ class TestComposite:
         out, _ = composite(sticker, page, CutoutParams(opacity=0.5))
         # 半透明墨色压在纯蓝上：既不是纯墨，也不是纯背景
         assert out.getpixel((200, 200)) not in ((INK, INK, INK), (0, 0, 255))
+
+    def test_debug_border_draws_red_frame_at_placement(self):
+        """校准红框：贴纸边界描 2px 红边 —— 贴纸边界即实际落位边界。
+
+        第二次调用（关掉开关）同时守着两件事：默认行为分毫不动、
+        以及红边只画在产物上，没有漏改调用方手里的贴纸。
+        """
+        rgba, _ = cutout(_synthetic(), CutoutParams())
+        sticker = Image.fromarray(rgba, "RGBA")
+        page = Image.new("RGB", (400, 400), (0, 0, 255))
+
+        bordered, pos = composite(sticker, page, CutoutParams(debug_border=True))
+        # 贴纸边上一格（上 / 左边框的中段）是纯红
+        assert bordered.getpixel((pos[0] + 20, pos[1] + 1)) == (255, 0, 0)
+        assert bordered.getpixel((pos[0] + 1, pos[1] + 20)) == (255, 0, 0)
+
+        plain, plain_pos = composite(sticker, page, CutoutParams())
+        # 同一位置关掉开关：画布边缘的透明留白，露出背景蓝色
+        assert plain.getpixel((plain_pos[0] + 20, plain_pos[1] + 1)) == (0, 0, 255)
+
+    def test_debug_border_frames_full_canvas_when_scale_is_none(self):
+        """scale=None 时红框框住的是整幅原尺寸画布 —— 验证「原尺寸居中」全靠它。"""
+        rgba, _ = cutout(_synthetic(), CutoutParams())
+        sticker = Image.fromarray(rgba, "RGBA")
+        page = Image.new("RGB", (400, 400), (0, 0, 255))
+
+        bordered, pos = composite(
+            sticker, page, CutoutParams(scale=None, debug_border=True)
+        )
+        assert pos == ((400 - 300) // 2, (400 - 200) // 2)   # 300×200 原尺寸居中
+        assert bordered.getpixel((pos[0] + 150, pos[1] + 1)) == (255, 0, 0)
+        assert bordered.getpixel((pos[0] + 150, pos[1] + 198)) == (255, 0, 0)
 
 
 class TestLoadPage:
@@ -386,6 +428,21 @@ class TestParams:
         assert params.margin == 20
         assert params.gate is True
 
+    def test_bool_flags_survive_from_mapping(self):
+        """布尔开关从 JSON 取值必须真的生效（历史坑，见 from_mapping 里的注释）。
+
+        模块顶部的 `from __future__ import annotations` 让 spec.type 变成字符串
+        "bool"，`spec.type is bool` 恒为 False —— 关掉位置门的任务存了 gate=False，
+        执行时却被静默丢掉、照旧开门。「点了没用还不报错」正是最难查的那种。
+        """
+        params = CutoutParams.from_mapping(
+            {"gate": False, "warm": False, "keep_color": True, "debug_border": True}
+        )
+        assert params.gate is False
+        assert params.warm is False
+        assert params.keep_color is True
+        assert params.debug_border is True
+
     def test_none_is_preserved_for_meaningful_fields(self):
         """scale / pos / dark_frac 的 None 是有意义的值（= 用默认行为）。"""
         params = CutoutParams.from_mapping({"scale": None, "pos": None, "dark_frac": None})
@@ -398,7 +455,10 @@ class TestParams:
         assert CutoutParams.from_mapping({}) == CutoutParams()
 
     def test_as_dict_round_trips(self):
-        params = CutoutParams(scale=0.5, pos="tl", dark_frac=0.22)
+        params = CutoutParams(
+            scale=0.5, pos="tl", dark_frac=0.22,
+            gate=False, warm=False, debug_border=True,
+        )
         assert CutoutParams.from_mapping(params.as_dict()) == params
 
 

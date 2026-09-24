@@ -5,7 +5,7 @@
 
 接口一览：
 - POST   /jobs                        创建换背景任务
-- GET    /jobs                        历史任务分页列表
+- GET    /jobs                        历史任务分页列表（可按 status / source_crawl_job_id 过滤）
 - POST   /jobs/batch-delete           批量删除任务记录
 - GET    /jobs/{id}                   任务详情（轮询进度也用它）
 - GET    /jobs/{id}/items/{n}/output  单张产物 PNG（页面上直接当缩略图/大图显示）
@@ -68,9 +68,19 @@ def list_jobs(
         alias="status",
         description=f"按状态过滤：{'/'.join(BackgroundJobStatus.ALL)}",
     ),
+    source_crawl_job_id: int | None = Query(
+        default=None,
+        ge=1,
+        description="只列出来自该素材抓取任务的任务（素材抓取页把派生任务挂回笔记行用）",
+    ),
 ) -> ApiResponse[BackgroundJobListData]:
     """分页查询历史任务，列表不携带每张图的明细。"""
-    items, total = service.list_jobs(page=page, page_size=page_size, status=status_filter)
+    items, total = service.list_jobs(
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        source_crawl_job_id=source_crawl_job_id,
+    )
     return ApiResponse(
         data=BackgroundJobListData(
             total=total,

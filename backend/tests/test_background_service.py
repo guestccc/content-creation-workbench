@@ -17,6 +17,7 @@ from app.models.background_job import (
     BackgroundJobStatus,
     BackgroundJobItemStatus,
 )
+from app.models.crawl_job import CrawlJob
 from app.schemas.background_job import BackgroundJobCreate, BackgroundJobParams
 from app.schemas.common import JobRemarkUpdate
 from app.services.background_job_service import BackgroundJobService
@@ -172,6 +173,68 @@ class TestCreate:
         assert job.params["warm"] is False
         # 没显式给的字段也要落进快照，执行时不必再回头找默认值
         assert job.params["hi_frac"] == 0.90
+
+
+class TestSourceProvenance:
+    """来源字段：只记录，不产生约束。"""
+
+    @staticmethod
+    def _crawl_job(db_session):
+        """造一条素材抓取任务行，给换背景任务当来源。"""
+        crawl = CrawlJob(
+            platform="xhs",
+            crawler_type="search",
+            login_type="qrcode",
+            params={"keywords": ["保温杯"]},
+        )
+        db_session.add(crawl)
+        db_session.commit()
+        return crawl
+
+    def test_source_is_snapshotted(self, db_session, source_dir, background_image):
+        crawl = self._crawl_job(db_session)
+        job = BackgroundJobService(db_session).create_job(
+            _payload(
+                source_dir,
+                background_image,
+                source_crawl_job_id=crawl.id,
+                source_crawl_note_id="note-1",
+            )
+        )
+        assert job.source_crawl_job_id == crawl.id
+        assert job.source_crawl_note_id == "note-1"
+
+    def test_no_source_means_empty_columns(self, db_session, source_dir, background_image):
+        """自己挑目录建的任务：可空列是 NULL、非空列是空串（前端靠它判断）。"""
+        job = BackgroundJobService(db_session).create_job(
+            _payload(source_dir, background_image)
+        )
+        assert job.source_crawl_job_id is None
+        assert job.source_crawl_note_id == ""
+
+    def test_unknown_source_job_is_rejected_before_any_directory(
+        self, db_session, source_dir, background_image
+    ):
+        """来源任务不存在 → BadRequestError，且**没有**留下输出目录。
+
+        校验必须排在 mkdir 之前：晚一步，用户每点一次就多一个空的
+        background-<时间戳>/ 目录。
+        """
+        with pytest.raises(BadRequestError, match="来源素材抓取任务不存在"):
+            BackgroundJobService(db_session).create_job(
+                _payload(
+                    source_dir,
+                    background_image,
+                    source_crawl_job_id=999,
+                    source_crawl_note_id="note-1",
+                )
+            )
+        assert not Path(settings.SCENE_MATERIALS_DIR).exists()
+
+    def test_note_id_alone_is_rejected_by_the_schema(self, source_dir, background_image):
+        """成对校验在 schema 层：只给笔记 id 连 payload 都构造不出来。"""
+        with pytest.raises(ValueError, match="来源素材抓取任务 id"):
+            _payload(source_dir, background_image, source_crawl_note_id="note-1")
 
 
 class TestParamsValidation:

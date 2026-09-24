@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from app.core.logging import get_logger
 
@@ -83,6 +83,11 @@ WARM_GUARD_LO, WARM_GUARD_HI = 0.35, 0.55
 #: 贴纸与背景的亮度跨度低于这个值就提醒「主体和背景太近了」
 MIN_SPAN_HINT = 40.0
 
+#: 校准边框（debug_border）：贴纸四周描一圈纯红边。线宽 2px 是肉眼可辨的
+#: 最小值 —— 再细的话缩放后（贴纸常被缩到背景宽的 10%）就看不清了。
+DEBUG_BORDER_COLOR = (255, 0, 0, 255)
+DEBUG_BORDER_WIDTH = 2
+
 
 class CutoutError(ValueError):
     """这张图抠不出来 / 贴不上。
@@ -94,13 +99,12 @@ class CutoutError(ValueError):
 
 @dataclass
 class CutoutParams:
-    """一套抠图 + 贴合参数。默认值等于 `抠图.py` 的命令行默认值，**只有 scale 例外**
-    （脚本默认 None = 原尺寸，这里默认 0.1，理由见下面那一行的注释）。
+    """一套抠图 + 贴合参数。默认值等于 `抠图.py` 的命令行默认值。
 
     前六个是抠图本身的（对应原脚本的 --hi-frac / --lo-frac / --dark-frac /
     --pedestal / --no-gate / --gate-pad / --no-warm-filter / --keep-color），
-    后六个是贴到背景上时的（对应 --scale / --pos / --search-from / --margin /
-    --rotate / --opacity）。
+    后七个是贴到背景上时的（对应 --scale / --pos / --search-from / --margin /
+    --rotate / --opacity，外加本模块自加的 debug_border —— 脚本里没有）。
     """
 
     # ---- 抠图 ----
@@ -114,16 +118,17 @@ class CutoutParams:
     keep_color: bool = False       # 保留原始像素颜色（默认统一成墨色）
 
     # ---- 贴合 ----
-    # 贴纸宽度占底图宽度的比例；None = 不缩放（按原尺寸居中贴）
-    # 默认 0.1 = 占底图宽的 10%，是**刻意偏离脚本默认**的一处：手机拍的手绘动辄
-    # 1080×1440，随手挑的背景常常比它小，原尺寸贴会直接判失败（见 composite）。
-    # 给个放得下的默认值，不改参数就能出一批能看的图；要原尺寸就显式传 None。
-    scale: Optional[float] = 0.1
+    # **贴合不变量**：贴上去的永远是整幅原图画布，笔画在画布里的位置跟它在原图里
+    # 一模一样 —— 永不裁边。scale 是整幅画布（含透明留白）宽度占底图宽度的比例；
+    # None = 原尺寸原位置居中贴。默认 0.8 = 画布整体缩到背景宽的 80%（手机拍的
+    # 1080×1440 原尺寸贴在大背景上只占三成宽，太小），清空输入框即回原尺寸。
+    scale: Optional[float] = 0.8
     pos: Optional[str] = None      # center（默认）/ auto / tl / tr / bl / br / "x,y"
     search_from: float = 0.35      # 自动落点的搜索起点（页高比例），pos=auto 时生效
     margin: int = 20               # 贴纸离底图边缘的最小距离
     rotate: float = 0.0            # 贴纸旋转角度（度）
     opacity: float = 1.0           # 贴纸不透明度 0–1
+    debug_border: bool = False     # 校准边框：贴纸描 2px 红边再贴，用来看实际落位与尺寸
 
     @classmethod
     def from_mapping(cls, data: Optional[Mapping[str, Any]]) -> "CutoutParams":
@@ -146,7 +151,11 @@ class CutoutParams:
                 kwargs[name] = None
                 continue
             try:
-                if spec.type is bool:
+                # 注意：模块顶部有 `from __future__ import annotations`，spec.type
+                # 拿到的是字符串 "bool" 而不是类型对象 —— 只写 `spec.type is bool`
+                # 恒为 False，gate / warm 不进任何分支、被静默丢掉（界面上关了
+                # 位置门，执行时却照旧开着）。两种写法都得认。
+                if spec.type in (bool, "bool"):
                     kwargs[name] = bool(value)
                 elif name == "scale" or name == "dark_frac":
                     kwargs[name] = float(value)
@@ -157,8 +166,6 @@ class CutoutParams:
                     kwargs[name] = int(value)
                 elif name == "pos":
                     kwargs[name] = str(value)
-                elif name == "keep_color":
-                    kwargs[name] = bool(value)
             except (TypeError, ValueError):
                 logger.warning("换背景参数 %s 的值不合法，已退回默认：%r", name, value)
         return cls(**kwargs)
@@ -180,6 +187,7 @@ class CutoutParams:
             "margin": self.margin,
             "rotate": self.rotate,
             "opacity": self.opacity,
+            "debug_border": self.debug_border,
         }
 
 
@@ -519,32 +527,21 @@ def resolve_position(spec: str, page: Image.Image, size: tuple[int, int],
         raise CutoutError(f"不认「{spec}」这个位置：用 center / auto / tl / tr / bl / br / x,y")
 
 
-def trim_to_alpha(rgba: np.ndarray, pad: int = 6) -> Image.Image:
-    """裁到不透明区域的包围盒（留一点抗锯齿边），别把整幅透明画布当贴纸。"""
-    image = Image.fromarray(rgba, "RGBA")
-    bb = bbox_of(rgba[..., 3] > 8)
-    if bb is None:
-        raise CutoutError("这张贴纸整幅都是透明的，没东西可贴")
-    x0, y0, x1, y1 = bb
-    return image.crop((max(0, x0 - pad), max(0, y0 - pad),
-                       min(image.width, x1 + 1 + pad), min(image.height, y1 + 1 + pad)))
-
-
 def composite(sticker: Image.Image, page: Image.Image,
               params: CutoutParams) -> tuple[Image.Image, tuple[int, int]]:
     """把抠好的图贴到背景上，返回 (成图, 落点)。
 
-    scale=None（脚本默认）时保持原尺寸、原画布，不裁边不缩放 —— 主体在画布里的
-    位置跟它在原图里一模一样，然后整体居中盖在背景图上；给了 scale 就裁到主体
-    包围盒再缩到「底图宽 × scale」，默认的 0.1 走的就是这条路。
+    **永不裁边**：贴的永远是整幅原图画布，主体在画布里的位置跟它在原图里
+    一模一样。scale=None（默认）时原尺寸居中盖上去；给了 scale 也是整幅画布
+    （含透明留白）一起缩到「底图宽 × scale」，笔画的相对位置不变。
 
     与脚本的一处刻意差别：贴纸比底图大时，脚本只打印一句警告然后照样裁掉 ——
     批量场景下这是**静默降质**。这里改成直接报错，让用户去调缩放或换背景。
     """
     st = sticker
     if params.scale is not None:
-        # 有 scale 就裁边 + 缩放到目标宽度（贴纸宽 = 底图宽 × scale）
-        st = trim_to_alpha(np.asarray(sticker))
+        # 有 scale 就整幅画布一起缩放（贴纸宽 = 底图宽 × scale）。
+        # 缩放前后画布四边到笔画的距离比例不变 —— 笔画在画布里的位置是保真的。
         target_w = max(1, int(page.width * params.scale))
         st = st.resize((target_w, max(1, round(st.height * target_w / st.width))), Image.LANCZOS)
     if params.rotate:
@@ -563,6 +560,20 @@ def composite(sticker: Image.Image, page: Image.Image,
         arr = np.asarray(st).copy()
         arr[..., 3] = np.round(arr[..., 3] * params.opacity).astype(np.uint8)
         st = Image.fromarray(arr, "RGBA")
+
+    if params.debug_border:
+        # 校准边框：贴纸矩形描一圈 2px 红边。贴纸的边界就是它实际落位的边界，
+        # 这圈红框让「贴了多大、落在哪」一眼可见 —— 永不裁边之后，它框住的
+        # 始终是整幅画布（原尺寸或缩放后），正是核对落位要盯的东西。放在 opacity
+        # 之后：半透明校准时边框也保持全红，不会跟墨色混在一起看不出边。
+        # 画在副本上：scale=None 且不旋转时 st 就是调用方手里的贴纸本体，原地画
+        # 会让同一张贴纸第二次贴合时带上旧红框（对照测试正是这么抓住的）。
+        # 复制的成本只在校准模式下付。
+        st = st.copy()
+        ImageDraw.Draw(st).rectangle(
+            (0, 0, st.width - 1, st.height - 1),
+            outline=DEBUG_BORDER_COLOR, width=DEBUG_BORDER_WIDTH,
+        )
 
     out = page.convert("RGB").copy()
     out.paste(st, pos, st)          # 带 mask 粘贴 = 标准 alpha 合成 out = 底×(1-a) + 墨×a
@@ -621,6 +632,9 @@ def render_one(source: Path, page: Image.Image, params: CutoutParams, *,
         "output": [out.width, out.height],
         "position": [pos[0], pos[1]],
         "scale": params.scale,
+        # 产物带没带校准红框：排查「为什么图上有红边」时先看这里，别翻任务参数
+        "debug_border": params.debug_border,
+        # 贴上去的画布尺寸 = 原图画布（scale=None）或整体缩放后的画布；永不裁边
         "sticker": [sticker.width, sticker.height],
     })
     return out, stats

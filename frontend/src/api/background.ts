@@ -19,11 +19,17 @@ export function createBackgroundJob(payload: BackgroundJobPayload): Promise<Back
   return post<BackgroundJob>('/background/jobs', payload)
 }
 
-/** 分页查询历史任务（不返回每张图的明细） */
+/**
+ * 分页查询历史任务（不返回每张图的明细）。
+ *
+ * 传 `source_crawl_job_id` 只列出来自该素材抓取任务的那些 —— 素材抓取页拿它
+ * 一次性把「这条抓取任务派生出的换背景任务」全捞出来，按笔记 id 分组挂到笔记行上。
+ */
 export function fetchBackgroundJobs(params: {
   page?: number
   page_size?: number
   status?: string
+  source_crawl_job_id?: number
 }): Promise<BackgroundJobListData> {
   return get<BackgroundJobListData>('/background/jobs', { ...params })
 }

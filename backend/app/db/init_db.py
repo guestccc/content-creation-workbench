@@ -6,6 +6,7 @@
 from typing import Optional
 
 from sqlalchemy import Column, inspect, text
+from sqlalchemy.schema import CreateIndex
 
 from app.core.logging import get_logger
 from app.db.base import Base
@@ -18,9 +19,10 @@ logger = get_logger(__name__)
 
 
 def init_db() -> None:
-    """创建所有尚不存在的数据表（已存在的表不会被修改），并补齐新增的列。"""
+    """创建所有尚不存在的数据表（已存在的表不会被修改），并补齐新增的列与索引。"""
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    _add_missing_indexes()
     logger.info("数据库表结构初始化完成")
 
 
@@ -108,4 +110,53 @@ def _add_missing_columns() -> int:
 
     if added:
         logger.info("共补齐 %s 个缺失的列", added)
+    return added
+
+
+def _add_missing_indexes() -> int:
+    """给已存在的表补上模型里新加的索引。
+
+    与补列同一个成因，但更隐蔽：`create_all` 只建**表**，已存在的表整个跳过
+    —— 连带 `__table_args__` 里新加的索引一起跳过。不补的话，「这里加了索引」
+    写在代码里、在用户现有的 workbench.db 上却并不存在，只在别人的新库里生效。
+
+    只做 `CREATE INDEX IF NOT EXISTS`：不删索引、不改定义、可以反复执行
+    （SQLite 与 Postgres 都认这个语法）。上 Alembic 之后这个函数应该整个删掉。
+
+    Returns:
+        本次补上的索引数。
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    added = 0
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue  # 新建的表由 create_all 负责，索引一定齐
+
+        present = {
+            index["name"] for index in inspector.get_indexes(table.name) if index["name"]
+        }
+        for index in sorted(table.indexes, key=lambda item: item.name or ""):
+            if not index.name or index.name in present:
+                continue
+            if not list(index.columns):
+                continue  # 表达式索引不是这里的目标（本仓库没有）
+
+            # 走 CreateIndex 而不是手写 DDL：SQLAlchemy 的 SQLite 反射会把
+            # 手写的 ("a", "b") 双引号列名误判成「表达式索引」跳过，导致
+            # 幂等检查每次都觉得索引不存在（建的出来、照不回来）。
+            try:
+                with engine.begin() as conn:
+                    conn.execute(CreateIndex(index, if_not_exists=True))
+            except Exception:  # noqa: BLE001 - 补索引失败不能让服务起不来
+                logger.exception("补索引失败 | %s.%s", table.name, index.name)
+                continue
+
+            columns = ", ".join(column.name for column in index.columns)
+            logger.info("补齐缺失的索引 | %s.%s (%s)", table.name, index.name, columns)
+            added += 1
+
+    if added:
+        logger.info("共补齐 %s 个缺失的索引", added)
     return added

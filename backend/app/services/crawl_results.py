@@ -282,6 +282,19 @@ def collect_results(output_dir: Path, platform: str) -> List[dict]:
     return notes
 
 
+def find_note(notes: List[dict], note_id: str) -> Optional[dict]:
+    """在一批归一化笔记里按 id 找一条；找不到返回 None。
+
+    统一按**字符串**比：id 在各平台原生的 jsonl 里可能是数字（抖音的
+    aweme_id 就是），而前端/路由传进来的一定是字符串。
+    """
+    target = str(note_id)
+    for note in notes:
+        if str(note.get("id")) == target:
+            return note
+    return None
+
+
 def local_media(
     output_dir: Path, platform: str, note_id: str
 ) -> Tuple[List[str], List[str], str]:
@@ -352,6 +365,11 @@ def _to_publish_time(value) -> str:
         except (ValueError, OSError, OverflowError):
             return str(value)
     return str(value)
+
+
+#: 公开别名：评论模块（crawl_comments）也要按同一口径归一化时间。「各平台的
+#: 时间单位不统一」这件事只该有一个实现，那边不重复写一遍量级判断。
+to_publish_time = _to_publish_time
 
 
 def media_file(output_dir: Path, relative: str) -> Optional[Path]:

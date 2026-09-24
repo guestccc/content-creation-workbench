@@ -129,6 +129,23 @@ class CrawlJob(Base, JobRemarkMixin):
         Text, nullable=False, default="", comment="cookie 登录串（敏感，不回显）"
     )
 
+    # ---------- 派生关系：补抓任务指回它的来源 ----------
+    # 形态照抄 BackgroundJob 的派生口径（models/background_job.py）：普通抓取任务
+    # 两列都是空，只有「对某条笔记补抓评论」这类派生任务才有值。
+    #
+    # 存在的意义是**把派生任务从历史列表里摘出去**（list_jobs 按
+    # source_crawl_job_id IS NULL 过滤）—— 补抓是用户在评论弹窗里的一个动作，
+    # 不是一次独立的抓取，混进历史列表只会把真正想要的那些任务淹掉。
+    # 另外删除原任务时要靠它级联删掉派生任务。
+    source_crawl_job_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="派生来源的任务 id；普通任务为 NULL"
+    )
+    # 非空 + 默认空串（与 BackgroundJob.source_background_note_id 一致）：
+    # 少一个 None/"" 的分支，筛选条件写起来只有一种形状。
+    source_crawl_note_id: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="", comment="派生任务针对的笔记 id；普通任务为空串"
+    )
+
     # ---------- 产物位置：一个任务一个独立输出目录 ----------
     # nullable 的原因：目录名带任务 id（job_<id>），而 id 要第一次 flush 才有
     # —— INSERT 那一刻这两列还是 NULL，同一事务内紧接着补上，提交时不会缺。
@@ -187,6 +204,8 @@ class CrawlJob(Base, JobRemarkMixin):
         Index("ix_crawl_jobs_status_id", "status", "id"),
         Index("ix_crawl_jobs_created", "created_at"),
         Index("ix_crawl_jobs_platform", "platform"),
+        # 派生任务：按「来源任务 + 笔记」查已有补抓，以及删原任务时找级联对象
+        Index("ix_crawl_jobs_source", "source_crawl_job_id", "source_crawl_note_id"),
     )
 
     def __repr__(self) -> str:

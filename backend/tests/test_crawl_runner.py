@@ -36,6 +36,11 @@ from tests.fakes import FakeMcPopen, mc_note
 FAKE_LAUNCHER = ["/fake/python"]
 FAKE_MC_ROOT = "/fake/MediaCrawler"
 
+#: 评论补抓喂进 --specified_id 的真实形态：带查询串、含 == 与 &（不过 shell）。
+XHS_URL_WITH_TOKEN = (
+    "https://www.xiaohongshu.com/explore/abc?xsec_token=TOKEN&xsec_source=pc_search"
+)
+
 #: 任务输出目录必须指到 tmp（conftest._isolate_crawl_output），否则假产物
 #: 会写进开发机真实的 materials/crawl/。
 pytestmark = pytest.mark.usefixtures("_isolate_crawl_output")
@@ -215,6 +220,34 @@ class TestBuildArgv:
         )
         assert "evil" not in argv
         assert "--rm" not in argv
+
+    def test_comment_refetch_argv(self, tmp_path):
+        """评论补抓派生任务的 argv：detail 模式 + 只喂一条链接 + 开着评论。
+
+        链接里带 `?xsec_token=…&…` 这类字符，走 list argv 不经过 shell，
+        原样作为一个参数传下去（与 detail 模式的既有形态一致）。
+        """
+        url = XHS_URL_WITH_TOKEN
+        argv = build_argv(
+            FAKE_LAUNCHER,
+            platform="xhs",
+            crawler_type="detail",
+            login_type="qrcode",
+            params={
+                "ids": [url],
+                "max_notes": 1,
+                "get_comments": True,
+                "get_sub_comments": True,
+                "max_comments": 50,
+            },
+            output_dir=str(tmp_path),
+        )
+        assert argv[argv.index("--type") + 1] == "detail"
+        assert argv[argv.index("--specified_id") + 1] == url
+        assert argv[argv.index("--crawler_max_notes_count") + 1] == "1"
+        assert argv[argv.index("--get_comment") + 1] == "true"
+        assert argv[argv.index("--get_sub_comment") + 1] == "true"
+        assert argv[argv.index("--max_comments_count_singlenotes") + 1] == "50"
 
 
 class TestHelpers:

@@ -19,6 +19,7 @@ from app.models.background_job import (
     BackgroundJobItemStatus,
     BackgroundJobStatus,
 )
+from app.models.crawl_job import CrawlJob
 from app.services import crawl_results
 from app.services.background_job_service import BackgroundJobService
 from tests.fakes import mc_note
@@ -68,6 +69,49 @@ def _error_message(response) -> str:
     return response.json()["error"]["message"]
 
 
+def _make_crawl_job(db_session, **extra) -> CrawlJob:
+    """造一条素材抓取任务行，给换背景任务当来源。
+
+    只要「这个 id 存在」就够了 —— 换背景这一侧不校验笔记是否真属于它
+    （抓取产物随时可能被清掉，那种校验只会造出「明明有来源却建不出来」）。
+    """
+    fields = {
+        "platform": "xhs",
+        "crawler_type": "search",
+        "login_type": "qrcode",
+        "params": {"keywords": ["保温杯"]},
+        **extra,
+    }
+    crawl = CrawlJob(**fields)
+    db_session.add(crawl)
+    db_session.commit()
+    return crawl
+
+
+@pytest.fixture()
+def crawled_note(tmp_path) -> dict:
+    """一份**真的** collect_results 产出：一条笔记两个 webp（xhs 落盘是 webp）。
+
+    两个「素材抓取 → 换背景」的接缝用例共用它：形状必须与前端拿到的完全一致
+    （绝对目录 + 相对路径清单），否则钉不住接口。
+    """
+    output_dir = tmp_path / "crawl"
+    note_dir = output_dir / "xhs" / "images" / "n1"
+    note_dir.mkdir(parents=True)
+    for name in ("1.webp", "2.webp"):
+        (note_dir / name).write_bytes(b"img")
+    jsonl_dir = output_dir / "xhs" / "jsonl"
+    jsonl_dir.mkdir(parents=True)
+    (jsonl_dir / "search_contents_a.jsonl").write_text(
+        json.dumps(mc_note("n1"), ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    notes = crawl_results.collect_results(output_dir, "xhs")
+    assert len(notes) == 1
+    assert Path(notes[0]["local_image_dir"]) == note_dir
+    return notes[0]
+
+
 class TestCreate:
     def test_envelope_and_fields(self, client, image_dir, background):
         data = _create(client, image_dir, background)
@@ -100,15 +144,12 @@ class TestCreate:
         # 没传的字段也落进快照，执行时不必回头找默认值
         assert data["params"]["hi_frac"] == 0.90
         assert data["params"]["gate"] is True
+        assert data["params"]["debug_border"] is False
 
-    def test_default_scale_is_a_tenth(self, client, image_dir, background):
-        """不传参数时缩放比例落到 0.1 = 占底图宽的 10%（脚本默认是「原尺寸」）。
-
-        默认「原尺寸」的话，1080×1440 的手绘碰上随手挑的小背景会整批判失败 ——
-        这条钉的就是那个默认值别再被改回去。
-        """
+    def test_default_scale_is_eight_tenths(self, client, image_dir, background):
+        """不传参数时 scale 落到 0.8 = 画布整体缩到背景宽的 80%（永不裁边）。"""
         data = _create(client, image_dir, background)
-        assert data["params"]["scale"] == 0.1
+        assert data["params"]["scale"] == 0.8
 
     def test_checked_subset(self, client, image_dir, background):
         data = _create(client, image_dir, background, files=["羊3.jpg", "羊1.png"])
@@ -132,29 +173,51 @@ class TestFromCrawlHandoff:
     按钮就会整批失败 —— 所以这里拿**真的** collect_results 输出走一遍接口。
     """
 
-    def test_crawled_note_images_can_be_handed_over(self, client, tmp_path, background):
-        output_dir = tmp_path / "crawl"
-        note_dir = output_dir / "xhs" / "images" / "n1"
-        note_dir.mkdir(parents=True)
-        for name in ("1.webp", "2.webp"):
-            (note_dir / name).write_bytes(b"img")
-        jsonl_dir = output_dir / "xhs" / "jsonl"
-        jsonl_dir.mkdir(parents=True)
-        (jsonl_dir / "search_contents_a.jsonl").write_text(
-            json.dumps(mc_note("n1"), ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-
-        notes = crawl_results.collect_results(output_dir, "xhs")
-        assert len(notes) == 1
-        note = notes[0]
-        assert Path(note["local_image_dir"]) == note_dir
-
+    def test_crawled_note_images_can_be_handed_over(self, client, crawled_note, background):
+        note = crawled_note
         # 前端在结果弹窗里做的翻译：相对路径取最后一段当文件名
         files = [rel.split("/")[-1] for rel in note["local_images"]]
         data = _create(client, note["local_image_dir"], background, files=files)
 
         assert data["total_images"] == 2
         assert [item["source_name"] for item in data["items"]] == ["1.webp", "2.webp"]
+
+    def test_note_handoff_is_traceable_back_to_the_crawl_job(
+        self, client, db_session, crawled_note, background
+    ):
+        """来源要能对上：建的时候就记下来，之后能按来源任务反查回来。
+
+        这是「素材抓取那边看得到派生任务」（需求 B）的数据面 —— 前端把
+        换背景任务挂到笔记行上，靠的就是这里查得到、且带得回笔记 id。
+        """
+        crawl = _make_crawl_job(db_session)
+        note = crawled_note
+        files = [rel.split("/")[-1] for rel in note["local_images"]]
+
+        data = _create(
+            client,
+            note["local_image_dir"],
+            background,
+            files=files,
+            source_crawl_job_id=crawl.id,
+            source_crawl_note_id=note["id"],
+        )
+        assert data["source_crawl_job_id"] == crawl.id
+        assert data["source_crawl_note_id"] == note["id"]
+
+        # 详情接口也带（「看详情」跳过去后要显示「来源：素材抓取任务 #N」）
+        detail = client.get(f"/api/v1/background/jobs/{data['id']}").json()["data"]
+        assert detail["source_crawl_job_id"] == crawl.id
+        assert detail["source_crawl_note_id"] == note["id"]
+
+        # 反向：按来源任务过滤能查回它，且列表接口就带笔记 id ——
+        # 抓取页的简表只调列表，不能逼它为每行再去拉一次明细
+        listed = client.get(
+            "/api/v1/background/jobs", params={"source_crawl_job_id": crawl.id}
+        ).json()["data"]
+        assert listed["total"] == 1
+        assert listed["items"][0]["id"] == data["id"]
+        assert listed["items"][0]["source_crawl_note_id"] == note["id"]
 
 
 class TestCreateValidation:
@@ -286,6 +349,125 @@ class TestListAndDetail:
 
     def test_invalid_page_is_422(self, client):
         assert client.get("/api/v1/background/jobs", params={"page": 0}).status_code == 422
+
+
+class TestSourceProvenance:
+    """来源字段（source_crawl_job_id / source_crawl_note_id）的接口契约。
+
+    它只是一对**弱关联**的溯源列：没有外键、没有级联、不影响任务能不能跑。
+    这几条用例把「弱」这个度钉住 —— 该记的记下、不该因为来源而挡住创建。
+    """
+
+    def test_defaults_to_empty(self, client, image_dir, background):
+        """自己挑目录建的任务没有来源；前端靠「任务 id 为空」判断不是抓取带过来的。"""
+        data = _create(client, image_dir, background)
+        assert data["source_crawl_job_id"] is None
+        assert data["source_crawl_note_id"] == ""
+
+    def test_unknown_source_crawl_job_is_400(self, client, image_dir, background):
+        """来源任务不存在：400，而且**不能留下**半个产物目录。
+
+        校验必须早于建输出目录 —— 晚一步，用户每试一次就多一个空的
+        background-<时间戳>/ 目录，还没法从界面上看出来。
+        """
+        response = client.post(
+            "/api/v1/background/jobs",
+            json={
+                "input_path": str(image_dir),
+                "background_path": str(background),
+                "source_crawl_job_id": 999,
+                "source_crawl_note_id": "n1",
+            },
+        )
+        assert response.status_code == 400
+        assert "来源素材抓取任务不存在" in _error_message(response)
+
+        assert client.get("/api/v1/background/jobs").json()["data"]["total"] == 0
+        materials = Path(settings.SCENE_MATERIALS_DIR)
+        assert list(materials.rglob("background-*")) == []
+
+    def test_note_without_job_is_422(self, client, image_dir, background):
+        """只给笔记 id、不给任务 id：落下来是条谁也解释不了的记录。"""
+        response = client.post(
+            "/api/v1/background/jobs",
+            json={
+                "input_path": str(image_dir),
+                "background_path": str(background),
+                "source_crawl_note_id": "n1",
+            },
+        )
+        assert response.status_code == 422
+        assert "来源素材抓取任务 id" in response.text
+
+    def test_blank_note_id_counts_as_no_source(
+        self, client, db_session, image_dir, background
+    ):
+        """全空白等于没给 —— 与响应里的空串口径一致，别存进去一个空格。"""
+        crawl = _make_crawl_job(db_session)
+        data = _create(
+            client, image_dir, background,
+            source_crawl_job_id=crawl.id, source_crawl_note_id="   ",
+        )
+        assert data["source_crawl_note_id"] == ""
+
+    def test_list_filters_by_source_crawl_job(
+        self, client, db_session, image_dir, background
+    ):
+        """过滤要真的生效：没来源的、别的来源的都不能混进来。"""
+        first = _make_crawl_job(db_session)
+        second = _make_crawl_job(db_session, platform="dy")
+
+        _create(client, image_dir, background)  # 手工建的，没有来源
+        _create(
+            client, image_dir, background,
+            source_crawl_job_id=first.id, source_crawl_note_id="n1",
+        )
+        _create(
+            client, image_dir, background,
+            source_crawl_job_id=first.id, source_crawl_note_id="n2",
+        )
+        _create(
+            client, image_dir, background,
+            source_crawl_job_id=second.id, source_crawl_note_id="n9",
+        )
+
+        data = client.get(
+            "/api/v1/background/jobs", params={"source_crawl_job_id": first.id}
+        ).json()["data"]
+        assert data["total"] == 2
+        assert {item["source_crawl_note_id"] for item in data["items"]} == {"n1", "n2"}
+
+    def test_source_filter_rejects_non_positive(self, client):
+        """id 从 1 开始：0 在路由层挡掉，不能退化成「不过滤、返回全部」。"""
+        assert (
+            client.get(
+                "/api/v1/background/jobs", params={"source_crawl_job_id": 0}
+            ).status_code
+            == 422
+        )
+
+    def test_deleting_the_crawl_job_keeps_the_background_job(
+        self, client, db_session, image_dir, background
+    ):
+        """弱关联的守护：抓取任务删了，换背景任务还在、来源记录也还在。
+
+        没有外键、没有级联 —— 删抓取任务（连同产物）是常规操作，不该反过来
+        动到已经跑完的换背景产物。来源 id 就此变成一个指向已消失任务的标记，
+        这是可接受的（与 finalcut 的 copy_job_id 同一口径）。
+        """
+        crawl = _make_crawl_job(db_session)
+        crawl_id = crawl.id
+        data = _create(
+            client, image_dir, background,
+            source_crawl_job_id=crawl_id, source_crawl_note_id="n1",
+        )
+
+        db_session.delete(crawl)
+        db_session.commit()
+
+        detail = client.get(f"/api/v1/background/jobs/{data['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["source_crawl_job_id"] == crawl_id
 
 
 class TestStaticRouteOrder:

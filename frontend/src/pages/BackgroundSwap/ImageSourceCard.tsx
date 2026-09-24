@@ -29,7 +29,10 @@ interface ImageSourceCardProps {
   outputDir: string
   /** 从别的页面带图进来时的说明；没有就说不出「这批图哪来的」 */
   prefillNotice?: string
+  /** 打开目录选择器自己挑一个目录 */
   onPickInput: () => void
+  /** 打开「从素材抓取选图」弹窗挑一条笔记的图 */
+  onPickFromCrawl: () => void
   onPickOutput: () => void
 }
 
@@ -38,6 +41,7 @@ export default function ImageSourceCard({
   outputDir,
   prefillNotice,
   onPickInput,
+  onPickFromCrawl,
   onPickOutput,
 }: ImageSourceCardProps) {
   const { path, data, images, selected } = dir
@@ -59,6 +63,11 @@ export default function ImageSourceCard({
             <Button onClick={onPickInput}>选择目录</Button>
             <PathBox value={path} placeholder="尚未选择" />
           </Space.Compact>
+          {/* 抓取产物落在 <输出目录>/<平台>/images/<笔记 id>/ 这种分层目录里，
+              目录选择器不递归，手动点进去看不到图 —— 所以给一条专门的入口 */}
+          <Button type="link" style={{ paddingLeft: 0 }} onClick={onPickFromCrawl}>
+            从素材抓取选图
+          </Button>
           {prefillNotice && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {prefillNotice}

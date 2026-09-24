@@ -61,13 +61,13 @@ class BackgroundJobParams(BaseModel):
     )
 
     # ---------- 贴合 ----------
-    # 默认 0.1 而不是 None（原尺寸）：手绘原图动辄 1080×1440，随手挑的背景常常比它
-    # 小，原尺寸贴会直接判失败（见 services/cutout.py 的「贴纸比背景大」）。给个能
-    # 放得下的默认值，用户不改参数就能出一批能看的图，嫌小再往上调。
-    # 留空（null）仍然有效 = 不缩放、按原尺寸居中贴，没把这个能力删掉。
+    # 贴合不变量：贴的永远是整幅原图画布、笔画保持原图位置（永不裁边）。
+    # 默认 0.8 = 画布整体缩到背景宽的 80%（原尺寸贴大背景只占三成宽，偏小）；
+    # 留空 = 原尺寸原位置贴。背景比画布小时会判失败并提示调缩放或换大背景。
     scale: Optional[float] = Field(
-        default=0.1, gt=0.0, le=10.0,
-        description="贴纸宽度占底图宽度的比例（默认 0.1，即占底图宽的 10%）；留空 = 不缩放，按原尺寸居中贴",
+        default=0.8, gt=0.0, le=10.0,
+        description="整幅画布（含透明留白）宽度占底图宽度的比例（默认 0.8）；留空 = 不缩放，"
+                    "原尺寸原位置居中贴。任何情况下都不裁边",
     )
     pos: Optional[str] = Field(
         default=None,
@@ -85,6 +85,13 @@ class BackgroundJobParams(BaseModel):
         default=0.0, ge=-360.0, le=360.0, description="贴纸旋转角度（度）"
     )
     opacity: float = Field(default=1.0, ge=0.0, le=1.0, description="贴纸不透明度 0–1")
+    debug_border: bool = Field(
+        default=False,
+        description=(
+            "校准红框：给贴纸描一圈 2px 红边再盖到背景上 —— 贴纸边界即实际落位边界，"
+            "用来核对贴了多大、落在哪。永不裁边，所以红框始终框住整幅画布"
+        ),
+    )
 
     @field_validator("pos")
     @classmethod
@@ -145,9 +152,26 @@ class BackgroundJobCreate(BaseModel):
         default=None,
         description="只处理输入目录下的这些文件名（由前端从列表里勾选），留空表示全部图片",
     )
+    # ---------- 来源（跨域弱关联，仅溯源） ----------
+    # 原图多半是从素材抓取的结果里带过来的，记一笔来源，之后能答「这条任务是
+    # 拿哪条笔记跑的」。不校验「这条笔记是否属于该抓取任务」：抓取产物随时可能
+    # 被清掉，那种校验只会造出「明明有来源却建不出来」。与 finalcut 的
+    # copy_job_id 同级 —— 只记录，不产生任何约束。
+    source_crawl_job_id: Optional[int] = Field(
+        default=None, ge=1, description="来源素材抓取任务 id（仅溯源，留空表示不是从抓取结果带过来的）"
+    )
+    source_crawl_note_id: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "来源笔记 id（抓取产物 <平台>/images/<笔记 id>/ 的目录名）。"
+            "只当分组键用，**从不参与路径拼接** —— 真正决定读哪个目录的是 input_path"
+        ),
+    )
     params: BackgroundJobParams = Field(
         default_factory=BackgroundJobParams,
-        description="算法参数（默认值 = 脚本默认，只有缩放比例为 0.1 是有意改过的）",
+        description="算法参数（默认值 = 脚本默认，只有缩放比例为 0.8 是有意改过的；"
+                    "校准红框是本服务自加的开关，脚本里没有）",
     )
 
     @field_validator("input_path")
@@ -188,6 +212,23 @@ class BackgroundJobCreate(BaseModel):
             seen.add(cleaned)
             result.append(cleaned)
         return result or None
+
+    @field_validator("source_crawl_note_id")
+    @classmethod
+    def _check_source_note_id(cls, value: str) -> str:
+        """笔记 id 去掉首尾空白；全空白等于「没有来源笔记」。"""
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _check_source_pair(self) -> "BackgroundJobCreate":
+        """来源的两个字段要么都给、要么都不给。
+
+        只有笔记 id 没有任务 id，落下来是一条谁也解释不了的记录（页面上要
+        显示「素材抓取任务 #?」），不如在入口拦掉。
+        """
+        if self.source_crawl_note_id and self.source_crawl_job_id is None:
+            raise ValueError("给了来源笔记 id 就必须同时给来源素材抓取任务 id")
+        return self
 
 
 # --------------------------------------------------------------------------
@@ -255,6 +296,13 @@ class BackgroundJobResponse(TimestampMixin):
     input_path: str = Field(description="原图输入路径")
     output_dir: str = Field(description="产物输出目录")
     files: List[str] = Field(description="勾选的原图文件名清单；为空表示处理目录下全部")
+    source_crawl_job_id: Optional[int] = Field(
+        default=None, description="来源素材抓取任务 id；为空表示不是从抓取结果带过来的"
+    )
+    source_crawl_note_id: str = Field(
+        description="来源笔记 id（空串表示没有来源）。列表接口**也带**它 —— 抓取那边"
+                    "要靠它把任务归到笔记行上"
+    )
     background_path: str = Field(description="背景图绝对路径")
     background_name: str = Field(description="背景图文件名")
     params: dict = Field(description="实际生效的算法参数")
@@ -299,6 +347,8 @@ class BackgroundJobResponse(TimestampMixin):
             input_path=model.input_path,
             output_dir=model.output_dir,
             files=list(model.files or []),
+            source_crawl_job_id=model.source_crawl_job_id,
+            source_crawl_note_id=model.source_crawl_note_id,
             background_path=model.background_path,
             background_name=os.path.basename(model.background_path),
             params=dict(model.params or {}),

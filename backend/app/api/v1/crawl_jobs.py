@@ -9,6 +9,10 @@
 - GET    /jobs                    历史任务分页列表
 - GET    /jobs/{id}               任务详情（轮询进度也用它）
 - GET    /jobs/{id}/results       归一化笔记列表（跨平台字段已对齐）
+- GET    /jobs/{id}/ai-copies     某条笔记已生成的 AI 文案（?note_id=）
+- POST   /jobs/{id}/ai-copies/stream  流式生成/换一批某条笔记的 AI 文案（SSE）
+- GET    /jobs/{id}/comments      某条笔记的评论树 + 补抓状态（?note_id=）
+- POST   /jobs/{id}/comments/refetch  对一条笔记补抓评论（建派生任务，不进历史列表）
 - GET    /jobs/{id}/log           MC 子进程日志尾部
 - GET    /jobs/{id}/media/{path}  已下载的本地媒体文件（图片/视频）
 - POST   /jobs/{id}/cancel        取消任务
@@ -18,26 +22,89 @@
 - DELETE /jobs/{id}               删除任务记录（?purge_files=true 时产物一并清）
 """
 
-from fastapi import APIRouter, Path as PathParam, Query
-from fastapi.responses import FileResponse
+import json
+from typing import Iterator, Tuple
 
-from app.api.deps import CrawlJobServiceDep
+from fastapi import APIRouter, Path as PathParam, Query
+from fastapi.responses import FileResponse, StreamingResponse
+
+from app.api.deps import (
+    CrawlJobServiceDep,
+    CrawlNoteCopyServiceDep,
+    SessionFactoryDep,
+)
 from app.core.logging import get_logger
 from app.models.crawl_job import CrawlJobStatus, CrawlPlatform
 from app.schemas.common import ApiResponse, JobBatchDeleteRequest, JobRemarkUpdate
 from app.schemas.crawl_job import (
+    CrawlCommentRefetchCreate,
     CrawlEnvironmentResponse,
     CrawlJobCreate,
     CrawlJobListData,
     CrawlJobResponse,
     CrawlLogData,
+    CrawlNoteAiCopyData,
+    CrawlNoteAiCopyGenerate,
+    CrawlNoteAiCopyResponse,
     CrawlNoteResponse,
     CrawlResultsData,
+    NoteCommentsData,
 )
+from app.services.ai_client import AiError
 from app.services.crawler_env import probe_environment
 
 router = APIRouter(prefix="/crawl", tags=["素材抓取"])
 logger = get_logger(__name__)
+
+
+def _ai_error_code(kind: str) -> str:
+    """把失败的种类映射成对外的错误码（code 给前端分支用，message 直接展示）。
+
+    前端只认 AI_NOT_CONFIGURED / AI_AUTH_FAILED 给「去配置」入口（key 填错
+    也该去配置），其余一律给「重试」。
+
+    bad_response 与解析层的 ValueError 归同一个码（AI_BAD_RESPONSE）：对用户
+    都是「模型这轮返回的内容没法用」，重试是唯一动作 —— 分成两个码只会让人
+    以为要分别处理。
+
+    kind 是 service 层给的：`AiError.kind` 加一个 `"db"`（写库失败）。
+    认不出的（含 service 兜底的 "unknown"）一律 AI_UPSTREAM。
+    """
+    mapping = {
+        "config": "AI_NOT_CONFIGURED",
+        "auth": "AI_AUTH_FAILED",
+        "rate_limit": "AI_RATE_LIMIT",
+        "timeout": "AI_TIMEOUT",
+        "bad_response": "AI_BAD_RESPONSE",
+        "db": "DB_ERROR",
+    }
+    return mapping.get(kind, "AI_UPSTREAM")
+
+
+def _sse_frames(events: Iterator[Tuple[str, dict]]) -> Iterator[str]:
+    """把 service 的 (事件名, 数据) 拼成 SSE 帧。
+
+    帧格式固定 `event: X\\ndata: {...}\\n\\n`（双换行 = 一帧结束）。数据统一走
+    JSON 且 `ensure_ascii=False`：中文不转义，省带宽，抓包也看得懂。
+
+    两处转换放在这里而不是 service 里，是为了让 service 不认识 HTTP 那一套 ——
+    service 只说「失败的种类是 auth」，错误码由本层翻译。
+    """
+    for event, data in events:
+        if event == "error":
+            payload = {
+                "code": _ai_error_code(str(data.get("kind", ""))),
+                "message": str(data.get("message", "")),
+            }
+        elif event == "done":
+            payload = {
+                "result": CrawlNoteAiCopyResponse.from_model(data["row"]).model_dump(
+                    mode="json"
+                )
+            }
+        else:
+            payload = data
+        yield f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.get(
@@ -163,6 +230,127 @@ def get_results(
             ],
         )
     )
+
+
+@router.get(
+    "/jobs/{job_id}/ai-copies",
+    response_model=ApiResponse[CrawlNoteAiCopyData],
+    summary="某条笔记已生成的 AI 文案",
+)
+def get_note_ai_copy(
+    service: CrawlNoteCopyServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    note_id: str = Query(..., min_length=1, max_length=200, description="平台原生笔记 id"),
+) -> ApiResponse[CrawlNoteAiCopyData]:
+    """读一条笔记已落库的 AI 文案；没生成过返回 found=false（不是错误）。
+
+    note_id 走 query 不走 path：平台原生 id 的字符集没验证过，含 `/` 之类
+    的字符会被 path 参数吞掉。
+    """
+    copy = service.get_copy(job_id, note_id)
+    return ApiResponse(
+        data=CrawlNoteAiCopyData(
+            found=copy is not None,
+            result=CrawlNoteAiCopyResponse.from_model(copy) if copy is not None else None,
+        )
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/ai-copies/stream",
+    summary="流式生成/换一批某条笔记的 AI 文案（SSE）",
+)
+def stream_note_ai_copy(
+    payload: CrawlNoteAiCopyGenerate,
+    service: CrawlNoteCopyServiceDep,
+    session_factory: SessionFactoryDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> StreamingResponse:
+    """流式生成，边生成边把思维链推给前端（前端据此逐字显示 AI 的思考过程）。
+
+    一条（任务, 笔记）只留最新一份：已生成过再调就是「换一批」（覆盖）。
+    AI 调用/解析失败时不落行 —— 库里有内容 = 有一份能用的文案。
+
+    帧契约（`event` / `data`）：
+
+    | event       | data                                        | 含义           |
+    | ----------- | ------------------------------------------- | -------------- |
+    | `reasoning` | `{"text": "增量"}`                          | 思维链增量     |
+    | `done`      | `{"result": CrawlNoteAiCopyResponse}`       | 解析+落库完成  |
+    | `error`     | `{"code": "AI_...", "message": "..."}`      | 失败（含 code）|
+
+    为什么「生成失败」也回 200：流一旦开出去就改不了状态码了。真正的 4xx/5xx
+    只留给开流**之前**的预检（任务不存在 / 笔记不在结果里 → 404）。
+
+    sync def + 同步生成器：Starlette 会把迭代丢进线程池，不阻塞事件循环。
+    响应头带 `X-Accel-Buffering: no` 掐掉反向代理的缓冲（否则整段会攒到
+    最后一次性到达，思维链的「逐字」就没了）。
+    """
+    ctx = service.prepare(job_id, payload.note_id)
+    return StreamingResponse(
+        _sse_frames(service.stream(ctx, session_factory)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/comments",
+    response_model=ApiResponse[NoteCommentsData],
+    summary="某条笔记的评论树（含补抓状态）",
+)
+def get_note_comments(
+    service: CrawlJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+    note_id: str = Query(..., min_length=1, max_length=200, description="平台原生笔记 id"),
+) -> ApiResponse[NoteCommentsData]:
+    """读一条笔记的评论：评论树 + 原任务的评论采集配置 + 最新一次补抓的状态。
+
+    note_id 走 query 不走 path：平台原生 id 的字符集没验证过，含 `/` 之类
+    的字符会被 path 参数吞掉（与 ai-copies 同口径）。
+
+    读取口径是「根任务产物 + 它全部补抓任务的产物」合并去重：评论可能抓过
+    好几次，散在各自输出目录里。前端在补抓进行中**轮询这个接口本身**即可
+    （refetch 字段带补抓状态），不必再盯第二个数据源。
+
+    三态判定交给前端，依据 comments_config.enabled：
+    未开评论采集 → 引导补抓；开了但没抓到 → 「可能确实没有」；有评论 → 列表。
+    """
+    return ApiResponse(data=NoteCommentsData(**service.get_note_comments(job_id, note_id)))
+
+
+@router.post(
+    "/jobs/{job_id}/comments/refetch",
+    response_model=ApiResponse[CrawlJobResponse],
+    status_code=201,
+    summary="对一条笔记补抓评论（建一条派生任务）",
+)
+def create_comment_refetch(
+    payload: CrawlCommentRefetchCreate,
+    service: CrawlJobServiceDep,
+    job_id: int = PathParam(..., ge=1, description="任务 ID"),
+) -> ApiResponse[CrawlJobResponse]:
+    """对一条笔记补抓评论：建一条 detail 模式的派生任务（只抓这一条）。
+
+    派生任务**不进历史任务列表**（只在评论弹窗里露脸），删除原任务时会级联
+    删除。登录方式 / 无头 / cookie **默认继承原任务、请求里给了就覆盖**
+    （沿用旧 cookie 只能在服务端做 —— 凭据只存在于数据库行里）；但**不继承
+    max_comments** —— 触发补抓的典型场景恰恰是原任务没开评论或条数为 0。
+
+    这条笔记已经有一个未结束的补抓任务时返回 409（details 带那条任务的 id，
+    前端拿它直接切到「正在补抓」，等价于幂等）。B 站、知乎 CDN 直链等补抓不了
+    的情况在点击时直接 400 给出原因，不排一个注定失败的任务。
+    """
+    job = service.create_comment_refetch(
+        job_id,
+        payload.note_id,
+        max_comments=payload.max_comments,
+        sub_comments=payload.sub_comments,
+        login_type=payload.login_type,
+        cookies=payload.cookies,
+        headless=payload.headless,
+    )
+    return ApiResponse(data=CrawlJobResponse.from_model(job))
 
 
 @router.get(

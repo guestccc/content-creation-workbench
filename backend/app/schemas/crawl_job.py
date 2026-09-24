@@ -15,6 +15,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from app.models.crawl_ai_copy import CrawlNoteAiCopy
 from app.models.crawl_job import (
     CrawlJob,
     CrawlJobStatus,
@@ -273,3 +274,192 @@ class CrawlLogData(BaseModel):
     """MC 子进程日志尾部。"""
 
     log: str = Field(description="日志尾部文本（默认 4000 字符）")
+
+
+# ----------------------------------------------------------------------
+# 笔记 AI 文案（一条（任务, 笔记）只留最新一份，「换一批」是覆盖）
+# ----------------------------------------------------------------------
+
+
+class NotePlatformCopy(BaseModel):
+    """一个平台的 AI 生成文案。"""
+
+    titles: List[str] = Field(description="候选标题（至多 5 条）")
+    intros: List[str] = Field(description="候选简介（至多 3 条）")
+
+
+class CrawlNoteAiCopyPlatforms(BaseModel):
+    """两个目标平台各一份。"""
+
+    xhs: NotePlatformCopy = Field(description="小红书文案")
+    dy: NotePlatformCopy = Field(description="抖音文案")
+
+
+class CrawlNoteAiCopyResponse(TimestampMixin):
+    """一条笔记已落库的 AI 文案。"""
+
+    job_id: int = Field(description="来源抓取任务 id")
+    note_id: str = Field(description="平台原生笔记 id")
+    platforms: CrawlNoteAiCopyPlatforms = Field(description="两个平台的候选文案")
+    model: str = Field(description="生成用的模型名")
+    tokens_used: int = Field(description="本次生成的 token 用量")
+    reasoning: str = Field(
+        default="", description="模型思维链原文；老行或模型不支持思考时是空串"
+    )
+    created_at: datetime = Field(description="首次生成时间")
+    updated_at: datetime = Field(description="最近一次生成（换一批）时间")
+
+    @classmethod
+    def from_model(cls, model: CrawlNoteAiCopy) -> "CrawlNoteAiCopyResponse":
+        """由 ORM 对象构造响应模型；payload dict 的形状由 parse_copy_payload 保证。"""
+        return cls(
+            job_id=model.crawl_job_id,
+            note_id=model.note_id,
+            platforms=CrawlNoteAiCopyPlatforms(**(model.payload or {})),
+            model=model.model,
+            tokens_used=model.tokens_used,
+            # 老行没有思维链（补列补出来的空串），前端据此整块不渲染
+            reasoning=model.reasoning or "",
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+class CrawlNoteAiCopyData(BaseModel):
+    """「这条笔记有没有已生成的 AI 文案」的查询结果。"""
+
+    found: bool = Field(description="是否已有落库的生成结果")
+    result: Optional[CrawlNoteAiCopyResponse] = Field(
+        default=None, description="已落库的文案；found=false 时为 null"
+    )
+
+
+class CrawlNoteAiCopyGenerate(BaseModel):
+    """生成/换一批 AI 文案的请求体。note_id 走 body 不走 path（平台原生 id
+    字符集未验证过，可能含 URL 敏感字符）。"""
+
+    note_id: str = Field(min_length=1, max_length=200, description="平台原生笔记 id")
+
+
+# ----------------------------------------------------------------------
+# 笔记评论（查看 + 对单条笔记补抓）
+# ----------------------------------------------------------------------
+
+
+class CrawlComment(BaseModel):
+    """一条归一化后的评论（跨平台字段已对齐，见 services/crawl_comments.py）。
+
+    children 是子评论（二级及更深，深度封顶后提升上来的也算一级）。
+    orphan=true 表示它的父评论没被抓到（只抓到部分子评论时会出现），
+    前端要标明「父评论未抓到」，不能让它看起来像一级评论。
+    """
+
+    id: str = Field(description="评论 id（平台原生值；缺失时为回退键，见 crawl_comments）")
+    content: str = Field(default="", description="评论内容")
+    nickname: str = Field(default="", description="评论者昵称")
+    liked_count: str = Field(
+        default="",
+        description="点赞数（原样透传字符串；快手/贴吧不落盘点赞，给空串以区分「0 个赞」）",
+    )
+    created_at: str = Field(default="", description="发布时间（统一转 ISO，转不了原样返回）")
+    sub_comment_count: int = Field(
+        default=0,
+        description="平台报告的子评论总数（可能比 children 多 —— 多出来的是没抓到的）",
+    )
+    pictures: List[str] = Field(
+        default_factory=list,
+        description=(
+            "图片地址列表（仅 xhs/dy 有）。**两种形态混合**：http(s) 是平台"
+            "原图 URL（时效签名，过期即 403 —— 通常是没缓存成功的）；其余是"
+            "相对任务输出目录的本地缓存路径，走 /jobs/{id}/media/{path} 取"
+        ),
+    )
+    orphan: bool = Field(default=False, description="父评论未抓到、被提升为一级展示")
+    children: List["CrawlComment"] = Field(default_factory=list, description="子评论")
+
+
+class CrawlCommentsConfig(BaseModel):
+    """原任务的评论采集配置（弹窗三态判定的依据）。"""
+
+    enabled: bool = Field(
+        description="原任务是否实际会抓评论（get_comments 且 max_comments>0 才算）"
+    )
+    max_comments: int = Field(description="原任务每条笔记的一级评论上限")
+    sub_comments: bool = Field(description="原任务是否抓二级评论")
+
+
+class CrawlCommentRefetchState(BaseModel):
+    """一次评论补抓任务的状态（补抓任务不进历史列表，这是它唯一的可见入口）。"""
+
+    job_id: int = Field(description="补抓任务 id（取消用 /jobs/{id}/cancel）")
+    status: str = Field(description="任务状态（pending/running/success/failed/cancelled）")
+    error_message: str = Field(default="", description="失败原因")
+    comment_count: int = Field(
+        default=0,
+        description="这次补抓自己抓到的评论条数（不能用任务的 note_count 顶，那边数的是内容行）",
+    )
+    queued_ahead: int = Field(
+        default=0,
+        description="排在它前面的待执行任务数（MC 单任务串行，pending 时解释「为什么在转圈」）",
+    )
+
+
+class NoteCommentsData(BaseModel):
+    """一条笔记的评论查询结果：评论树 + 原任务配置 + 最新一次补抓状态。"""
+
+    job_id: int = Field(description="根任务 id（传进来的是派生任务时已解析回根任务）")
+    note_id: str = Field(description="平台原生笔记 id")
+    platform: str = Field(description="平台标识")
+    comments: List[CrawlComment] = Field(description="评论树（一级评论，子评论在 children）")
+    total: int = Field(description="评论总条数（含所有层级）")
+    top_level_total: int = Field(description="一级评论条数")
+    comments_config: CrawlCommentsConfig = Field(description="原任务的评论采集配置")
+    login_type: str = Field(description="根任务的登录方式（补抓设置里登录方式的默认选中项）")
+    headless: bool = Field(description="根任务是否无头跑浏览器（补抓设置里无头开关的默认值）")
+    refetch: Optional[CrawlCommentRefetchState] = Field(
+        default=None, description="最新一次补抓任务的状态；从没补抓过为 null"
+    )
+
+
+class CrawlCommentRefetchCreate(BaseModel):
+    """对一条笔记补抓评论的请求体。
+
+    note_id 走 body 不走 path（与 AI 文案同口径：平台原生 id 字符集未验证过，
+    可能含 `/` 之类的字符被 path 参数吞掉）。
+
+    条数与二级开关**不继承原任务**（触发补抓的典型场景恰恰是原任务没开或
+    max_comments=0，继承它等于抓 0 条还报 success），由用户在弹窗里现选。
+
+    登录方式 / 无头是**可选覆盖**：不传 = 沿用原任务（cookie 登录的常见败因是
+    串已过期，补抓是用户换登录方式的天然时机，所以弹窗里要能改选）。
+    cookies 是凭据：只进不出，沿用原任务存的串由服务端读库完成，前端拿不到
+    也不需要拿到。
+    """
+
+    note_id: str = Field(min_length=1, max_length=200, description="平台原生笔记 id")
+    max_comments: int = Field(
+        default=20, ge=1, le=200, description="补抓的一级评论条数上限"
+    )
+    sub_comments: bool = Field(default=True, description="是否补抓二级评论")
+    login_type: Optional[str] = Field(
+        default=None,
+        description=f"登录方式：{'/'.join(CrawlLoginType.ALL)}；不传 = 沿用原任务",
+    )
+    cookies: Optional[str] = Field(
+        default=None,
+        max_length=8000,
+        description="新贴的 cookie 串；login_type=cookie 且不传（或留空）时沿用原任务存的 cookie",
+    )
+    headless: Optional[bool] = Field(
+        default=None, description="是否无头跑浏览器；不传 = 沿用原任务"
+    )
+
+    @field_validator("login_type")
+    @classmethod
+    def _check_login_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        cleaned = value.strip().lower()
+        if cleaned not in CrawlLoginType.ALL:
+            raise ValueError(f"不支持的登录方式：{value}（可选：{', '.join(CrawlLoginType.ALL)}）")
+        return cleaned
